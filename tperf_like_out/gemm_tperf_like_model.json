@@ -1,0 +1,77 @@
+{
+  "model_name": "tperf_like_gemm_v1",
+  "kernel_name": "matmul_kernel",
+  "arch": "sm_86",
+  "M": 1024,
+  "N": 1024,
+  "K": 1024,
+  "block_M": 128,
+  "block_N": 128,
+  "block_K": 32,
+  "k_tiles": 32,
+  "grid_x": 8,
+  "grid_y": 8,
+  "num_ctas": 64,
+  "pipeline_stages": 3,
+  "resident_ctas_per_sm": 2,
+  "full_wave_capacity_ctas": 168,
+  "full_waves": 0,
+  "tail_ctas": 64,
+  "total_latency_us": 75.9041723194386,
+  "total_latency_ms": 0.0759041723194386,
+  "estimated_tflops": 28.29203695104442,
+  "overall_l2_hit_rate": 0.875,
+  "formula": "T = T_pro + max(K_tiles - d, 0) * T_steady + T_epi + T_store, d = stages * resident_ctas_per_SM - 1",
+  "hardware": {
+    "num_sms": 84,
+    "smem_per_sm_bytes": 102400,
+    "max_threads_per_sm": 1536,
+    "cta_limit_per_sm": 16,
+    "l2_capacity_bytes": 6291456,
+    "tensor_peak_tflops": 125.0,
+    "l2_bandwidth_gbs": 3000.0,
+    "ddr_bandwidth_gbs": 760.0,
+    "smem_bandwidth_gbs": 12000.0,
+    "tensor_efficiency": 0.75,
+    "l2_efficiency": 0.75,
+    "ddr_efficiency": 0.75,
+    "smem_efficiency": 0.7
+  },
+  "waves": [
+    {
+      "wave_index": 0,
+      "ctas": 64,
+      "active_sms": 32,
+      "resident_ctas_per_sm": 2,
+      "effective_depth": 5,
+      "l2_hit_rate": 0.875,
+      "load_l2_bytes": 33554432,
+      "load_ddr_bytes": 4194304,
+      "store_ddr_bytes": 2097152,
+      "load_vector_us_per_k": {
+        "tc": 0.0,
+        "smem": 0.32767999999999997,
+        "l2": 1.2233386666666668,
+        "ddr": 0.6036210526315791
+      },
+      "compute_vector_us_per_k": {
+        "tc": 1.8790481920000002,
+        "smem": 0.0,
+        "l2": 0.0,
+        "ddr": 0.0
+      },
+      "store_vector_us": {
+        "tc": 0.0,
+        "smem": 0.0,
+        "l2": 2.4466773333333336,
+        "ddr": 9.657936842105265
+      },
+      "t_pro_us": 6.116693333333334,
+      "t_steady_us": 1.8790481920000002,
+      "t_epi_us": 9.39524096,
+      "t_store_us": 9.657936842105265,
+      "latency_us": 75.9041723194386,
+      "steady_bottleneck": "tc"
+    }
+  ]
+}

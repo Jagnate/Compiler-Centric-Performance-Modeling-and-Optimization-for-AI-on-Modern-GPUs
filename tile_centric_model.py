@@ -321,7 +321,7 @@ def write_wave_csv(path: Path, waves: list[WaveResult]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tir", nargs="?", type=Path, default=DEFAULT_TIR)
-    parser.add_argument("--out-dir", type=Path, default=Path("tperf_like_out"))
+    parser.add_argument("--out-dir", type=Path, default=Path("out"))
     parser.add_argument("--num-sms", type=int, default=84)
     parser.add_argument("--smem-per-sm-kib", type=float, default=100.0)
     parser.add_argument("--max-threads-per-sm", type=int, default=1536)
@@ -366,7 +366,7 @@ def main() -> None:
     print(f"Wrote {json_path}")
     print(f"Wrote {wave_csv_path}")
     print()
-    print("TPerf-like GEMM simulation")
+    print("Tile-Centric GEMM simulation")
     print(f"  kernel: {result.kernel_name} ({result.arch})")
     print(f"  GEMM: M={result.M}, N={result.N}, K={result.K}")
     print(f"  CTA tile: {result.block_M}x{result.block_N}x{result.block_K}")

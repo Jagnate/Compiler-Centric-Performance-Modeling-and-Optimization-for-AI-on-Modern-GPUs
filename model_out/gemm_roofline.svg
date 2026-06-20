@@ -3,18 +3,19 @@
   <text x="380.0" y="22" text-anchor="middle" font-size="18" font-family="Arial">Static Roofline Model</text>
   <rect x="82" y="32" width="654" height="416" fill="#fafafa" stroke="#333"/>
   <line x1="82.0" y1="32.0" x2="82.0" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="212.8" y1="32.0" x2="212.8" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="343.6" y1="32.0" x2="343.6" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="474.4" y1="32.0" x2="474.4" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="605.2" y1="32.0" x2="605.2" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="736.0" y1="32.0" x2="736.0" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="82.0" y1="448.0" x2="736.0" y2="448.0" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="82.0" y1="320.9" x2="736.0" y2="320.9" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="82.0" y1="193.8" x2="736.0" y2="193.8" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/><line x1="82.0" y1="66.7" x2="736.0" y2="66.7" stroke="#dddddd" stroke-width="2.4" stroke-dasharray="3 5"/>
-  <line x1="82.0" y1="448.0" x2="502.7" y2="54.4" stroke="#2563eb" stroke-width="2.4"/><line x1="502.7" y1="54.4" x2="736.0" y2="54.4" stroke="#2563eb" stroke-width="2.4"/><line x1="445.6" y1="32.0" x2="445.6" y2="448.0" stroke="#f97316" stroke-width="2.4" stroke-dasharray="4 5"/><line x1="544.1" y1="32.0" x2="544.1" y2="448.0" stroke="#16a34a" stroke-width="2.4" stroke-dasharray="4 5"/>
+  <line x1="82.0" y1="448.0" x2="502.7" y2="54.4" stroke="#2563eb" stroke-width="2.4"/>
+  <line x1="502.7" y1="54.4" x2="736.0" y2="54.4" stroke="#2563eb" stroke-width="2.4"/>
+  <line x1="445.6" y1="32.0" x2="445.6" y2="448.0" stroke="#f97316" stroke-width="2.4" stroke-dasharray="4 5"/>
+  <line x1="544.1" y1="32.0" x2="544.1" y2="448.0" stroke="#16a34a" stroke-width="2.4" stroke-dasharray="4 5"/>
   <circle cx="445.6" cy="109.8" r="6" fill="white" stroke="#f97316" stroke-width="2"/>
-  <text x="455.6" y="101.8" font-size="13" font-family="Arial">CTA global bound</text>
   <circle cx="544.1" cy="54.4" r="6" fill="white" stroke="#16a34a" stroke-width="2"/>
-  <text x="554.1" y="72.4" font-size="13" font-family="Arial">ideal HBM bound</text>
   
-  <rect x="539.1" y="76.5" width="10" height="10" fill="#7c3aed" transform="rotate(45 544.1 81.5)"/><text x="556.1" y="85.5" font-size="13" font-family="Arial">estimated</text>
+  <rect x="539.1" y="75.4" width="10" height="10" fill="#7c3aed" transform="rotate(45 544.1 80.4)"/>
   <text x="380.0" y="506" text-anchor="middle" font-size="14" font-family="Arial">Arithmetic intensity (FLOP/byte)</text>
-  <text x="18" y="260.0" transform="rotate(-90 18 260.0)" text-anchor="middle" font-size="14" font-family="Arial">Performance bound (TFLOP/s)</text>
+  <text x="18" y="260.0" transform="rotate(-90 18 260.0)" text-anchor="middle" font-size="14" font-family="Arial">Performance (TFLOP/s)</text>
   <text x="82.0" y="478" text-anchor="middle" font-size="12">0.1</text><text x="212.8" y="478" text-anchor="middle" font-size="12">1</text><text x="343.6" y="478" text-anchor="middle" font-size="12">10</text><text x="474.4" y="478" text-anchor="middle" font-size="12">100</text><text x="605.2" y="478" text-anchor="middle" font-size="12">1000</text><text x="736.0" y="478" text-anchor="middle" font-size="12">10000</text><text x="70" y="452.0" text-anchor="end" font-size="12">0.1</text><text x="70" y="324.9" text-anchor="end" font-size="12">1</text><text x="70" y="197.8" text-anchor="end" font-size="12">10</text><text x="70" y="70.7" text-anchor="end" font-size="12">100</text>
   <text x="94" y="54" font-size="13" font-family="Arial">peak=125 TFLOP/s, bandwidth=760 GB/s</text>
   <text x="94" y="74" font-size="13" font-family="Arial">CTA global AI=60.24, ideal HBM AI=341.33</text>
   <text x="94" y="94" font-size="13" font-family="Arial">measured point: pass --measured-ms to draw actual performance</text>
-  <text x="94" y="114" font-size="13" font-family="Arial">estimated=76.47 TFLOP/s, 0.0281 ms, steady=compute</text>
+  <text x="94" y="114" font-size="13" font-family="Arial">estimated=78.04 TFLOP/s, 0.0275 ms</text>
 </svg>

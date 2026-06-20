@@ -1,0 +1,15 @@
+{
+  "num_sms": 84,
+  "smem_per_sm_bytes": 102400,
+  "max_threads_per_sm": 1536,
+  "cta_limit_per_sm": 16,
+  "l2_capacity_bytes": 6291456,
+  "tensor_peak_tflops": 125.0,
+  "l2_bandwidth_gbs": 3000.0,
+  "ddr_bandwidth_gbs": 760.0,
+  "smem_bandwidth_gbs": 12000.0,
+  "tensor_efficiency": 0.75,
+  "l2_efficiency": 0.75,
+  "ddr_efficiency": 0.75,
+  "smem_efficiency": 0.7
+}

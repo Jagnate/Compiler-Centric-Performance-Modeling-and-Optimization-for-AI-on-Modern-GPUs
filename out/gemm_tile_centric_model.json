@@ -1,5 +1,5 @@
 {
-  "model_name": "tperf_like_gemm_v1",
+  "model_name": "tile_centric_gemm_v1",
   "kernel_name": "matmul_kernel",
   "arch": "sm_86",
   "M": 1024,
@@ -21,7 +21,6 @@
   "total_latency_ms": 0.0759041723194386,
   "estimated_tflops": 28.29203695104442,
   "overall_l2_hit_rate": 0.875,
-  "formula": "T = T_pro + max(K_tiles - d, 0) * T_steady + T_epi + T_store, d = stages * resident_ctas_per_SM - 1",
   "hardware": {
     "num_sms": 84,
     "smem_per_sm_bytes": 102400,

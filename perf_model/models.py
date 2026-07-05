@@ -170,12 +170,16 @@ class ResourceVectorUs:
 
 
 @dataclass
-class WaveResult:
-    wave_index: int
+class ScheduleEventResult:
+    event_index: int
+    sm_id: int
+    start_us: float
+    end_us: float
     ctas: int
-    active_sms: int
-    resident_ctas_per_sm: int
-    ctas_per_active_sm: int
+    cta_indices: list[int]
+    active_sms_at_start: int
+    active_ctas_at_start: int
+    resident_ctas_on_sm: int
     effective_depth: int
     l2_hit_rate: float
     load_l2_bytes: int
@@ -190,6 +194,32 @@ class WaveResult:
     t_store_us: float
     latency_us: float
     steady_bottleneck: str
+    dynamic_rate_updates: int
+
+
+@dataclass
+class FastCohortResult:
+    wave_kind: str
+    wave_multiplicity: int
+    sm_count: int
+    active_ctas: int
+    ctas_per_sm: int
+    effective_depth: int
+    latency_us: float
+    steady_bottleneck: str
+
+
+@dataclass
+class AggregateUtilization:
+    capacity_basis: str
+    sm_activity: float
+    resident_cta_slot_utilization: float
+    theoretical_occupancy: float
+    achieved_occupancy: float
+    tensor_core_utilization: float
+    smem_utilization: float
+    l2_utilization: float
+    hbm_utilization: float
 
 
 @dataclass
@@ -218,4 +248,7 @@ class SimulationResult:
     estimated_tflops: float
     overall_l2_hit_rate: float
     hardware: HardwareConfig
-    waves: list[WaveResult]
+    aggregate_utilization: AggregateUtilization
+    schedule_model: str
+    fast_cohorts: list[FastCohortResult]
+    schedule_events: list[ScheduleEventResult]

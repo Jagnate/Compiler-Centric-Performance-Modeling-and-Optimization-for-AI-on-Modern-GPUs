@@ -8,7 +8,9 @@ builds simple roofline and tile-centric latency estimates.
 
 ```bash
 python3 static_tir_model.py --hardware-config hardware_configs/hardware_sm86_default.json
-python3 tile_centric_model.py --hardware-config hardware_configs/hardware_sm86_default.json
+python3 tile_centric_model.py \
+  --hardware-config hardware_configs/hardware_sm86_default.json \
+  --mode fast
 ```
 
 The hardware JSON is a modeling input. Edit or duplicate it when you want to
@@ -28,3 +30,37 @@ python3 tile_centric_model.py \
   --hardware-config hardware_configs/hardware_sm86_default.json \
   --compiled-registers-per-thread 217
 ```
+
+The tile-centric simulator has two execution modes:
+
+- `fast` (default) evaluates analytical full-wave and tail-wave residency
+  cohorts. It avoids materializing per-CTA events and is intended for rapid
+  design-space exploration.
+- `detailed` uses a rolling SM scheduler and a logical L2 LRU. It spreads CTAs
+  across available SMs, dispatches new batches when an SM becomes free, and
+  dynamically reallocates Tensor Core, shared-memory, L2, and HBM rates at
+  each resource-completion or pipeline-phase event.
+
+The detailed simulator is event-driven rather than cycle-accurate. Its cost
+therefore scales with CTA batches and resource transitions, not GPU cycles.
+Use `--dump-schedule` only when a per-SM JSON/CSV trace is needed:
+
+```bash
+python3 tile_centric_model.py \
+  --hardware-config hardware_configs/hardware_sm86_default.json \
+  --mode detailed \
+  --dump-schedule
+```
+
+This writes `out/gemm_tile_centric_model.json` and
+`out/gemm_tile_centric_schedule.csv`. Without `--dump-schedule`, the detailed
+simulation still runs, but the potentially large event list is omitted from
+the JSON output.
+
+Both modes report aggregate utilization over the complete kernel time window:
+SM activity, resident CTA-slot utilization, and TC/SMEM/L2/HBM utilization.
+Resource utilization is normalized against the configured physical peak so
+the percentages are closer to NCU's peak-relative metrics. Theoretical and
+time-weighted achieved occupancy are reported separately. Detailed mode
+integrates the rolling schedule events; fast mode integrates its analytical
+full/tail cohorts.

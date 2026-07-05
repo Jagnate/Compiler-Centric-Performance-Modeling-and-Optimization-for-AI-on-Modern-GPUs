@@ -1,5 +1,5 @@
 {
-  "model_name": "tile_centric_gemm_v1",
+  "model_name": "tile_centric_gemm_v3",
   "kernel_name": "matmul_kernel",
   "arch": "sm_86",
   "M": 1024,
@@ -29,9 +29,9 @@
   "full_wave_capacity_ctas": 164,
   "full_waves": 0,
   "tail_ctas": 64,
-  "total_latency_us": 64.74825768099157,
-  "total_latency_ms": 0.06474825768099157,
-  "estimated_tflops": 33.166663087375184,
+  "total_latency_us": 63.84381780831448,
+  "total_latency_ms": 0.06384381780831448,
+  "estimated_tflops": 33.63651676420156,
   "overall_l2_hit_rate": 0.875,
   "hardware": {
     "num_sms": 82,
@@ -50,42 +50,30 @@
     "ddr_efficiency": 1.0,
     "smem_efficiency": 1.0
   },
-  "waves": [
+  "aggregate_utilization": {
+    "capacity_basis": "configured_physical_peak",
+    "sm_activity": 0.7804878048780488,
+    "resident_cta_slot_utilization": 0.3902439024390244,
+    "theoretical_occupancy": 0.16666666666666666,
+    "achieved_occupancy": 0.06504065040650406,
+    "tensor_core_utilization": 0.2815260492625441,
+    "smem_utilization": 0.03519075615781801,
+    "l2_utilization": 0.2597428107449539,
+    "hbm_utilization": 0.1052717698907182
+  },
+  "schedule_model": "analytical_wave_cohorts_v1",
+  "fast_cohorts": [
     {
-      "wave_index": 0,
-      "ctas": 64,
-      "active_sms": 64,
-      "resident_ctas_per_sm": 2,
-      "ctas_per_active_sm": 1,
+      "wave_kind": "tail",
+      "wave_multiplicity": 1,
+      "sm_count": 64,
+      "active_ctas": 64,
+      "ctas_per_sm": 1,
       "effective_depth": 2,
-      "l2_hit_rate": 0.875,
-      "load_l2_bytes": 33554432,
-      "load_ddr_bytes": 4194304,
-      "store_ddr_bytes": 2097152,
-      "load_vector_us_per_k": {
-        "tc": 0.0,
-        "smem": 0.08995625118333857,
-        "l2": 0.624909816300583,
-        "ddr": 0.17940040337743138
-      },
-      "compute_vector_us_per_k": {
-        "tc": 1.8946259873234845,
-        "smem": 0.0,
-        "l2": 0.0,
-        "ddr": 0.0
-      },
-      "store_vector_us": {
-        "tc": 0.0,
-        "smem": 0.0,
-        "l2": 1.249819632601166,
-        "ddr": 2.870406454038902
-      },
-      "t_pro_us": 1.249819632601166,
-      "t_steady_us": 1.8946259873234845,
-      "t_epi_us": 3.789251974646969,
-      "t_store_us": 2.870406454038902,
-      "latency_us": 64.74825768099157,
+      "latency_us": 63.84381780831448,
       "steady_bottleneck": "tc"
     }
-  ]
+  ],
+  "schedule_events": [],
+  "schedule_event_count": 0
 }

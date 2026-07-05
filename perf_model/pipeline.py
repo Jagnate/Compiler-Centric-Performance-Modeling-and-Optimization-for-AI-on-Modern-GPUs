@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 from .models import GemmModel, HardwareConfig, PipelineLatencyModel
+from .occupancy import estimate_occupancy
 
 
 def fixed_pipeline_cta_latency_us(
@@ -31,9 +32,14 @@ def estimate_simple_pipeline_latency(
 ) -> PipelineLatencyModel:
     # This is the compact baseline used by the static roofline script: one CTA
     # latency envelope multiplied by the number of CTA waves on the GPU.
-    resident_by_smem = hw.smem_per_sm_bytes // model.dynamic_shared_bytes_per_cta
-    resident_by_threads = hw.max_threads_per_sm // model.threads_per_cta
-    resident_ctas = max(1, min(resident_by_smem, resident_by_threads, hw.cta_limit_per_sm))
+    occupancy = estimate_occupancy(
+        hw=hw,
+        threads_per_cta=model.threads_per_cta,
+        warps_per_cta=model.warps_per_cta,
+        dynamic_shared_bytes_per_cta=model.dynamic_shared_bytes_per_cta,
+        registers_per_thread=model.registers_per_thread,
+    )
+    resident_ctas = occupancy.resident_ctas_per_sm
     active_ctas_per_wave = min(model.num_ctas, hw.num_sms * resident_ctas)
     waves = math.ceil(model.num_ctas / active_ctas_per_wave)
 
@@ -90,6 +96,7 @@ def estimate_simple_pipeline_latency(
         max_threads_per_sm=hw.max_threads_per_sm,
         cta_limit_per_sm=hw.cta_limit_per_sm,
         resident_ctas_per_sm=resident_ctas,
+        occupancy=occupancy,
         active_ctas_per_wave=active_ctas_per_wave,
         waves=waves,
         tensor_peak_tflops=hw.tensor_peak_tflops,

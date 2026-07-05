@@ -10,8 +10,8 @@
   "l2_bandwidth_gbs": 2149.891016200295,
   "ddr_bandwidth_gbs": 936.096,
   "smem_bandwidth_gbs": 14934.904270986746,
-  "tensor_efficiency": 0.75,
-  "l2_efficiency": 0.75,
-  "ddr_efficiency": 0.75,
-  "smem_efficiency": 0.7
+  "tensor_efficiency": 0.37983750580944445,
+  "l2_efficiency": 1.0,
+  "ddr_efficiency": 1.0,
+  "smem_efficiency": 1.0
 }

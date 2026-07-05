@@ -20,6 +20,14 @@ def main() -> None:
     parser.add_argument("tir", nargs="?", type=Path, default=DEFAULT_TIR)
     parser.add_argument("--out-dir", type=Path, default=Path("model_out"))
     parser.add_argument("--hardware-config", type=Path, default=None)
+    parser.add_argument(
+        "--compiled-registers-per-thread",
+        "--registers-per-thread",
+        dest="registers_per_thread",
+        type=int,
+        default=None,
+        help="Optional compiled value used to validate/override the TIR static estimate.",
+    )
     parser.add_argument("--measured-ms", type=float, default=None)
     parser.add_argument("--measured-traffic-model", choices=["ideal", "tiled"], default="ideal")
     parser.add_argument("--estimated-traffic-model", choices=["ideal", "tiled"], default="ideal")
@@ -29,7 +37,7 @@ def main() -> None:
     # estimate, and draw a roofline plot with optional measured latency overlay.
     hw = load_hardware_config(args.hardware_config)
     text = args.tir.read_text(encoding="utf-8")
-    facts = parse_facts(text)
+    facts = parse_facts(text, registers_per_thread_override=args.registers_per_thread)
     model = infer_gemm_model(text, facts, hw.tensor_peak_tflops, hw.ddr_bandwidth_gbs)
     pipeline_model = estimate_simple_pipeline_latency(model, hw)
 
@@ -70,6 +78,17 @@ def main() -> None:
     print(f"  kernel: {model.kernel_name}")
     print(f"  shape: M={model.M}, N={model.N}, K={model.K}")
     print(f"  tile: block_M={model.block_M}, block_N={model.block_N}, block_K={model.block_K}")
+    print(
+        f"  registers/thread: {model.registers_per_thread} "
+        f"({model.registers_per_thread_source})"
+    )
+    print(
+        "  CTA residency limits: "
+        f"smem={pipeline_model.occupancy.by_shared_memory or 'n/a'}, "
+        f"threads={pipeline_model.occupancy.by_threads}, "
+        f"registers={pipeline_model.occupancy.by_registers or 'unknown'}, "
+        f"architecture={pipeline_model.occupancy.by_architecture}"
+    )
     print(f"  FLOPs: {model.flops:,}")
     print(f"  tiled AI: {model.arithmetic_intensity_tiled:.2f} FLOP/byte")
     print(f"  ideal AI: {model.arithmetic_intensity_ideal:.2f} FLOP/byte")

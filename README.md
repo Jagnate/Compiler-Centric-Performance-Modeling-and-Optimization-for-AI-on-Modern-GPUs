@@ -14,3 +14,17 @@ python3 tile_centric_model.py --hardware-config hardware_configs/hardware_sm86_d
 The hardware JSON is a modeling input. Edit or duplicate it when you want to
 try another GPU, measured bandwidth, measured peak throughput, or different
 efficiency assumptions.
+
+The model estimates register pressure directly from TIR-visible local buffers,
+kernel pointers, launch indices, and serial-loop state. No register input is
+required for normal static prediction.
+
+The estimate is heuristic because backend liveness optimization and address
+temporaries are applied after TIR. A compiled value from `ptxas` or NCU can
+optionally validate it:
+
+```bash
+python3 tile_centric_model.py \
+  --hardware-config hardware_configs/hardware_sm86_default.json \
+  --compiled-registers-per-thread 217
+```

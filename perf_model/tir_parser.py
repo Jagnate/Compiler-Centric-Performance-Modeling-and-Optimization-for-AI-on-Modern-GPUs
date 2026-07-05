@@ -4,6 +4,7 @@ import math
 import re
 
 from .models import GemmModel, TirFacts
+from .register_estimator import estimate_registers_from_tir
 
 
 # The dumped TIR is a Python script, but the structural metadata we need appears as
@@ -35,7 +36,10 @@ def dtype_nbytes(dtype: str) -> int:
     raise ValueError(f"Unknown dtype byte width for {dtype!r}")
 
 
-def parse_facts(text: str) -> TirFacts:
+def parse_facts(
+    text: str,
+    registers_per_thread_override: int | None = None,
+) -> TirFacts:
     # Facts are direct properties of the generated kernel: launch shape, shared
     # memory allocation, pipeline markers, and textual PTX intrinsic counts.
     kernel_name = search_str(r"def\s+([A-Za-z_]\w*)\(", text, "unknown_kernel")
@@ -44,6 +48,12 @@ def parse_facts(text: str) -> TirFacts:
     grid_y = search_int(r'"blockIdx\.y":\s*(\d+)', text, 1)
     threads = search_int(r'"threadIdx\.x":\s*(\d+)', text, 1)
     shared = search_int(r'"dyn_shared_memory_buf":\s*(\d+)', text, 0)
+    register_estimate = estimate_registers_from_tir(text)
+    registers_per_thread = register_estimate.estimated_registers_per_thread
+    registers_per_thread_source = register_estimate.method
+    if registers_per_thread_override is not None:
+        registers_per_thread = registers_per_thread_override
+        registers_per_thread_source = "compiled_override"
     stages = search_int(r'"tl\.pipeline_mvb_num_stages",\s*(\d+)', text)
     c_elements = search_int(r"C_1\s*=\s*T\.decl_buffer\(\((\d+),\),\s*\"float16\"", text)
 
@@ -62,6 +72,9 @@ def parse_facts(text: str) -> TirFacts:
         warps_per_cta=math.ceil(threads / 32),
         num_ctas=grid_x * grid_y,
         dynamic_shared_bytes_per_cta=shared,
+        registers_per_thread=registers_per_thread,
+        registers_per_thread_source=registers_per_thread_source,
+        register_estimate=register_estimate,
         pipeline_stages=stages,
         c_elements=c_elements,
         textual_ptx_cp_async=text.count("T.ptx_cp_async("),
@@ -176,6 +189,9 @@ def infer_gemm_model(
         threads_per_cta=facts.threads_per_cta,
         warps_per_cta=facts.warps_per_cta,
         dynamic_shared_bytes_per_cta=facts.dynamic_shared_bytes_per_cta,
+        registers_per_thread=facts.registers_per_thread,
+        registers_per_thread_source=facts.registers_per_thread_source,
+        register_estimate=facts.register_estimate,
         pipeline_stages=facts.pipeline_stages,
         dtype_a=dtype_a,
         dtype_b=dtype_b,

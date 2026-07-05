@@ -18,13 +18,21 @@ def main() -> None:
     parser.add_argument("tir", nargs="?", type=Path, default=DEFAULT_TIR)
     parser.add_argument("--out-dir", type=Path, default=Path("out"))
     parser.add_argument("--hardware-config", type=Path, default=None)
+    parser.add_argument(
+        "--compiled-registers-per-thread",
+        "--registers-per-thread",
+        dest="registers_per_thread",
+        type=int,
+        default=None,
+        help="Optional compiled value used to validate/override the TIR static estimate.",
+    )
     args = parser.parse_args()
 
     # CLI wiring: parse the dumped TIR, infer GEMM metadata, then run the
     # wave-level latency simulator with the selected hardware assumptions.
     hw = load_hardware_config(args.hardware_config)
     text = args.tir.read_text(encoding="utf-8")
-    facts = parse_facts(text)
+    facts = parse_facts(text, registers_per_thread_override=args.registers_per_thread)
     gemm = infer_gemm_model(text, facts, hw.tensor_peak_tflops, hw.ddr_bandwidth_gbs)
     result = simulate(gemm, hw)
 
@@ -42,7 +50,31 @@ def main() -> None:
     print(f"  GEMM: M={result.M}, N={result.N}, K={result.K}")
     print(f"  CTA tile: {result.block_M}x{result.block_N}x{result.block_K}")
     print(f"  CTAs: {result.num_ctas}, resident CTAs/SM: {result.resident_ctas_per_sm}")
-    print(f"  effective depth: {result.pipeline_stages} * {result.resident_ctas_per_sm} - 1 = {result.waves[0].effective_depth}")
+    print(
+        f"  registers/thread: {gemm.registers_per_thread} "
+        f"({gemm.registers_per_thread_source})"
+    )
+    estimate = gemm.register_estimate
+    print(
+        "  static register breakdown: "
+        f"local={estimate.explicit_local_registers}, "
+        f"pointers={estimate.kernel_pointer_registers}, "
+        f"launch_indices={estimate.launch_index_registers}, "
+        f"serial_loops={estimate.serial_loop_registers}"
+    )
+    print(
+        "  occupancy limits: "
+        f"smem={result.occupancy.by_shared_memory or 'n/a'}, "
+        f"threads={result.occupancy.by_threads}, "
+        f"registers={result.occupancy.by_registers or 'unknown'}, "
+        f"architecture={result.occupancy.by_architecture}"
+    )
+    print(f"  limiting resources: {', '.join(result.occupancy.limiting_resources)}")
+    print(
+        f"  effective depth: {result.pipeline_stages} * "
+        f"{result.waves[0].ctas_per_active_sm} actual CTA(s)/SM - 1 = "
+        f"{result.waves[0].effective_depth}"
+    )
     print(f"  full wave capacity: {result.full_wave_capacity_ctas} CTAs")
     print(f"  full waves: {result.full_waves}, tail CTAs: {result.tail_ctas}")
     print(f"  estimated L2 hit rate: {result.overall_l2_hit_rate * 100:.2f}%")
@@ -53,6 +85,7 @@ def main() -> None:
     for wave in result.waves:
         print(
             f"  wave {wave.wave_index}: ctas={wave.ctas}, active_sms={wave.active_sms}, "
+            f"ctas/active_sm={wave.ctas_per_active_sm}, "
             f"L2_hit={wave.l2_hit_rate * 100:.2f}%, bottleneck={wave.steady_bottleneck}, "
             f"latency={wave.latency_us:.3f} us"
         )

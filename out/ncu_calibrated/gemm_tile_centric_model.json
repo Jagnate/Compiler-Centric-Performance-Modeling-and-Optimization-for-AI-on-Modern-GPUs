@@ -29,9 +29,9 @@
   "full_wave_capacity_ctas": 164,
   "full_waves": 0,
   "tail_ctas": 64,
-  "total_latency_us": 36.19870185276633,
-  "total_latency_ms": 0.03619870185276633,
-  "estimated_tflops": 59.32488012234859,
+  "total_latency_us": 64.74825768099157,
+  "total_latency_ms": 0.06474825768099157,
+  "estimated_tflops": 33.166663087375184,
   "overall_l2_hit_rate": 0.875,
   "hardware": {
     "num_sms": 82,
@@ -45,10 +45,10 @@
     "l2_bandwidth_gbs": 2149.891016200295,
     "ddr_bandwidth_gbs": 936.096,
     "smem_bandwidth_gbs": 14934.904270986746,
-    "tensor_efficiency": 0.75,
-    "l2_efficiency": 0.75,
-    "ddr_efficiency": 0.75,
-    "smem_efficiency": 0.7
+    "tensor_efficiency": 0.3798375058094445,
+    "l2_efficiency": 1.0,
+    "ddr_efficiency": 1.0,
+    "smem_efficiency": 1.0
   },
   "waves": [
     {
@@ -64,12 +64,12 @@
       "store_ddr_bytes": 2097152,
       "load_vector_us_per_k": {
         "tc": 0.0,
-        "smem": 0.12850893026191226,
-        "l2": 0.8332130884007775,
-        "ddr": 0.23920053783657516
+        "smem": 0.08995625118333857,
+        "l2": 0.624909816300583,
+        "ddr": 0.17940040337743138
       },
       "compute_vector_us_per_k": {
-        "tc": 0.9595333459556116,
+        "tc": 1.8946259873234845,
         "smem": 0.0,
         "l2": 0.0,
         "ddr": 0.0
@@ -77,14 +77,14 @@
       "store_vector_us": {
         "tc": 0.0,
         "smem": 0.0,
-        "l2": 1.666426176801555,
-        "ddr": 3.8272086053852026
+        "l2": 1.249819632601166,
+        "ddr": 2.870406454038902
       },
-      "t_pro_us": 1.666426176801555,
-      "t_steady_us": 0.9595333459556116,
-      "t_epi_us": 1.9190666919112231,
-      "t_store_us": 3.8272086053852026,
-      "latency_us": 36.19870185276633,
+      "t_pro_us": 1.249819632601166,
+      "t_steady_us": 1.8946259873234845,
+      "t_epi_us": 3.789251974646969,
+      "t_store_us": 2.870406454038902,
+      "latency_us": 64.74825768099157,
       "steady_bottleneck": "tc"
     }
   ]

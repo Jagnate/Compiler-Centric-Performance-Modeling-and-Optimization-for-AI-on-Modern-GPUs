@@ -3,6 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+@dataclass
+class RegisterEstimate:
+    explicit_local_registers: int
+    kernel_pointer_registers: int
+    launch_index_registers: int
+    serial_loop_registers: int
+    estimated_registers_per_thread: int
+    local_buffer_registers: dict[str, int]
+    method: str
+    confidence: str
+
+
 # Shared dataclasses keep the parser, roofline model, and simulators loosely coupled.
 # Most fields are intentionally plain numbers so JSON/CSV exports stay easy to inspect.
 @dataclass
@@ -15,6 +27,9 @@ class TirFacts:
     warps_per_cta: int
     num_ctas: int
     dynamic_shared_bytes_per_cta: int
+    registers_per_thread: int
+    registers_per_thread_source: str
+    register_estimate: RegisterEstimate
     pipeline_stages: int | None
     c_elements: int | None
     textual_ptx_cp_async: int
@@ -42,6 +57,9 @@ class GemmModel:
     threads_per_cta: int
     warps_per_cta: int
     dynamic_shared_bytes_per_cta: int
+    registers_per_thread: int
+    registers_per_thread_source: str
+    register_estimate: RegisterEstimate
     pipeline_stages: int | None
     dtype_a: str
     dtype_b: str
@@ -72,6 +90,8 @@ class HardwareConfig:
     smem_per_sm_bytes: int
     max_threads_per_sm: int
     cta_limit_per_sm: int
+    registers_per_sm: int
+    register_allocation_unit_regs: int
     l2_capacity_bytes: int
     tensor_peak_tflops: float
     l2_bandwidth_gbs: float
@@ -84,12 +104,24 @@ class HardwareConfig:
 
 
 @dataclass
+class OccupancyLimits:
+    resident_ctas_per_sm: int
+    by_shared_memory: int | None
+    by_threads: int
+    by_registers: int | None
+    by_architecture: int
+    allocated_registers_per_cta: int | None
+    limiting_resources: list[str]
+
+
+@dataclass
 class PipelineLatencyModel:
     num_sms: int
     smem_per_sm_bytes: int
     max_threads_per_sm: int
     cta_limit_per_sm: int
     resident_ctas_per_sm: int
+    occupancy: OccupancyLimits
     active_ctas_per_wave: int
     waves: int
     tensor_peak_tflops: float
@@ -143,6 +175,7 @@ class WaveResult:
     ctas: int
     active_sms: int
     resident_ctas_per_sm: int
+    ctas_per_active_sm: int
     effective_depth: int
     l2_hit_rate: float
     load_l2_bytes: int
@@ -176,6 +209,7 @@ class SimulationResult:
     num_ctas: int
     pipeline_stages: int
     resident_ctas_per_sm: int
+    occupancy: OccupancyLimits
     full_wave_capacity_ctas: int
     full_waves: int
     tail_ctas: int

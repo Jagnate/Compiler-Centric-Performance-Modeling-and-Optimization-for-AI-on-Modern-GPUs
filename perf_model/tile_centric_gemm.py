@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import GemmModel, HardwareConfig, ResourceVectorUs, SimulationResult, WaveResult
+from .occupancy import estimate_occupancy
 from .tile_cache import TileLRU
 
 
@@ -21,14 +22,6 @@ def cta_launch_order(model: GemmModel) -> list[tuple[int, int]]:
 def chunked(items: list[tuple[int, int]], chunk_size: int) -> Iterable[list[tuple[int, int]]]:
     for start in range(0, len(items), chunk_size):
         yield items[start:start + chunk_size]
-
-
-def resident_ctas_per_sm(model: GemmModel, hw: HardwareConfig) -> int:
-    # Occupancy is limited by dynamic shared memory, thread slots, and the
-    # architecture's maximum resident CTA count.
-    by_smem = hw.smem_per_sm_bytes // model.dynamic_shared_bytes_per_cta
-    by_threads = hw.max_threads_per_sm // model.threads_per_cta
-    return max(1, min(by_smem, by_threads, hw.cta_limit_per_sm))
 
 
 def per_cta_rates(hw: HardwareConfig, active_sms: int, active_ctas: int) -> dict[str, float]:
@@ -77,7 +70,11 @@ def simulate_wave(
     resident: int,
 ) -> WaveResult:
     active_ctas = len(wave_ctas)
-    active_sms = math.ceil(active_ctas / resident)
+    # CUDA distributes a partial wave across available SMs before placing a
+    # second CTA on an SM. Resident CTAs/SM is a capacity limit, not a packing
+    # policy. For example, 64 CTAs on 82 SMs use 64 SMs with one CTA each.
+    active_sms = min(active_ctas, hw.num_sms)
+    ctas_per_active_sm = math.ceil(active_ctas / active_sms)
     rates = per_cta_rates(hw, active_sms=active_sms, active_ctas=active_ctas)
 
     a_tile_bytes = model.block_M * model.block_K * model.bytes_a_per_element
@@ -120,9 +117,10 @@ def simulate_wave(
         ddr=store_bytes_per_cta / rates["ddr_bytes_s"] * 1e6,
     )
 
-    effective_depth = max(0, (model.pipeline_stages or 1) * resident - 1)
+    effective_depth = max(0, (model.pipeline_stages or 1) * ctas_per_active_sm - 1)
     # Hardware-level resident CTAs extend the software pipeline window: while one
-    # CTA drains, other CTAs on the same SM can keep issuing middle K tiles.
+    # CTA drains, other CTAs actually placed on the same SM can keep issuing
+    # middle K tiles. Unused residency capacity does not extend this window.
     steady_vec = load_vec.add(compute_vec)
     t_pro, t_steady, t_epi, t_store, latency = fixed_wave_latency_us(
         load_vec=load_vec,
@@ -137,6 +135,7 @@ def simulate_wave(
         ctas=active_ctas,
         active_sms=active_sms,
         resident_ctas_per_sm=resident,
+        ctas_per_active_sm=ctas_per_active_sm,
         effective_depth=effective_depth,
         l2_hit_rate=l2_hit_rate,
         load_l2_bytes=int(l2_bytes),
@@ -155,7 +154,14 @@ def simulate_wave(
 
 
 def simulate(model: GemmModel, hw: HardwareConfig) -> SimulationResult:
-    resident = resident_ctas_per_sm(model, hw)
+    occupancy = estimate_occupancy(
+        hw=hw,
+        threads_per_cta=model.threads_per_cta,
+        warps_per_cta=model.warps_per_cta,
+        dynamic_shared_bytes_per_cta=model.dynamic_shared_bytes_per_cta,
+        registers_per_thread=model.registers_per_thread,
+    )
+    resident = occupancy.resident_ctas_per_sm
     full_capacity = hw.num_sms * resident
     order = cta_launch_order(model)
     lru = TileLRU(hw.l2_capacity_bytes)
@@ -192,6 +198,7 @@ def simulate(model: GemmModel, hw: HardwareConfig) -> SimulationResult:
         num_ctas=model.num_ctas,
         pipeline_stages=model.pipeline_stages or 1,
         resident_ctas_per_sm=resident,
+        occupancy=occupancy,
         full_wave_capacity_ctas=full_capacity,
         full_waves=full_waves,
         tail_ctas=tail_ctas,

@@ -46,11 +46,22 @@ class GridScheduleTests(unittest.TestCase):
         result = simulate(model, hardware, mode="detailed")
         initial_events = [event for event in result.schedule_events if event.start_us == 0.0]
 
-        self.assertEqual(result.schedule_model, "dynamic_rolling_sm_batches_v1")
+        self.assertEqual(
+            result.schedule_model,
+            "recursive_rolling_v2",
+        )
         self.assertEqual(len(initial_events), 64)
         self.assertTrue(all(event.resident_ctas_on_sm == 1 for event in initial_events))
         self.assertEqual(sorted(event.sm_id for event in initial_events), list(range(64)))
         self.assertTrue(all(event.dynamic_rate_updates > 4 for event in initial_events))
+        self.assertEqual(result.pipeline_structure.node_type, "rolling_grid_schedule")
+        k_loop = (
+            result.pipeline_structure.children[0]
+            .children[0]
+            .children[0]
+        )
+        self.assertEqual(k_loop.name, "k_loop")
+        self.assertEqual(k_loop.effective_depth, 2)
         self.assertAlmostEqual(
             result.aggregate_utilization.sm_activity,
             64 / hardware.num_sms,
@@ -75,11 +86,16 @@ class GridScheduleTests(unittest.TestCase):
         model, hardware = current_gemm()
         result = simulate(model, hardware, mode="fast")
 
-        self.assertEqual(result.schedule_model, "analytical_wave_cohorts_v1")
+        self.assertEqual(result.schedule_model, "recursive_wave_cohorts_v2")
         self.assertFalse(result.schedule_events)
         self.assertEqual(len(result.fast_cohorts), 1)
         self.assertEqual(result.fast_cohorts[0].sm_count, 64)
         self.assertEqual(result.fast_cohorts[0].ctas_per_sm, 1)
+        self.assertEqual(result.pipeline_structure.node_type, "wave_decomposition")
+        self.assertEqual(
+            result.fast_cohorts[0].pipeline_structure.children[0].name,
+            "k_loop",
+        )
         self.assertAlmostEqual(
             result.aggregate_utilization.sm_activity,
             64 / hardware.num_sms,
@@ -99,6 +115,7 @@ class GridScheduleTests(unittest.TestCase):
         )
 
         result = simulate(larger_model, hardware, mode="detailed")
+        fast_result = simulate(larger_model, hardware, mode="fast")
         initial_events = [event for event in result.schedule_events if event.start_us == 0.0]
         later_events = [event for event in result.schedule_events if event.start_us > 0.0]
         first_initial_finish = min(event.end_us for event in initial_events)
@@ -114,6 +131,14 @@ class GridScheduleTests(unittest.TestCase):
             for cta_index in event.cta_indices
         )
         self.assertEqual(scheduled_ctas, list(range(num_ctas)))
+        self.assertEqual(
+            {child.resident_tiles for child in result.pipeline_structure.children},
+            {1, 2},
+        )
+        self.assertEqual(
+            {child.name for child in fast_result.pipeline_structure.children},
+            {"full_wave", "tail_wave"},
+        )
 
 
 if __name__ == "__main__":

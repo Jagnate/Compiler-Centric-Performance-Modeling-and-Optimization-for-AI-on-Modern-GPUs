@@ -64,3 +64,28 @@ the percentages are closer to NCU's peak-relative metrics. Theoretical and
 time-weighted achieved occupancy are reported separately. Detailed mode
 integrates the rolling schedule events; fast mode integrates its analytical
 full/tail cohorts.
+
+## Recursive Pipeline Envelope
+
+The pipeline implementation is inspired by the paper's recursive
+prologue-steady-epilogue analysis. A GEMM is represented as a node tree:
+
+```text
+tile grid
+  -> full/tail wave or rolling scheduler cohort
+    -> CTA sequence
+      -> pipelined K loop
+        -> load A/B action
+        -> MMA compute action
+      -> store C action
+```
+
+Each pipeline loop is evaluated after its children. Its effective depth is
+`software stages * resident tiles per SM - 1`; short loops clamp the steady
+iteration count to zero. Nested pipelines retain the child envelope's boundary
+critical path when their parent composes it. Fast mode evaluates the recursive
+tree with fixed per-resource times. Detailed mode uses the same tree to produce
+resource-work phases, then advances those phases with dynamic TC/SMEM/L2/HBM
+rate updates under the rolling SM scheduler.
+
+The complete tree is exported as `pipeline_structure` in the model JSON.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -170,6 +170,20 @@ class ResourceVectorUs:
 
 
 @dataclass
+class PipelineNodeSummary:
+    name: str
+    node_type: str
+    iterations: int | None = None
+    pipeline_stages: int | None = None
+    resident_tiles: int | None = None
+    effective_depth: int | None = None
+    prologue_iterations: int | None = None
+    steady_iterations: int | None = None
+    epilogue_iterations: int | None = None
+    children: list["PipelineNodeSummary"] = field(default_factory=list)
+
+
+@dataclass
 class ScheduleEventResult:
     event_index: int
     sm_id: int
@@ -207,6 +221,7 @@ class FastCohortResult:
     effective_depth: int
     latency_us: float
     steady_bottleneck: str
+    pipeline_structure: PipelineNodeSummary
 
 
 @dataclass
@@ -250,5 +265,6 @@ class SimulationResult:
     hardware: HardwareConfig
     aggregate_utilization: AggregateUtilization
     schedule_model: str
+    pipeline_structure: PipelineNodeSummary
     fast_cohorts: list[FastCohortResult]
     schedule_events: list[ScheduleEventResult]

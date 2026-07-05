@@ -1,5 +1,5 @@
 {
-  "model_name": "tile_centric_gemm_v3",
+  "model_name": "tile_centric_gemm_v4",
   "kernel_name": "matmul_kernel",
   "arch": "sm_86",
   "M": 1024,
@@ -61,7 +61,95 @@
     "l2_utilization": 0.47389695039232216,
     "hbm_utilization": 0.19206680088866646
   },
-  "schedule_model": "analytical_wave_cohorts_v1",
+  "schedule_model": "recursive_wave_cohorts_v2",
+  "pipeline_structure": {
+    "name": "tile_grid",
+    "node_type": "wave_decomposition",
+    "iterations": 64,
+    "pipeline_stages": null,
+    "resident_tiles": null,
+    "effective_depth": null,
+    "prologue_iterations": null,
+    "steady_iterations": null,
+    "epilogue_iterations": null,
+    "children": [
+      {
+        "name": "tail_wave",
+        "node_type": "wave_cohort",
+        "iterations": 1,
+        "pipeline_stages": null,
+        "resident_tiles": 1,
+        "effective_depth": null,
+        "prologue_iterations": null,
+        "steady_iterations": null,
+        "epilogue_iterations": null,
+        "children": [
+          {
+            "name": "gemm_cta",
+            "node_type": "sequence",
+            "iterations": null,
+            "pipeline_stages": null,
+            "resident_tiles": null,
+            "effective_depth": null,
+            "prologue_iterations": null,
+            "steady_iterations": null,
+            "epilogue_iterations": null,
+            "children": [
+              {
+                "name": "k_loop",
+                "node_type": "pipeline_loop",
+                "iterations": 32,
+                "pipeline_stages": 3,
+                "resident_tiles": 1,
+                "effective_depth": 2,
+                "prologue_iterations": 2,
+                "steady_iterations": 30,
+                "epilogue_iterations": 2,
+                "children": [
+                  {
+                    "name": "load_ab",
+                    "node_type": "action",
+                    "iterations": null,
+                    "pipeline_stages": null,
+                    "resident_tiles": null,
+                    "effective_depth": null,
+                    "prologue_iterations": null,
+                    "steady_iterations": null,
+                    "epilogue_iterations": null,
+                    "children": []
+                  },
+                  {
+                    "name": "mma_compute",
+                    "node_type": "action",
+                    "iterations": null,
+                    "pipeline_stages": null,
+                    "resident_tiles": null,
+                    "effective_depth": null,
+                    "prologue_iterations": null,
+                    "steady_iterations": null,
+                    "epilogue_iterations": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "name": "store_c",
+                "node_type": "action",
+                "iterations": null,
+                "pipeline_stages": null,
+                "resident_tiles": null,
+                "effective_depth": null,
+                "prologue_iterations": null,
+                "steady_iterations": null,
+                "epilogue_iterations": null,
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
   "fast_cohorts": [
     {
       "wave_kind": "tail",
@@ -71,7 +159,69 @@
       "ctas_per_sm": 1,
       "effective_depth": 2,
       "latency_us": 34.99278202253022,
-      "steady_bottleneck": "tc"
+      "steady_bottleneck": "tc",
+      "pipeline_structure": {
+        "name": "gemm_cta",
+        "node_type": "sequence",
+        "iterations": null,
+        "pipeline_stages": null,
+        "resident_tiles": null,
+        "effective_depth": null,
+        "prologue_iterations": null,
+        "steady_iterations": null,
+        "epilogue_iterations": null,
+        "children": [
+          {
+            "name": "k_loop",
+            "node_type": "pipeline_loop",
+            "iterations": 32,
+            "pipeline_stages": 3,
+            "resident_tiles": 1,
+            "effective_depth": 2,
+            "prologue_iterations": 2,
+            "steady_iterations": 30,
+            "epilogue_iterations": 2,
+            "children": [
+              {
+                "name": "load_ab",
+                "node_type": "action",
+                "iterations": null,
+                "pipeline_stages": null,
+                "resident_tiles": null,
+                "effective_depth": null,
+                "prologue_iterations": null,
+                "steady_iterations": null,
+                "epilogue_iterations": null,
+                "children": []
+              },
+              {
+                "name": "mma_compute",
+                "node_type": "action",
+                "iterations": null,
+                "pipeline_stages": null,
+                "resident_tiles": null,
+                "effective_depth": null,
+                "prologue_iterations": null,
+                "steady_iterations": null,
+                "epilogue_iterations": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "name": "store_c",
+            "node_type": "action",
+            "iterations": null,
+            "pipeline_stages": null,
+            "resident_tiles": null,
+            "effective_depth": null,
+            "prologue_iterations": null,
+            "steady_iterations": null,
+            "epilogue_iterations": null,
+            "children": []
+          }
+        ]
+      }
     }
   ],
   "schedule_events": [],

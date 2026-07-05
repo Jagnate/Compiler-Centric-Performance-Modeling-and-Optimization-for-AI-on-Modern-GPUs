@@ -12,31 +12,22 @@ from .models import (
     GemmModel,
     HardwareConfig,
     OccupancyLimits,
+    PipelineNodeSummary,
     ResourceVectorUs,
     ScheduleEventResult,
     SimulationResult,
 )
 from .occupancy import estimate_occupancy
+from .recursive_pipeline import (
+    RESOURCE_EPSILON,
+    ResourceWork,
+    build_gemm_pipeline,
+)
 from .tile_cache import TileLRU
 
 
 CtaAssignment = tuple[int, int, int]
 SimulationMode = Literal["fast", "detailed"]
-RESOURCE_EPSILON = 1e-6
-
-
-@dataclass
-class ResourceWork:
-    tc: float = 0.0
-    smem: float = 0.0
-    l2: float = 0.0
-    ddr: float = 0.0
-
-    def complete(self) -> bool:
-        return all(
-            value <= RESOURCE_EPSILON
-            for value in (self.tc, self.smem, self.l2, self.ddr)
-        )
 
 
 @dataclass
@@ -58,6 +49,8 @@ class RunningBatch:
     store_vector_us: ResourceVectorUs
     steady_bottleneck: str
     phases: list[ResourceWork]
+    phase_names: list[str]
+    pipeline_structure: PipelineNodeSummary
     phase_index: int
     phase_elapsed_us: list[float]
     dynamic_rate_updates: int = 0
@@ -112,26 +105,13 @@ def bottleneck_name(v: ResourceVectorUs) -> str:
     return max(values, key=values.get)
 
 
-def pipeline_envelope_us(
-    *,
-    load_vec: ResourceVectorUs,
-    compute_vec: ResourceVectorUs,
-    store_vec: ResourceVectorUs,
-    k_tiles: int,
-    pipeline_stages: int,
-    resident_ctas_on_sm: int,
-) -> tuple[int, float, float, float, float, float]:
-    """Evaluate one resident CTA batch with a fixed-rate pipeline envelope."""
-    effective_depth = max(0, pipeline_stages * resident_ctas_on_sm - 1)
-    fill_iters = min(effective_depth, k_tiles)
-    steady_iters = max(k_tiles - effective_depth, 0)
-    steady_vec = load_vec.add(compute_vec)
-    t_pro = fill_iters * load_vec.steady_time()
-    t_steady = steady_vec.steady_time()
-    t_epi = fill_iters * compute_vec.steady_time()
-    t_store = store_vec.steady_time()
-    latency = t_pro + steady_iters * t_steady + t_epi + t_store
-    return effective_depth, t_pro, t_steady, t_epi, t_store, latency
+def work_from_time_vector(vector: ResourceVectorUs) -> ResourceWork:
+    return ResourceWork(
+        tc=vector.tc,
+        smem=vector.smem,
+        l2=vector.l2,
+        ddr=vector.ddr,
+    )
 
 
 def make_resource_vectors(
@@ -206,23 +186,26 @@ def fast_cohort_latency(
         l2_bytes_per_k_per_cta=load_bytes_per_k,
         ddr_bytes_per_k_per_cta=load_bytes_per_k * (1.0 - l2_hit_rate),
     )
-    effective_depth, _pro, _steady, _epi, _store, latency = pipeline_envelope_us(
-        load_vec=load_vec,
-        compute_vec=compute_vec,
-        store_vec=store_vec,
+    pipeline = build_gemm_pipeline(
         k_tiles=model.k_tiles,
         pipeline_stages=model.pipeline_stages or 1,
-        resident_ctas_on_sm=ctas_per_sm,
+        resident_tiles=ctas_per_sm,
+        load_work=work_from_time_vector(load_vec),
+        compute_work=work_from_time_vector(compute_vec),
+        store_work=work_from_time_vector(store_vec),
     )
+    k_loop = pipeline.summary.children[0]
+    assert k_loop.effective_depth is not None
     return FastCohortResult(
         wave_kind=wave_kind,
         wave_multiplicity=wave_multiplicity,
         sm_count=sm_count,
         active_ctas=active_ctas,
         ctas_per_sm=ctas_per_sm,
-        effective_depth=effective_depth,
-        latency_us=latency,
+        effective_depth=k_loop.effective_depth,
+        latency_us=pipeline.latency,
         steady_bottleneck=bottleneck_name(load_vec.add(compute_vec)),
+        pipeline_structure=pipeline.summary,
     )
 
 
@@ -301,6 +284,21 @@ def simulate_fast(
         * cohort.latency_us
         for cohort in cohorts
     )
+    grid_pipeline = PipelineNodeSummary(
+        name="tile_grid",
+        node_type="wave_decomposition",
+        iterations=model.num_ctas,
+        children=[
+            PipelineNodeSummary(
+                name=f"{cohort.wave_kind}_wave",
+                node_type="wave_cohort",
+                iterations=cohort.wave_multiplicity,
+                resident_tiles=cohort.ctas_per_sm,
+                children=[cohort.pipeline_structure],
+            )
+            for cohort in cohorts
+        ],
+    )
     return make_simulation_result(
         model=model,
         hw=hw,
@@ -310,7 +308,8 @@ def simulate_fast(
         full_capacity=full_capacity,
         full_waves=full_waves,
         tail_ctas=tail_ctas,
-        schedule_model="analytical_wave_cohorts_v1",
+        schedule_model="recursive_wave_cohorts_v2",
+        pipeline_structure=grid_pipeline,
         fast_cohorts=cohorts,
         schedule_events=[],
         total_l2_bytes=total_l2 + store_bytes,
@@ -378,31 +377,29 @@ def build_running_batch(
         ddr_bytes_per_k_per_cta=ddr_per_k_per_cta,
     )
 
-    effective_depth = max(0, (model.pipeline_stages or 1) * resident_ctas - 1)
-    fill_iters = min(effective_depth, model.k_tiles)
-    steady_iters = max(model.k_tiles - effective_depth, 0)
     l2_per_iteration = l2_bytes / model.k_tiles
     ddr_per_iteration = ddr_bytes / model.k_tiles
     load_per_iteration = resident_ctas * load_bytes_per_k
     compute_per_iteration = resident_ctas * compute_flops_per_k
-    phases = [
-        ResourceWork(
-            smem=fill_iters * load_per_iteration,
-            l2=fill_iters * l2_per_iteration,
-            ddr=fill_iters * ddr_per_iteration,
+    pipeline = build_gemm_pipeline(
+        k_tiles=model.k_tiles,
+        pipeline_stages=model.pipeline_stages or 1,
+        resident_tiles=resident_ctas,
+        load_work=ResourceWork(
+            smem=load_per_iteration,
+            l2=l2_per_iteration,
+            ddr=ddr_per_iteration,
         ),
-        ResourceWork(
-            tc=steady_iters * compute_per_iteration,
-            smem=steady_iters * load_per_iteration,
-            l2=steady_iters * l2_per_iteration,
-            ddr=steady_iters * ddr_per_iteration,
-        ),
-        ResourceWork(tc=fill_iters * compute_per_iteration),
-        ResourceWork(
+        compute_work=ResourceWork(tc=compute_per_iteration),
+        store_work=ResourceWork(
             l2=resident_ctas * store_bytes_per_cta,
             ddr=resident_ctas * store_bytes_per_cta,
         ),
-    ]
+        preserve_nested_latency=False,
+    )
+    k_loop = pipeline.summary.children[0]
+    assert k_loop.effective_depth is not None
+    assert k_loop.steady_iterations is not None
     job = RunningBatch(
         event_index=event_index,
         sm_id=sm_id,
@@ -410,8 +407,8 @@ def build_running_batch(
         batch=batch,
         active_sms_at_start=active_sms,
         active_ctas_at_start=active_ctas,
-        effective_depth=effective_depth,
-        steady_iters=steady_iters,
+        effective_depth=k_loop.effective_depth,
+        steady_iters=k_loop.steady_iterations,
         l2_hit_rate=hit_rate,
         load_l2_bytes=l2_bytes,
         load_ddr_bytes=ddr_bytes,
@@ -420,9 +417,11 @@ def build_running_batch(
         compute_vector_us_per_k=compute_vec,
         store_vector_us=store_vec,
         steady_bottleneck=bottleneck_name(load_vec.add(compute_vec)),
-        phases=phases,
+        phases=[phase.work for phase in pipeline.phases],
+        phase_names=[phase.name for phase in pipeline.phases],
+        pipeline_structure=pipeline.summary,
         phase_index=0,
-        phase_elapsed_us=[0.0, 0.0, 0.0, 0.0],
+        phase_elapsed_us=[0.0 for _phase in pipeline.phases],
     )
     job.advance_empty_phases()
     return job
@@ -516,8 +515,11 @@ def advance_dynamic_work(
 
 def finalize_event(job: RunningBatch, end_us: float) -> ScheduleEventResult:
     latency = end_us - job.start_us
+    phase_elapsed = dict(zip(job.phase_names, job.phase_elapsed_us))
     steady_per_iteration = (
-        job.phase_elapsed_us[1] / job.steady_iters if job.steady_iters else 0.0
+        phase_elapsed["k_loop.steady"] / job.steady_iters
+        if job.steady_iters
+        else 0.0
     )
     return ScheduleEventResult(
         event_index=job.event_index,
@@ -537,10 +539,10 @@ def finalize_event(job: RunningBatch, end_us: float) -> ScheduleEventResult:
         load_vector_us_per_k=job.load_vector_us_per_k,
         compute_vector_us_per_k=job.compute_vector_us_per_k,
         store_vector_us=job.store_vector_us,
-        t_pro_us=job.phase_elapsed_us[0],
+        t_pro_us=phase_elapsed["k_loop.prologue"],
         t_steady_us=steady_per_iteration,
-        t_epi_us=job.phase_elapsed_us[2],
-        t_store_us=job.phase_elapsed_us[3],
+        t_epi_us=phase_elapsed["k_loop.epilogue"],
+        t_store_us=phase_elapsed["store_c"],
         latency_us=latency,
         steady_bottleneck=job.steady_bottleneck,
         dynamic_rate_updates=job.dynamic_rate_updates,
@@ -558,6 +560,7 @@ def simulate_detailed(
     lru = TileLRU(hw.l2_capacity_bytes)
     running: dict[int, RunningBatch] = {}
     completed_events: list[ScheduleEventResult] = []
+    pipeline_by_residency: dict[int, PipelineNodeSummary] = {}
     next_event_index = 0
     current_time_us = 0.0
 
@@ -572,7 +575,7 @@ def simulate_detailed(
         )
         traffic_by_sm = classify_batch_traffic(new_batches, model, lru)
         for sm_id in sorted(new_batches):
-            running[sm_id] = build_running_batch(
+            job = build_running_batch(
                 event_index=next_event_index,
                 sm_id=sm_id,
                 start_us=current_time_us,
@@ -583,6 +586,8 @@ def simulate_detailed(
                 model=model,
                 hw=hw,
             )
+            running[sm_id] = job
+            pipeline_by_residency.setdefault(job.ctas, job.pipeline_structure)
             next_event_index += 1
 
     dispatch(list(range(hw.num_sms)))
@@ -610,6 +615,24 @@ def simulate_detailed(
     total_ddr = sum(event.load_ddr_bytes for event in completed_events)
     total_store = sum(event.store_ddr_bytes for event in completed_events)
     hit_rate = 1.0 - total_ddr / total_l2 if total_l2 else 0.0
+    residency_groups: dict[int, list[ScheduleEventResult]] = {}
+    for event in completed_events:
+        residency_groups.setdefault(event.resident_ctas_on_sm, []).append(event)
+    grid_pipeline = PipelineNodeSummary(
+        name="tile_grid",
+        node_type="rolling_grid_schedule",
+        iterations=model.num_ctas,
+        children=[
+            PipelineNodeSummary(
+                name=f"resident_{resident_ctas}_cta_batch",
+                node_type="scheduler_cohort",
+                iterations=len(events),
+                resident_tiles=resident_ctas,
+                children=[pipeline_by_residency[resident_ctas]],
+            )
+            for resident_ctas, events in sorted(residency_groups.items())
+        ],
+    )
     return make_simulation_result(
         model=model,
         hw=hw,
@@ -619,7 +642,8 @@ def simulate_detailed(
         full_capacity=full_capacity,
         full_waves=full_waves,
         tail_ctas=tail_ctas,
-        schedule_model="dynamic_rolling_sm_batches_v1",
+        schedule_model="recursive_rolling_v2",
+        pipeline_structure=grid_pipeline,
         fast_cohorts=[],
         schedule_events=completed_events,
         total_l2_bytes=total_l2 + total_store,
@@ -642,6 +666,7 @@ def make_simulation_result(
     full_waves: int,
     tail_ctas: int,
     schedule_model: str,
+    pipeline_structure: PipelineNodeSummary,
     fast_cohorts: list[FastCohortResult],
     schedule_events: list[ScheduleEventResult],
     total_l2_bytes: int,
@@ -679,7 +704,7 @@ def make_simulation_result(
         / (hw.ddr_bandwidth_gbs * 1e9 * latency_s),
     )
     return SimulationResult(
-        model_name="tile_centric_gemm_v3",
+        model_name="tile_centric_gemm_v4",
         kernel_name=model.kernel_name,
         arch=model.arch,
         M=model.M,
@@ -705,6 +730,7 @@ def make_simulation_result(
         hardware=hw,
         aggregate_utilization=utilization,
         schedule_model=schedule_model,
+        pipeline_structure=pipeline_structure,
         fast_cohorts=fast_cohorts,
         schedule_events=schedule_events,
     )

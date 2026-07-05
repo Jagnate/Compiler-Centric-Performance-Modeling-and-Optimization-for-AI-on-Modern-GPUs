@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .hardware import load_hardware_config
+from .models import PipelineNodeSummary
 from .tile_centric_gemm import simulate, write_schedule_csv
 from .tir_parser import infer_gemm_model, parse_facts
 
@@ -31,6 +32,19 @@ def print_metric_section(
 
 def optional_limit(value: int | None) -> str:
     return str(value) if value is not None else "N/A"
+
+
+def pipeline_tree_depth(node: PipelineNodeSummary) -> int:
+    if not node.children:
+        return 1
+    return 1 + max(pipeline_tree_depth(child) for child in node.children)
+
+
+def find_pipeline_loops(node: PipelineNodeSummary) -> list[PipelineNodeSummary]:
+    loops = [node] if node.node_type == "pipeline_loop" else []
+    for child in node.children:
+        loops.extend(find_pipeline_loops(child))
+    return loops
 
 
 def main() -> None:
@@ -176,6 +190,12 @@ def main() -> None:
     scheduler_rows = [
         ("Simulation Mode", "", args.mode),
         ("Schedule Model", "", result.schedule_model),
+        ("Pipeline Root", "", result.pipeline_structure.name),
+        (
+            "Recursive Pipeline Depth",
+            "level",
+            str(pipeline_tree_depth(result.pipeline_structure)),
+        ),
         ("Full Wave Capacity", "CTA", str(result.full_wave_capacity_ctas)),
         ("Full Waves", "wave", str(result.full_waves)),
         ("Tail CTAs", "CTA", str(result.tail_ctas)),
@@ -214,6 +234,31 @@ def main() -> None:
             ]
         )
     print_metric_section("Scheduler Statistics", scheduler_rows)
+
+    pipeline_rows = []
+    pipeline_loops = find_pipeline_loops(result.pipeline_structure)
+    for loop in pipeline_loops:
+        loop_label = loop.name
+        if len(pipeline_loops) > 1:
+            loop_label = f"{loop.name} [resident={loop.resident_tiles}]"
+        pipeline_rows.extend(
+            [
+                (f"{loop_label} Iterations", "iteration", str(loop.iterations)),
+                (f"{loop_label} Software Stages", "stage", str(loop.pipeline_stages)),
+                (f"{loop_label} Resident Tiles", "tile", str(loop.resident_tiles)),
+                (f"{loop_label} Effective Depth", "iteration", str(loop.effective_depth)),
+                (
+                    f"{loop_label} Pro/Steady/Epi",
+                    "iteration",
+                    (
+                        f"{loop.prologue_iterations} / "
+                        f"{loop.steady_iterations} / "
+                        f"{loop.epilogue_iterations}"
+                    ),
+                ),
+            ]
+        )
+    print_metric_section("Recursive Pipeline Envelope", pipeline_rows)
 
     print()
     print(f"Output: {json_path}")

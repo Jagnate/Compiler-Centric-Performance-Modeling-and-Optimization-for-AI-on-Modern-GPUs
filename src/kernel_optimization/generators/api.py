@@ -1,4 +1,4 @@
-"""Hosted OpenAI-compatible chat-completions candidate generator."""
+"""Hosted OpenAI-compatible source-code candidate generator."""
 
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ class OpenAICompatibleGenerator:
     ) -> None:
         self.config = config
         self.transport = transport or _post_json
+        self.last_call_metadata: Dict[str, Any] = {}
 
     def generate(
         self,
@@ -83,6 +84,19 @@ class OpenAICompatibleGenerator:
             payload,
             self.config.timeout_seconds,
         )
+        choices = response.get("choices") or []
+        finish_reason = (
+            choices[0].get("finish_reason")
+            if choices and isinstance(choices[0], dict)
+            else None
+        )
+        self.last_call_metadata = {
+            "response_id": response.get("id"),
+            "requested_model": self.config.model,
+            "response_model": response.get("model"),
+            "finish_reason": finish_reason,
+            "usage": dict(response.get("usage") or {}),
+        }
         content = self._response_content(response)
         data = json.loads(_strip_json_fence(content))
         raw_candidates = data.get("candidates") if isinstance(data, dict) else data
@@ -93,8 +107,9 @@ class OpenAICompatibleGenerator:
             if not isinstance(raw, dict):
                 raise ValueError("each API candidate must be a JSON object")
             value = dict(raw)
-            if "parameter_updates" not in value and "parameters" in value:
-                value["parameter_updates"] = value.pop("parameters")
+            source_code = value.get("source_code")
+            if isinstance(source_code, str):
+                value["source_code"] = _strip_source_fence(source_code)
             proposals.append(CandidateProposal.from_dict(value))
         if not proposals:
             raise ValueError("API response did not contain any candidate proposals")
@@ -114,6 +129,13 @@ class OpenAICompatibleGenerator:
 def _strip_json_fence(text: str) -> str:
     match = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, re.DOTALL)
     return match.group(1) if match else text.strip()
+
+
+def _strip_source_fence(text: str) -> str:
+    match = re.fullmatch(r"\s*```(?:python|py)?\s*(.*?)\s*```\s*", text, re.DOTALL)
+    if match:
+        return match.group(1).rstrip() + "\n"
+    return text
 
 
 def _post_json(
@@ -142,4 +164,3 @@ def _post_json(
     if not isinstance(parsed, dict):
         raise ValueError("hosted API response must be a JSON object")
     return parsed
-

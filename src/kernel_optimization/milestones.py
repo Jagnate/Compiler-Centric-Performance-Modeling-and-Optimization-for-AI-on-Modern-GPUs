@@ -58,7 +58,10 @@ class NcuMilestonePolicy:
 
         disagreement = self._largest_disagreement(measured_this_round, all_records)
         if disagreement is not None:
-            return ProfileDecision(disagreement.candidate.candidate_id, "model-measurement-disagreement")
+            return ProfileDecision(
+                disagreement.candidate.candidate_id,
+                "model-measurement-disagreement",
+            )
 
         low_confidence = [
             item
@@ -128,4 +131,3 @@ class NcuMilestonePolicy:
         if not candidates:
             return None
         return max(candidates, key=lambda item: (item[0], item[1]))[2]
-

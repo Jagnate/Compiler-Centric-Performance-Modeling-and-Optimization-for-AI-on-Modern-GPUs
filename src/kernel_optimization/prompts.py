@@ -1,4 +1,4 @@
-"""English-only prompts for hosted candidate generation."""
+"""English-only prompts for hosted source-code candidate generation."""
 
 from __future__ import annotations
 
@@ -10,14 +10,17 @@ from .schema import Candidate, TaskSpec
 
 SYSTEM_PROMPT = """You are a senior GPU kernel optimization engineer.
 
-You propose candidate edits for an automated, correctness-gated optimization
-system. You do not execute code, fabricate measured results, or modify the
-reference implementation and evaluator. Treat fields under observed_evidence
-as hardware facts. Treat fields under predicted_evidence as analytical model
-predictions that may be wrong.
+You propose complete replacement source files for an automated,
+correctness-gated optimization system. You do not execute code, fabricate
+measured results, or modify the reference implementation, evaluator, workload,
+or external interface. Treat fields under observed_evidence as hardware facts.
+Treat fields under predicted_evidence as analytical model predictions that may
+be wrong.
 
-Return only valid JSON matching the requested schema. Do not include Markdown,
-explanations outside JSON, comments, or additional keys.
+The candidate source is untrusted and will be parsed, compiled, checked against
+the reference, and benchmarked independently. Return only valid JSON matching
+the requested schema. Do not include Markdown, comments outside JSON, patches,
+or additional top-level keys.
 """
 
 
@@ -28,45 +31,61 @@ def build_optimization_prompt(
     history: Sequence[Dict[str, Any]],
     count: int,
 ) -> str:
-    """Build a structured optimization request with explicit evidence provenance."""
+    """Build one source optimization request with explicit evidence provenance."""
 
     request = {
-        "objective": "Propose diverse, legal edits that may reduce measured kernel latency.",
+        "objective": (
+            "Propose diverse complete kernel source files that preserve semantics "
+            "and may reduce measured latency on the target GPU."
+        ),
         "candidate_count": count,
         "task": {
             "task_id": task.task_id,
             "description": task.description,
-            "reference": task.reference,
-            "search_space": {
-                name: list(values) for name, values in task.search_space.items()
-            },
+            "reference_semantics": task.reference,
+            "entrypoint": task.entrypoint,
+            "language": task.language,
+            "target": task.target,
+            "workload": task.workload,
+            "constraints": task.constraints,
         },
-        "parent": parent.to_dict(),
+        "parent": {
+            "candidate_id": parent.candidate_id,
+            "generation": parent.generation,
+            "source_name": parent.source_name,
+            "source_sha256": parent.source_sha256,
+            "hypothesis": parent.hypothesis,
+            "source_code": parent.source_code,
+        },
         "observed_evidence": evidence.get("observed"),
         "predicted_evidence": evidence.get("predicted"),
         "model_trust": evidence.get("model_trust"),
         "recent_history": list(history)[-12:],
         "rules": [
-            "Preserve mathematical semantics and the external kernel interface.",
-            "Use only parameter names and values declared in search_space.",
+            "Return the complete replacement content of the kernel source file.",
+            "Preserve mathematical semantics, entrypoint, and external interface.",
+            "Do not modify or reproduce the evaluator or reference implementation.",
+            "Do not add file, network, shell, subprocess, or environment access.",
             "Do not claim that predicted metrics were measured on hardware.",
-            "Prefer distinct hypotheses instead of repeating equivalent parameter sets.",
-            "Each proposal must change at least one parameter.",
+            "Make each candidate materially different and explain one primary hypothesis.",
+            "Use only APIs available to the input source and declared task environment.",
         ],
         "response_schema": {
             "candidates": [
                 {
                     "hypothesis": "string",
-                    "parameter_updates": {"declared_parameter_name": "declared_value"},
+                    "source_code": "complete Python source as a JSON string",
                     "expected_effect": {
                         "latency": "increase|decrease|unknown",
+                        "bottleneck": "string",
                         "reason": "string",
                     },
-                    "source_patch": None,
-                    "metadata": {"strategy": "string"},
+                    "metadata": {
+                        "strategy": "string",
+                        "changed_regions": ["string"],
+                    },
                 }
             ]
         },
     }
     return json.dumps(request, indent=2, sort_keys=True)
-

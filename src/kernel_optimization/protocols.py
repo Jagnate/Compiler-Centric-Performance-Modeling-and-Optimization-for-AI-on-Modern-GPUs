@@ -15,7 +15,7 @@ from .schema import (
 
 
 class CandidateGenerator(Protocol):
-    """Produce candidate edits for one measured parent."""
+    """Produce complete source candidates for one measured parent."""
 
     def generate(
         self,
@@ -39,4 +39,3 @@ class PerformanceBackend(Protocol):
 
     def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
         ...
-

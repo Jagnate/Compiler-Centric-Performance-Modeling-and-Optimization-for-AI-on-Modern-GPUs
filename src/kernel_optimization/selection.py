@@ -1,9 +1,10 @@
-"""Confidence-aware selection from the modeled pool to hardware evaluation."""
+"""Confidence-aware selection from source candidates to hardware evaluation."""
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import random
-from typing import Dict, List, Sequence
+from typing import List, Sequence
 
 from .schema import BudgetConfig, CandidateRecord, TaskSpec
 from .trust import TrustTracker
@@ -21,7 +22,7 @@ _CONFIDENCE = {
 
 
 class AdaptiveSelectionPolicy:
-    """Mix model exploitation with uncertainty, diversity, and random audit."""
+    """Mix model exploitation with uncertainty, source diversity, and audit."""
 
     def __init__(self, budget: BudgetConfig) -> None:
         self.budget = budget
@@ -42,6 +43,7 @@ class AdaptiveSelectionPolicy:
         measured_beam: Sequence[CandidateRecord],
         trust: TrustTracker,
     ) -> List[CandidateRecord]:
+        del task
         valid = [
             record
             for record in modeled
@@ -90,15 +92,16 @@ class AdaptiveSelectionPolicy:
 
         remaining = [item for item in valid if item.candidate.candidate_id not in selected_ids]
         if remaining:
-            references = [item.candidate.parameters for item in measured_beam]
+            references = [item.candidate.source_code for item in measured_beam]
+            references.extend(item.candidate.source_code for item in selected)
             diverse = max(
                 remaining,
                 key=lambda item: (
-                    self._distance_from_set(task, item.candidate.parameters, references),
+                    self._distance_from_set(item.candidate.source_code, references),
                     item.candidate.candidate_id,
                 ),
             )
-            add(diverse, "parameter-diversity")
+            add(diverse, "source-diversity")
 
         remaining = sorted(
             [item for item in valid if item.candidate.candidate_id not in selected_ids],
@@ -110,23 +113,17 @@ class AdaptiveSelectionPolicy:
         return selected
 
     @staticmethod
-    def _distance_from_set(
-        task: TaskSpec,
-        parameters: Dict[str, object],
-        references: Sequence[Dict[str, object]],
-    ) -> float:
+    def _distance_from_set(source_code: str, references: Sequence[str]) -> float:
         if not references:
             return 1.0
-
-        def distance(reference: Dict[str, object]) -> float:
-            total = 0.0
-            for name, values in task.search_space.items():
-                if len(values) <= 1:
-                    continue
-                left = values.index(parameters[name])
-                right = values.index(reference[name])
-                total += abs(left - right) / (len(values) - 1)
-            return total
-
-        return min(distance(reference) for reference in references)
-
+        source_lines = source_code.splitlines()
+        return min(
+            1.0
+            - SequenceMatcher(
+                None,
+                source_lines,
+                reference.splitlines(),
+                autojunk=False,
+            ).ratio()
+            for reference in references
+        )

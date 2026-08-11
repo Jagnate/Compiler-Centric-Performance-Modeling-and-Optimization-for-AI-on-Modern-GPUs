@@ -55,12 +55,19 @@ class CommandBackend:
             root = Path(directory)
             request_path = root / "request.json"
             response_path = root / "response.json"
+            source_path = root / candidate.source_name
+            source_path.write_text(candidate.source_code, encoding="utf-8")
             request_path.write_text(
                 json.dumps(
                     {
                         "stage": stage,
                         "task": task.to_dict(),
-                        "candidate": candidate.to_dict(),
+                        "candidate": candidate.to_dict(include_source=False),
+                        "source": {
+                            "path": str(source_path),
+                            "filename": candidate.source_name,
+                            "sha256": candidate.source_sha256,
+                        },
                     },
                     indent=2,
                     sort_keys=True,
@@ -77,7 +84,11 @@ class CommandBackend:
                 str(response_path),
             ]
             environment = os.environ.copy()
-            environment.update(self.environment)
+            for name, value in self.environment.items():
+                if name == "PYTHONPATH" and environment.get(name):
+                    environment[name] = value + os.pathsep + environment[name]
+                else:
+                    environment[name] = value
             completed = subprocess.run(
                 command,
                 cwd=str(self.working_directory) if self.working_directory else None,
@@ -102,4 +113,3 @@ class CommandBackend:
             if not isinstance(response, dict):
                 raise ValueError("external evaluator response must be a JSON object")
             return response
-

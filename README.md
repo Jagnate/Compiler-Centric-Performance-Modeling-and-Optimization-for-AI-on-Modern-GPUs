@@ -1,150 +1,223 @@
 # Compiler-Centric Performance Modeling and Optimization for AI on Modern GPUs
 
 This repository is an MSc Computing Individual Project at Imperial College
-London, supervised by Dr. Hongxiang Fan and Zhiwen Mo. It explores how a
-compiler-visible analytical performance model can reduce the cost of iterative
+London, supervised by Dr. Hongxiang Fan and Zhiwen Mo. It investigates whether
+compiler-visible analytical modeling can reduce the hardware cost of iterative
 GPU kernel optimization.
 
-The current code is an initial, dependency-free optimization framework. It does
-not contain the previous standalone performance model. TileSight is intended to
-be connected as an external performance backend on the GPU server.
+The current system accepts a GPU kernel source file as its primary input. A
+hosted language-model API proposes complete replacement implementations in an
+implicit, open-ended code space. TileSight evaluates all statically valid
+candidates cheaply, while correctness checks, CUDA Event timing, and selective
+NCU profiling provide progressively more expensive hardware evidence.
 
-## Research Goal
+## Research Question
 
-The core question is:
-
-> Under equal wall-clock, GPU-time, profiling-call, and language-model budgets,
+> Under equal wall-clock, GPU-time, profiling-call, and hosted-model budgets,
 > can analytical-model-guided adaptive evaluation find equally fast or faster
 > kernels with fewer expensive hardware evaluations?
 
-The framework treats each source of evidence differently:
+Each evidence source has a distinct role:
 
 ```text
-Hosted LLM       proposes optimization hypotheses and candidate edits
+Hosted LLM       proposes complete candidate kernel sources
+Static validator rejects malformed or contract-breaking Python
 TileSight        predicts latency, resources, utilization, and bottlenecks
 Correctness      protects mathematical semantics
 CUDA Events      provide the measured latency used to rank the official beam
-NCU              provides milestone-level hardware diagnosis and calibration
+NCU              provides milestone-level diagnosis and calibration
 ```
 
-Neither the LLM nor the analytical model is trusted as the final judge.
+The hosted model and TileSight are proposal and ranking tools. Neither is the
+final judge of correctness or measured performance.
 
-## Current Status
+## Source-First Interface
 
-Implemented:
+The user supplies two inputs:
 
-- versioned JSON task specifications;
-- immutable content-derived candidate identities;
-- deterministic mock and hosted API candidate generators;
-- low-cost model, real-measurement, and expensive-profile backend stages;
-- adaptive promotion based on online model trust;
-- model-top, low-confidence, diversity, and random-audit selection;
-- a correctness-gated measured beam;
-- event-triggered NCU milestone decisions;
-- atomic candidate artifacts, event logs, state snapshots, and final summaries;
-- an in-process deterministic mock backend;
-- a subprocess JSON backend for TileSight or another compiler runtime;
-- a local command-backend example;
-- unit tests that require no GPU, network, TileLang, or hosted API.
+1. a TileLang Python source file containing the kernel factory;
+2. a JSON task contract describing semantics, entrypoint, workload, target,
+   evaluation command, and budgets.
 
-Not implemented yet:
+The source file is the primary optimization object. The task JSON does not
+declare a finite parameter search space. The hosted model may change tiling,
+thread and warp mappings, software pipelines, memory layouts, vectorization,
+fusion structure, TileLang primitives, and other implementation details.
 
-- the server-side TileSight adapter for a real TileLang workload;
-- source-patch application and compilation sandboxing;
-- resume from an interrupted state snapshot;
-- multi-shape kernel portfolios and guarded dispatch;
-- a dashboard or distributed job queue.
+The input source is never modified. Every generated implementation is stored as
+an immutable source candidate, identified by its complete source SHA-256 digest.
 
-## Architecture
+## Search Loop
 
 ```text
-TaskSpec
+Measured source beam ------------------------------------------+
+   |                                                           |
+   v                                                           |
+Hosted API proposes complete replacement source files          |
+   |                                                           |
+   v                                                           |
+Python syntax and task-invariant validation                     |
+   |                                                           |
+   v                                                           |
+TileSight model for every valid candidate                       |
+   |                                                           |
+   v                                                           |
+Adaptive promotion                                             |
+   |  model top + low confidence + source diversity + audit    |
+   v                                                           |
+Compile + reference correctness + CUDA Event measurement       |
+   |                                                           |
+   +---- incorrect candidate -> archived failure               |
+   |                                                           |
+   v                                                           |
+Measured beam update -------------------------------------------+
    |
-   v
-Measured parent beam ------------------------------+
-   |                                               |
-   v                                               |
-Candidate generator                                |
-   |  deterministic mock or hosted API             |
-   v                                               |
-All generated candidates                           |
-   |                                               |
-   v                                               |
-Low-cost performance model                         |
-   |                                               |
-   v                                               |
-Adaptive selection                                 |
-   |  model-top + uncertainty + diversity + audit  |
-   v                                               |
-Compile / correctness / CUDA Event measurement     |
-   |                                               |
-   +---- incorrect candidates -> archived failure  |
-   |                                               |
-   v                                               |
-Measured beam update -------------------------------+
-   |
-   +---- milestone trigger -> NCU profile -> next-round evidence
+   +---- milestone trigger -> NCU -> next-round observed evidence
 ```
 
-Only candidates that pass correctness and receive a measured latency can enter
-the official beam. Model-only candidates remain in the predicted pool.
+Only correctness-passing candidates with measured latency can enter the beam.
+Model-only candidates remain predicted evidence and can never become the final
+answer.
+
+The open-ended source space is not enumerated. The hosted model acts as a
+proposal policy and samples a small number of promising transformations each
+round. The controller uses adaptive-fidelity evaluation to decide where scarce
+GPU and NCU calls should be spent.
 
 ## Requirements
 
-- Python 3.10 or newer;
-- no runtime Python dependencies for mock or command modes;
-- a GPU/compiler environment only when a real evaluator is connected;
-- network access and a hosted API key only for API generation mode.
+Controller machine:
 
-Install in editable mode:
+- Python 3.10 or newer;
+- network access to an OpenAI-compatible chat-completions endpoint;
+- no additional Python runtime dependencies.
+
+GPU evaluator machine:
+
+- TileLang and its bundled TVM;
+- TileSight with the TIR interface;
+- CUDA and a supported GPU;
+- NCU for milestone profiling;
+- PyTorch for the included matmul reference check.
+
+Install the controller in editable mode:
 
 ```bash
 python3 -m pip install -e .
 ```
 
-Installation is optional during development. Commands below can instead use
-`PYTHONPATH=src`.
+Installation is optional. Commands can use `PYTHONPATH=src` instead.
 
-## Local Mock Run
+## Included Matmul Example
 
-The mock task contains a hidden deterministic performance surface and a
-deliberately biased analytical model. It validates the complete optimization
-loop without a GPU or API.
+The repository contains:
+
+```text
+examples/tilelang_matmul_kernel.py   API-editable input kernel
+examples/tilelang_matmul_task.json   immutable optimization contract
+examples/tilesight_matmul_adapter.py TileSight/CUDA/NCU evaluator
+```
+
+The task targets an RTX 3090 with a 2048 x 2048 x 2048 FP16 matmul workload.
+Edit the target and workload fields when running on another GPU or shape.
+
+## Hosted API Configuration
+
+The generator uses an OpenAI-compatible chat-completions endpoint through the
+Python standard library. No local model deployment or provider SDK is required.
+
+```bash
+export KERNEL_OPT_API_URL="https://provider.example/v1/chat/completions"
+export KERNEL_OPT_API_MODEL="provider-model-id"
+export KERNEL_OPT_API_KEY="secret"
+```
+
+Run source optimization from the repository root:
 
 ```bash
 PYTHONPATH=src python3 -m kernel_optimization.cli \
-  --task examples/mock_task.json \
-  --generator mock \
-  --output results/mock_run
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output results/matmul_api_run
 ```
 
-Expected behavior:
+The CLI has no mock or parameter-search mode. A hosted API and a command
+evaluator are required for a production run.
 
-- the initial seed is modeled, checked, measured, and profiled;
-- each round generates local schedule mutations;
-- all candidates receive a cheap model prediction;
-- an adaptive subset receives a correctness check and measured latency;
-- only correct measured candidates update the beam;
-- milestone candidates receive a mock NCU profile;
-- `summary.json` reports a speedup over the seed.
+The endpoint must accept an OpenAI-compatible `messages` request and return
+`choices[0].message.content`. The response content must be JSON:
 
-Use a fresh output directory for every run. The CLI refuses to mix a new run
-with an existing non-empty artifact directory.
-
-## Subprocess Evaluator Contract
-
-The command backend keeps this controller independent from TileLang, TVM, CUDA,
-and TileSight imports. The included example runs the same three-stage protocol
-in a separate Python process:
-
-```bash
-PYTHONPATH=src python3 -m kernel_optimization.cli \
-  --task examples/command_task.json \
-  --generator mock \
-  --output results/command_run
+```json
+{
+  "candidates": [
+    {
+      "hypothesis": "Reduce register pressure by changing the pipeline structure.",
+      "source_code": "from tilelang import language as T\n\ndef make_matmul_program(...):\n    ...\n",
+      "expected_effect": {
+        "latency": "decrease",
+        "bottleneck": "register-pressure",
+        "reason": "Higher occupancy may improve latency hiding."
+      },
+      "metadata": {
+        "strategy": "pipeline",
+        "changed_regions": ["shared-memory staging loop"]
+      }
+    }
+  ]
+}
 ```
 
-For each stage, the controller invokes:
+`source_code` is the complete replacement file, not a patch. Returning complete
+source avoids ambiguous patch application and makes each candidate independently
+reproducible.
+
+All prompts are English. They explicitly separate observed hardware evidence
+from analytical predictions and forbid modifications to the evaluator,
+reference implementation, workload, and external interface.
+
+## Task Contract
+
+The task JSON defines constraints around the open source space:
+
+```json
+{
+  "task_id": "tilelang_matmul_2048_rtx3090",
+  "description": "Optimize a TileLang FP16 matrix multiplication kernel.",
+  "reference": "Compute C = A @ transpose(B).",
+  "entrypoint": "make_matmul_program",
+  "language": "python",
+  "target": {
+    "architecture": "rtx3090",
+    "tilelang_target": "cuda -arch=sm_86"
+  },
+  "workload": {
+    "factory_arguments": {"m": 2048, "n": 2048, "k": 2048},
+    "output_indices": [2]
+  },
+  "constraints": {
+    "preserve_entrypoint": true,
+    "max_source_bytes": 200000,
+    "required_fragments": ["from tilelang import language as T"],
+    "forbidden_fragments": ["subprocess", "os.system"]
+  },
+  "budget": {},
+  "evaluator": {
+    "type": "command",
+    "command": ["python3", "examples/tilesight_matmul_adapter.py"],
+    "working_directory": "..",
+    "timeout_seconds": 1800,
+    "environment": {"PYTHONPATH": "../TileSight"}
+  }
+}
+```
+
+Human configuration controls semantics, safety boundaries, target conditions,
+and cost budgets. It does not enumerate implementation choices.
+
+## Evaluator Contract
+
+The controller remains independent from TileLang, TVM, CUDA, TileSight, and NCU
+imports. For each fidelity stage it invokes:
 
 ```text
 <configured command>
@@ -153,17 +226,29 @@ For each stage, the controller invokes:
   --response /temporary/response.json
 ```
 
-The request contains:
+The request contains candidate metadata and a temporary materialized source:
 
 ```json
 {
   "stage": "model",
   "task": {},
-  "candidate": {}
+  "candidate": {
+    "candidate_id": "...",
+    "source_name": "tilelang_matmul_kernel.py",
+    "source_sha256": "..."
+  },
+  "source": {
+    "path": "/temporary/tilelang_matmul_kernel.py",
+    "filename": "tilelang_matmul_kernel.py",
+    "sha256": "..."
+  }
 }
 ```
 
-The response for `model` must contain fields accepted by `ModelEvaluation`:
+### Model Stage
+
+The adapter should compile or lower the candidate without launching the GPU,
+run the TileSight TIR interface, and return:
 
 ```json
 {
@@ -176,173 +261,91 @@ The response for `model` must contain fields accepted by `ModelEvaluation`:
 }
 ```
 
-The response for `measure` must contain fields accepted by `Measurement`:
+Expected candidate compilation failures must return `valid=false` with
+diagnostics and process exit code zero. Nonzero exit codes are reserved for
+evaluator infrastructure failures.
+
+### Measure Stage
+
+The adapter compiles the selected candidate, compares it with an immutable
+reference implementation, and uses CUDA Event timing only after correctness
+passes:
 
 ```json
 {
   "correct": true,
   "latency_ms": 0.16,
   "samples_ms": [0.159, 0.160, 0.161],
-  "metrics": {
-    "measurement_source": "cuda-events"
-  },
+  "metrics": {"measurement_source": "cuda-events"},
   "error": null
 }
 ```
 
-The response for `profile` must contain fields accepted by
-`ProfileEvaluation`:
+### Profile Stage
+
+The adapter runs NCU only for a selected milestone candidate and retains both
+the original report and exported CSV:
 
 ```json
 {
   "bottleneck": "register-pressure",
+  "valid": true,
   "metrics": {
     "achieved_occupancy": 0.5,
-    "compute_sol_pct": 60.0,
-    "memory_sol_pct": 35.0
+    "tensor_util": 60.0,
+    "ddr_util": 35.0
   },
-  "report_path": "/absolute/path/to/report.ncu-rep"
+  "report_path": "/absolute/path/to/candidate.ncu-rep",
+  "error": null
 }
 ```
 
-The process must exit with code zero and write the response file. Standard
-output is captured and included in an exception if the process fails.
+A failed NCU attempt returns `valid=false`. It is counted as an attempted
+profile call but is not treated as fresh profiling evidence, so a later
+milestone can retry.
 
-## Connecting TileSight on the GPU Server
-
-Implement a server-side adapter with the same command contract. It should:
-
-### `model` stage
-
-1. construct or render the TileLang candidate;
-2. call the TileSight TileLang/TIR interface;
-3. initially use `collect_ptxas=False` for the cheapest tier;
-4. return model latency, utilization, resources, diagnostics, provenance, and
-   an overall confidence label;
-5. avoid launching the GPU.
-
-### `measure` stage
-
-1. compile the selected candidate and collect ptxas resources;
-2. compare it with an immutable reference implementation;
-3. return `correct=false` immediately on a numerical failure;
-4. otherwise run a stable CUDA Event benchmark and return raw samples plus a
-   summary latency.
-
-### `profile` stage
-
-1. run NCU only for the selected milestone candidate;
-2. parse the relevant counters into a stable evidence schema;
-3. retain the original `.ncu-rep` and exported CSV;
-4. return the structured counters and report path.
-
-The adapter can import TileSight and TileLang on the server while the controller
-remains import-independent. Replace the `evaluator` section of a task file with:
-
-```json
-{
-  "type": "command",
-  "command": ["python3", "path/to/tilesight_adapter.py"],
-  "working_directory": "path/to/server/workspace",
-  "timeout_seconds": 600
-}
-```
-
-## Hosted API Generator
-
-The repository includes an OpenAI-compatible chat-completions adapter implemented
-with the Python standard library. No model deployment or additional SDK is
-required.
-
-Set the endpoint, model, and API key:
-
-```bash
-export KERNEL_OPT_API_URL="https://provider.example/v1/chat/completions"
-export KERNEL_OPT_API_MODEL="provider-model-id"
-export KERNEL_OPT_API_KEY="secret"
-```
-
-Run API generation against the local mock evaluator first:
-
-```bash
-PYTHONPATH=src python3 -m kernel_optimization.cli \
-  --task examples/mock_task.json \
-  --generator api \
-  --output results/api_mock_run
-```
-
-The endpoint must accept an OpenAI-compatible `messages` request and return
-`choices[0].message.content`. The model is instructed to return JSON only:
-
-```json
-{
-  "candidates": [
-    {
-      "hypothesis": "Reduce pipeline depth to lower register pressure.",
-      "parameter_updates": {
-        "num_stages": 2
-      },
-      "expected_effect": {
-        "latency": "decrease",
-        "reason": "Higher occupancy may improve latency hiding."
-      },
-      "source_patch": null,
-      "metadata": {
-        "strategy": "occupancy"
-      }
-    }
-  ]
-}
-```
-
-All system and user prompts are written in English. Prompts explicitly label
-hardware observations separately from TileSight predictions so the model cannot
-mistake an analytical estimate for a measured fact.
-
-The hosted model remains an untrusted candidate generator. Its output is
-schema-checked, constrained by the declared search space, deduplicated, and then
-sent through the independent evaluator.
+The included matmul adapter implements all three stages against TileSight's TIR
+interface and runtime validation helpers. It runs NCU in a child process so the
+profiled launch is distinct from model ranking and CUDA Event measurement.
 
 ## Adaptive Promotion
 
-The controller maintains two frontiers:
+The controller maintains:
 
-- **Predicted pool**: every candidate with a valid low-cost model result;
-- **Measured beam**: only correctness-passing candidates with real latency.
+- a predicted pool containing every statically and model-valid source;
+- a measured beam containing only correctness-passing hardware measurements.
 
-Online trust combines:
+Online trust combines mean absolute relative model error and agreement between
+predicted and measured optimization directions. Low trust moves real evaluation
+toward the configured maximum. High trust moves it toward the minimum.
 
-- mean absolute relative model error;
-- agreement between predicted and measured optimization directions.
-
-Low trust increases the number of real evaluations. High trust moves the count
-toward the configured minimum. Each promoted batch mixes:
+Each promoted batch combines:
 
 - model-top exploitation;
 - a low-confidence audit candidate;
-- a parameter-diverse candidate;
+- a source-diverse candidate measured by line-sequence distance;
 - deterministic random-audit candidates.
 
-This prevents an imperfect model from permanently hiding every candidate it
+This policy preserves a route to discover candidates that an imperfect model
 misranks.
 
 ## NCU Milestones
 
-The controller profiles at most one new candidate per round. Triggers include:
+The input source is profiled once. The controller then profiles at most one new
+candidate per round when it observes:
 
-- the initial seed;
 - a meaningful measured improvement;
-- a model-versus-measurement direction disagreement;
-- a low-confidence measured candidate;
-- stale profiling evidence;
+- disagreement between predicted and measured direction;
+- low model confidence;
+- stale hardware evidence;
 - a search plateau.
 
-CUDA Event timing calibrates latency ranking. NCU calibrates the bottleneck
-explanation. Numerical correctness remains a separate gate.
+CUDA Event timing ranks candidates. NCU explains bottlenecks and informs later
+API proposals.
 
 ## Artifacts
 
-Each run writes:
+Every run writes:
 
 ```text
 <output>/
@@ -350,41 +353,53 @@ Each run writes:
   events.jsonl
   state.json
   summary.json
+  best_candidate.json
+  best_kernel.py
   candidates/
-    <candidate-id>.json
+    <candidate-id>/
+      record.json
+      <original-source-name>.py
 ```
 
-Candidate records contain lineage, parameters, hypothesis, model evidence,
-measurement, optional profile evidence, selection reasons, and decision state.
-Failed and non-promoted candidates are retained for analysis.
+Candidate records retain lineage, source hash, optimization hypothesis, model
+evidence, correctness and timing results, optional NCU evidence, selection
+reasons, and final state. Failed and non-promoted sources remain available for
+analysis. `task.json` also records the hosted model, endpoint, sampling
+temperature, framework version, and API-key environment-variable name, but
+never the API key value. `summary.json` records API call count and accumulates
+numeric token-usage fields returned by the provider, alongside model, hardware,
+NCU call counts, and total controller wall-clock time.
 
-## Tests
+## Offline Tests
 
-Run the complete local suite:
+Tests use a fake API transport and test-only evaluator classes. They make no
+network calls, import no TileLang or TileSight modules, and require no GPU:
 
 ```bash
 python3 -m unittest discover -s tests -t . -v
 ```
 
-The tests use fake API transport and deterministic evaluators. They make no
-network calls and require no GPU.
+Coverage includes:
 
-## Suggested Development Order
+- complete-source API response parsing;
+- English prompt and evidence provenance;
+- source identity and immutable candidate materialization;
+- Python syntax, entrypoint, required-fragment, and forbidden-fragment checks;
+- subprocess source-file contract for all three fidelity stages;
+- adaptive promotion and source diversity;
+- rejection of invalid and incorrect generated kernels;
+- measured-beam integrity and `best_kernel.py` export.
 
-1. Validate offline selection policies using existing GEMM and FlashAttention
-   sweep reports.
-2. Add the real TileSight command adapter for one TileLang GEMM task.
-3. Run deterministic online parameter search on the server.
-4. Run the hosted API generator against the mock evaluator.
-5. Combine hosted API generation with the real TileSight adapter.
-6. Add source-patch rendering and compile/correctness repair.
-7. Extend from one fixed shape to validated multi-shape kernel portfolios.
+## Security Boundary
 
-## Trust Boundary
+API-generated code is untrusted. Static syntax and fragment checks are useful
+filters, not a security sandbox. The command evaluator must run compilation and
+execution with appropriate process, filesystem, network, GPU, and time limits
+for the deployment environment. The editable source must remain separate from
+the immutable evaluator and correctness reference.
 
-The design does not require the language model or TileSight to be perfectly
-accurate. It requires failures to remain observable and recoverable:
+The research trust invariant is:
 
-> If a prediction is wrong, the selection policy must retain a path to discover
-> the error; hardware evidence must influence later rounds; and the final best
-> candidate must always be correctness-passing and measured on the target GPU.
+> If a prediction is wrong, selection must retain a path to discover the error;
+> hardware evidence must influence later rounds; and the final source must
+> always be correctness-passing and measured on the target GPU.

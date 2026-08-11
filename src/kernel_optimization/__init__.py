@@ -12,6 +12,7 @@ from .schema import (
     SearchSummary,
     TaskSpec,
 )
+from .source_validation import SourceValidationError, SourceValidator
 
 __all__ = [
     "BudgetConfig",
@@ -23,8 +24,9 @@ __all__ = [
     "OptimizationController",
     "ProfileEvaluation",
     "SearchSummary",
+    "SourceValidationError",
+    "SourceValidator",
     "TaskSpec",
 ]
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"

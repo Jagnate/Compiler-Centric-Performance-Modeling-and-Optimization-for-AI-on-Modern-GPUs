@@ -1,0 +1,66 @@
+{
+  "task_id": "tilelang_matmul_2048_rtx3090",
+  "description": "Optimize a TileLang FP16 matrix multiplication kernel for an RTX 3090.",
+  "reference": "For row-major A[M,K] and transposed-storage B[N,K], compute C = A @ transpose(B) with float32 accumulation and float16 output.",
+  "entrypoint": "make_matmul_program",
+  "language": "python",
+  "target": {
+    "architecture": "rtx3090",
+    "tilelang_target": "cuda -arch=sm_86",
+    "write_policy": "write-through"
+  },
+  "workload": {
+    "factory_arguments": {
+      "m": 2048,
+      "n": 2048,
+      "k": 2048
+    },
+    "output_indices": [2],
+    "atol": 0.01,
+    "rtol": 0.01,
+    "max_mismatched_ratio": 0.01,
+    "warmup_ms": 25.0,
+    "rep_ms": 100.0,
+    "benchmark_backend": "event",
+    "return_mode": "median"
+  },
+  "constraints": {
+    "preserve_entrypoint": true,
+    "max_source_bytes": 200000,
+    "required_fragments": [
+      "from tilelang import language as T",
+      "def make_matmul_program"
+    ],
+    "forbidden_fragments": [
+      "subprocess",
+      "os.system",
+      "eval(",
+      "exec("
+    ]
+  },
+  "budget": {
+    "rounds": 4,
+    "proposals_per_round": 6,
+    "beam_width": 3,
+    "min_promotions_per_round": 2,
+    "max_promotions_per_round": 4,
+    "ncu_improvement_threshold": 0.05,
+    "ncu_max_staleness_rounds": 3,
+    "ncu_plateau_rounds": 2,
+    "random_seed": 7
+  },
+  "evaluator": {
+    "type": "command",
+    "command": ["python3", "examples/tilesight_matmul_adapter.py"],
+    "working_directory": "..",
+    "timeout_seconds": 1800,
+    "environment": {
+      "PYTHONPATH": "../TileSight"
+    }
+  },
+  "metadata": {
+    "profile_directory": "results/ncu_profiles",
+    "ncu_set": "full",
+    "purpose": "End-to-end hosted-API source optimization example."
+  }
+}

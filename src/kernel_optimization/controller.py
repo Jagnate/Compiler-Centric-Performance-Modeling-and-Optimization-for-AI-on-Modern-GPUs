@@ -1,48 +1,66 @@
-"""Deterministic adaptive-fidelity optimization controller."""
+"""Adaptive-fidelity controller for API-generated kernel source candidates."""
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import time
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .archive import ArtifactStore
 from .milestones import NcuMilestonePolicy
 from .protocols import CandidateGenerator, PerformanceBackend
-from .schema import (
-    Candidate,
-    CandidateRecord,
-    SearchSummary,
-    TaskSpec,
-)
+from .schema import Candidate, CandidateRecord, SearchSummary, TaskSpec
 from .selection import AdaptiveSelectionPolicy
+from .source_validation import SourceValidationError, SourceValidator
 from .trust import TrustTracker
 
 
 class OptimizationController:
-    """Generate, model, promote, measure, profile, and archive candidates."""
+    """Generate source, model, promote, measure, profile, and archive candidates."""
 
     def __init__(
         self,
         task: TaskSpec,
+        source_code: str,
+        source_name: str,
         generator: CandidateGenerator,
         backend: PerformanceBackend,
         store: ArtifactStore,
+        source_validator: Optional[SourceValidator] = None,
+        run_metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.task = task
+        self.source_code = source_code
+        self.source_name = source_name
         self.generator = generator
         self.backend = backend
         self.store = store
+        self.source_validator = source_validator or SourceValidator()
+        self.run_metadata = dict(run_metadata or {})
         self.selection = AdaptiveSelectionPolicy(task.budget)
         self.milestones = NcuMilestonePolicy(task.budget)
         self.trust = TrustTracker()
         self.records: Dict[str, CandidateRecord] = {}
         self.beam: List[CandidateRecord] = []
         self.profile_calls = 0
+        self.generator_calls = 0
+        self.generator_usage: Dict[str, float] = {}
 
     def run(self) -> SearchSummary:
-        self.store.initialize(self.task)
-        seed = self._initialize_seed()
+        started_at = time.perf_counter()
+        seed_candidate = Candidate.seed(
+            self.task,
+            source_code=self.source_code,
+            source_name=self.source_name,
+        )
+        self.source_validator.validate(
+            self.task,
+            seed_candidate.source_code,
+            seed_candidate.source_name,
+        )
+        self.store.initialize(self.task, seed_candidate, self.run_metadata)
+        seed = self._initialize_seed(seed_candidate)
         self.beam = [seed]
         completed_rounds = 0
 
@@ -51,7 +69,7 @@ class OptimizationController:
             if not generated:
                 self.store.append_event(
                     "round_stopped",
-                    {"round": round_number, "reason": "no-new-candidates"},
+                    {"round": round_number, "reason": "no-new-valid-source-candidates"},
                 )
                 break
 
@@ -80,36 +98,44 @@ class OptimizationController:
             completed_rounds = round_number
             self._save_round_state(round_number)
 
-        summary = self._summary(completed_rounds, seed)
+        best_source_path = self.store.save_best(self.beam[0])
+        summary = self._summary(
+            completed_rounds,
+            seed,
+            best_source_path,
+            elapsed_seconds=time.perf_counter() - started_at,
+        )
         self.store.save_summary(summary)
         self.store.append_event("run_completed", summary.to_dict())
         return summary
 
-    def _initialize_seed(self) -> CandidateRecord:
-        candidate = Candidate.seed(self.task)
+    def _initialize_seed(self, candidate: Candidate) -> CandidateRecord:
         record = CandidateRecord(candidate=candidate)
         self.records[candidate.candidate_id] = record
+        self.store.save_candidate(record)
         record.model = self.backend.model(self.task, candidate)
         if not record.model.valid:
             record.state = "seed-model-invalid"
             self.store.save_candidate(record)
-            raise RuntimeError("the seed candidate is invalid according to the model backend")
+            raise RuntimeError("the input kernel is invalid according to the model backend")
         record.measurement = self.backend.measure(self.task, candidate)
         if not record.measurement.correct:
             record.state = "seed-correctness-failed"
             self.store.save_candidate(record)
-            raise RuntimeError("the seed candidate failed correctness")
+            raise RuntimeError("the input kernel failed correctness")
         record.profile = self.backend.profile(self.task, candidate)
         self.profile_calls += 1
-        self.milestones.mark_profiled(record, round_number=0)
+        if record.profile.valid:
+            self.milestones.mark_profiled(record, round_number=0)
         record.state = "measured-beam"
-        record.selection_reasons.append("initial-seed")
-        record.decision_reason = "Verified and measured initial search seed."
+        record.selection_reasons.append("initial-source")
+        record.decision_reason = "Verified and measured input kernel."
         self.store.save_candidate(record)
         self.store.append_event(
             "seed_initialized",
             {
                 "candidate_id": candidate.candidate_id,
+                "source_sha256": candidate.source_sha256,
                 "latency_ms": record.measurement.latency_ms,
             },
         )
@@ -131,6 +157,21 @@ class OptimizationController:
                 history=self._history(),
                 count=request_count,
             )
+            self.generator_calls += 1
+            call_metadata = dict(
+                getattr(self.generator, "last_call_metadata", {}) or {}
+            )
+            self._accumulate_generator_usage(call_metadata.get("usage"))
+            self.store.append_event(
+                "generator_called",
+                {
+                    "round": round_number,
+                    "parent_id": parent_record.candidate.candidate_id,
+                    "requested_candidates": request_count,
+                    "returned_candidates": len(proposals),
+                    "provider": call_metadata,
+                },
+            )
             proposals_left -= len(proposals)
             for proposal in proposals:
                 try:
@@ -140,14 +181,19 @@ class OptimizationController:
                         proposal,
                         generation=round_number,
                     )
-                except ValueError as error:
+                    self.source_validator.validate(
+                        self.task,
+                        candidate.source_code,
+                        candidate.source_name,
+                    )
+                except (SourceValidationError, ValueError) as error:
                     self.store.append_event(
                         "proposal_rejected",
                         {
                             "round": round_number,
                             "parent_id": parent_record.candidate.candidate_id,
+                            "hypothesis": proposal.hypothesis,
                             "error": str(error),
-                            "proposal": proposal.to_dict(),
                         },
                     )
                     continue
@@ -183,7 +229,7 @@ class OptimizationController:
                 record.state = "modeled"
             else:
                 record.state = "model-invalid"
-                record.decision_reason = "Rejected by the low-cost model backend."
+                record.decision_reason = "Rejected by compiler or performance model."
             self.store.save_candidate(record)
         return list(records)
 
@@ -224,7 +270,7 @@ class OptimizationController:
                 continue
             if record.candidate.candidate_id in beam_ids:
                 record.state = "measured-beam"
-            elif record.state == "measured-beam" or record.state == "measured":
+            elif record.state in {"measured-beam", "measured"}:
                 record.state = "measured-not-in-beam"
             self.store.save_candidate(record)
 
@@ -246,16 +292,22 @@ class OptimizationController:
             return
         record = self.records[decision.candidate_id]
         record.profile = self.backend.profile(self.task, record.candidate)
-        record.selection_reasons.append("ncu:" + decision.reason)
         self.profile_calls += 1
-        self.milestones.mark_profiled(record, round_number)
+        if record.profile.valid:
+            record.selection_reasons.append("ncu:" + decision.reason)
+            self.milestones.mark_profiled(record, round_number)
+            event = "candidate_profiled"
+        else:
+            record.selection_reasons.append("ncu-failed:" + decision.reason)
+            event = "candidate_profile_failed"
         self.store.save_candidate(record)
         self.store.append_event(
-            "candidate_profiled",
+            event,
             {
                 "round": round_number,
                 "candidate_id": decision.candidate_id,
                 "reason": decision.reason,
+                "error": record.profile.error,
             },
         )
 
@@ -284,7 +336,7 @@ class OptimizationController:
                 "candidate_id": item.candidate.candidate_id,
                 "parent_id": item.candidate.parent_id,
                 "generation": item.candidate.generation,
-                "parameters": item.candidate.parameters,
+                "source_sha256": item.candidate.source_sha256,
                 "hypothesis": item.candidate.hypothesis,
                 "state": item.state,
                 "predicted_latency_ms": (
@@ -303,14 +355,29 @@ class OptimizationController:
                 "round": round_number,
                 "beam": [item.candidate.candidate_id for item in self.beam],
                 "best_candidate_id": self.beam[0].candidate.candidate_id,
+                "best_source_sha256": self.beam[0].candidate.source_sha256,
                 "best_latency_ms": self.beam[0].measurement.latency_ms,
                 "trust": self.trust.to_dict(),
                 "profile_calls": self.profile_calls,
+                "generator_calls": self.generator_calls,
+                "generator_usage": dict(self.generator_usage),
             }
         )
 
+    def _accumulate_generator_usage(self, usage: Any) -> None:
+        if not isinstance(usage, dict):
+            return
+        for name, value in usage.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            self.generator_usage[name] = self.generator_usage.get(name, 0.0) + float(value)
+
     def _summary(
-        self, completed_rounds: int, seed: CandidateRecord
+        self,
+        completed_rounds: int,
+        seed: CandidateRecord,
+        best_source_path: Path,
+        elapsed_seconds: float,
     ) -> SearchSummary:
         best = self.beam[0]
         seed_latency = float(seed.measurement.latency_ms)
@@ -320,6 +387,7 @@ class OptimizationController:
         return SearchSummary(
             task_id=self.task.task_id,
             best_candidate_id=best.candidate.candidate_id,
+            best_source_path=str(best_source_path),
             best_latency_ms=best_latency,
             seed_latency_ms=seed_latency,
             speedup_over_seed=seed_latency / best_latency,
@@ -331,7 +399,9 @@ class OptimizationController:
             measured_candidates=len(measured),
             correct_candidates=len(correct),
             profile_calls=self.profile_calls,
+            generator_calls=self.generator_calls,
+            generator_usage=dict(self.generator_usage),
+            elapsed_seconds=elapsed_seconds,
             trust=self.trust.to_dict(),
             output_directory=str(self.store.root),
         )
-

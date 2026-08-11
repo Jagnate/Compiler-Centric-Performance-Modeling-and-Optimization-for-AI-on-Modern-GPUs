@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compiler-centric-kernel-optimization"
-version = "0.1.0"
-description = "Adaptive-fidelity GPU kernel optimization with analytical modeling and selective hardware feedback."
+version = "0.2.0"
+description = "Hosted-API GPU kernel source optimization with analytical modeling and selective hardware feedback."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -19,4 +19,3 @@ kernel-opt = "kernel_optimization.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

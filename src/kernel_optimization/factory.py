@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .backends import CommandBackend, MockPerformanceBackend
+from .backends import CommandBackend
 from .protocols import PerformanceBackend
 from .schema import TaskSpec
 
@@ -13,9 +13,7 @@ def create_backend(task: TaskSpec, base_directory: Path) -> PerformanceBackend:
     """Create the evaluator declared by TaskSpec.evaluator."""
 
     configuration = dict(task.evaluator)
-    backend_type = str(configuration.pop("type", "mock"))
-    if backend_type == "mock":
-        return MockPerformanceBackend(configuration)
+    backend_type = str(configuration.pop("type", "command"))
     if backend_type == "command":
         command = configuration.pop("command", None)
         if not isinstance(command, list) or not command:
@@ -39,5 +37,7 @@ def create_backend(task: TaskSpec, base_directory: Path) -> PerformanceBackend:
             working_directory=working_directory,
             environment=environment,
         )
-    raise ValueError("unsupported evaluator type %r" % backend_type)
-
+    raise ValueError(
+        "unsupported evaluator type %r; source optimization requires a command evaluator"
+        % backend_type
+    )

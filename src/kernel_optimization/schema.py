@@ -1,19 +1,15 @@
-"""Serializable contracts shared by generators, evaluators, and search."""
+"""Serializable contracts shared by source generation, evaluation, and search."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import asdict, dataclass, field
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 
 JsonDict = Dict[str, Any]
-
-
-def _stable_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _require_positive_int(name: str, value: Any) -> int:
@@ -29,15 +25,21 @@ def _require_nonnegative_float(name: str, value: Any) -> float:
     return result
 
 
+def source_digest(source_code: str) -> str:
+    """Return the exact UTF-8 source digest used for candidate identity."""
+
+    return hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class BudgetConfig:
     """Search and hardware-evaluation budgets for one task."""
 
     rounds: int = 3
-    proposals_per_round: int = 8
+    proposals_per_round: int = 6
     beam_width: int = 3
-    min_promotions_per_round: int = 3
-    max_promotions_per_round: int = 6
+    min_promotions_per_round: int = 2
+    max_promotions_per_round: int = 4
     ncu_improvement_threshold: float = 0.05
     ncu_max_staleness_rounds: int = 3
     ncu_plateau_rounds: int = 2
@@ -74,52 +76,39 @@ class BudgetConfig:
 
 @dataclass(frozen=True)
 class TaskSpec:
-    """Immutable optimization task and evaluator configuration."""
+    """Optimization contract surrounding a user-provided kernel source file."""
 
     task_id: str
     description: str
     reference: str
-    base_parameters: JsonDict
-    search_space: Dict[str, Sequence[Any]]
+    entrypoint: str
+    language: str = "python"
+    target: JsonDict = field(default_factory=dict)
+    workload: JsonDict = field(default_factory=dict)
+    constraints: JsonDict = field(default_factory=dict)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     evaluator: JsonDict = field(default_factory=dict)
     metadata: JsonDict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip():
-            raise ValueError("task_id cannot be empty")
-        if not self.description.strip():
-            raise ValueError("description cannot be empty")
-        if not self.reference.strip():
-            raise ValueError("reference cannot be empty")
-        if not self.base_parameters:
-            raise ValueError("base_parameters cannot be empty")
-        unknown = set(self.base_parameters).difference(self.search_space)
-        if unknown:
-            raise ValueError(
-                "base parameters are missing from search_space: %s"
-                % ", ".join(sorted(unknown))
-            )
-        for name, values in self.search_space.items():
-            if not values:
-                raise ValueError("search_space[%r] cannot be empty" % name)
-            if name in self.base_parameters and self.base_parameters[name] not in values:
-                raise ValueError(
-                    "base parameter %r=%r is not present in its search space"
-                    % (name, self.base_parameters[name])
-                )
+        for name in ("task_id", "description", "reference", "entrypoint"):
+            if not str(getattr(self, name)).strip():
+                raise ValueError("%s cannot be empty" % name)
+        if self.language != "python":
+            raise ValueError("only Python kernel sources are currently supported")
+        if not isinstance(self.target, dict):
+            raise ValueError("target must be a JSON object")
+        if not isinstance(self.workload, dict):
+            raise ValueError("workload must be a JSON object")
+        if not isinstance(self.constraints, dict):
+            raise ValueError("constraints must be a JSON object")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TaskSpec":
         data = dict(value)
         data["budget"] = BudgetConfig.from_dict(data.get("budget"))
-        data["base_parameters"] = dict(data.get("base_parameters") or {})
-        data["search_space"] = {
-            str(name): tuple(values)
-            for name, values in dict(data.get("search_space") or {}).items()
-        }
-        data["evaluator"] = dict(data.get("evaluator") or {})
-        data["metadata"] = dict(data.get("metadata") or {})
+        for name in ("target", "workload", "constraints", "evaluator", "metadata"):
+            data[name] = dict(data.get(name) or {})
         return cls(**data)
 
     @classmethod
@@ -127,66 +116,27 @@ class TaskSpec:
         return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def to_dict(self) -> JsonDict:
-        result = asdict(self)
-        result["search_space"] = {
-            name: list(values) for name, values in self.search_space.items()
-        }
-        return result
-
-    def merge_parameters(self, updates: Mapping[str, Any]) -> JsonDict:
-        unknown = set(updates).difference(self.search_space)
-        if unknown:
-            raise ValueError(
-                "proposal contains unsupported parameters: %s"
-                % ", ".join(sorted(unknown))
-            )
-        result = dict(self.base_parameters)
-        result.update(updates)
-        self.validate_parameters(result)
-        return result
-
-    def validate_parameters(self, parameters: Mapping[str, Any]) -> None:
-        missing = set(self.base_parameters).difference(parameters)
-        if missing:
-            raise ValueError(
-                "candidate is missing parameters: %s" % ", ".join(sorted(missing))
-            )
-        unknown = set(parameters).difference(self.search_space)
-        if unknown:
-            raise ValueError(
-                "candidate has unsupported parameters: %s"
-                % ", ".join(sorted(unknown))
-            )
-        for name, value in parameters.items():
-            if value not in self.search_space[name]:
-                raise ValueError(
-                    "candidate parameter %r=%r is outside the declared search space"
-                    % (name, value)
-                )
+        return asdict(self)
 
 
 @dataclass(frozen=True)
 class CandidateProposal:
-    """A generator hypothesis and the concrete edit it proposes."""
+    """One API-proposed complete replacement for the current kernel source."""
 
     hypothesis: str
-    parameter_updates: JsonDict = field(default_factory=dict)
+    source_code: str
     expected_effect: JsonDict = field(default_factory=dict)
-    source_patch: Optional[str] = None
     metadata: JsonDict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.hypothesis.strip():
             raise ValueError("candidate hypothesis cannot be empty")
-        if not self.parameter_updates and not self.source_patch:
-            raise ValueError(
-                "a candidate proposal needs parameter_updates or source_patch"
-            )
+        if not self.source_code.strip():
+            raise ValueError("candidate source_code cannot be empty")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "CandidateProposal":
         data = dict(value)
-        data["parameter_updates"] = dict(data.get("parameter_updates") or {})
         data["expected_effect"] = dict(data.get("expected_effect") or {})
         data["metadata"] = dict(data.get("metadata") or {})
         return cls(**data)
@@ -197,28 +147,29 @@ class CandidateProposal:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A concrete candidate with a stable content-derived identity."""
+    """A complete kernel source candidate with a content-derived identity."""
 
     candidate_id: str
     task_id: str
     parent_id: Optional[str]
     generation: int
-    parameters: JsonDict
+    source_name: str
+    source_sha256: str
+    source_code: str
     hypothesis: str
     expected_effect: JsonDict = field(default_factory=dict)
-    source_patch: Optional[str] = None
     proposal_metadata: JsonDict = field(default_factory=dict)
 
     @classmethod
-    def seed(cls, task: TaskSpec) -> "Candidate":
+    def seed(cls, task: TaskSpec, source_code: str, source_name: str) -> "Candidate":
         return cls._create(
             task=task,
             parent_id=None,
             generation=0,
-            parameters=task.base_parameters,
-            hypothesis="Initial verified seed candidate.",
+            source_name=source_name,
+            source_code=source_code,
+            hypothesis="Initial user-provided kernel source.",
             expected_effect={},
-            source_patch=None,
             proposal_metadata={"generator": "seed"},
         )
 
@@ -230,17 +181,14 @@ class Candidate:
         proposal: CandidateProposal,
         generation: int,
     ) -> "Candidate":
-        parameters = dict(parent.parameters)
-        parameters.update(proposal.parameter_updates)
-        task.validate_parameters(parameters)
         return cls._create(
             task=task,
             parent_id=parent.candidate_id,
             generation=generation,
-            parameters=parameters,
+            source_name=parent.source_name,
+            source_code=proposal.source_code,
             hypothesis=proposal.hypothesis,
             expected_effect=proposal.expected_effect,
-            source_patch=proposal.source_patch,
             proposal_metadata=proposal.metadata,
         )
 
@@ -250,33 +198,36 @@ class Candidate:
         task: TaskSpec,
         parent_id: Optional[str],
         generation: int,
-        parameters: Mapping[str, Any],
+        source_name: str,
+        source_code: str,
         hypothesis: str,
         expected_effect: Mapping[str, Any],
-        source_patch: Optional[str],
         proposal_metadata: Mapping[str, Any],
     ) -> "Candidate":
-        identity = {
-            "task_id": task.task_id,
-            "parameters": dict(parameters),
-            "source_patch": source_patch,
-            "patch_parent_id": parent_id if source_patch else None,
-        }
-        candidate_id = hashlib.sha256(_stable_json(identity).encode("utf-8")).hexdigest()[:16]
+        safe_name = Path(source_name).name
+        if not safe_name or safe_name in {".", ".."}:
+            raise ValueError("source_name must identify a file")
+        digest = source_digest(source_code)
+        identity = "%s\0%s" % (task.task_id, digest)
+        candidate_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         return cls(
             candidate_id=candidate_id,
             task_id=task.task_id,
             parent_id=parent_id,
             generation=generation,
-            parameters=dict(parameters),
+            source_name=safe_name,
+            source_sha256=digest,
+            source_code=source_code,
             hypothesis=hypothesis,
             expected_effect=dict(expected_effect),
-            source_patch=source_patch,
             proposal_metadata=dict(proposal_metadata),
         )
 
-    def to_dict(self) -> JsonDict:
-        return asdict(self)
+    def to_dict(self, include_source: bool = True) -> JsonDict:
+        result = asdict(self)
+        if not include_source:
+            result.pop("source_code")
+        return result
 
 
 @dataclass(frozen=True)
@@ -340,6 +291,8 @@ class ProfileEvaluation:
     bottleneck: str
     metrics: JsonDict = field(default_factory=dict)
     report_path: Optional[str] = None
+    valid: bool = True
+    error: Optional[str] = None
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ProfileEvaluation":
@@ -353,7 +306,7 @@ class ProfileEvaluation:
 
 @dataclass
 class CandidateRecord:
-    """Accumulated evidence and decision state for one candidate."""
+    """Accumulated evidence and decision state for one source candidate."""
 
     candidate: Candidate
     state: str = "generated"
@@ -371,9 +324,9 @@ class CandidateRecord:
             and self.measurement.latency_ms is not None
         )
 
-    def to_dict(self) -> JsonDict:
+    def to_dict(self, include_source: bool = False) -> JsonDict:
         return {
-            "candidate": self.candidate.to_dict(),
+            "candidate": self.candidate.to_dict(include_source=include_source),
             "state": self.state,
             "model": self.model.to_dict() if self.model else None,
             "measurement": self.measurement.to_dict() if self.measurement else None,
@@ -389,6 +342,7 @@ class SearchSummary:
 
     task_id: str
     best_candidate_id: str
+    best_source_path: str
     best_latency_ms: float
     seed_latency_ms: float
     speedup_over_seed: float
@@ -398,6 +352,9 @@ class SearchSummary:
     measured_candidates: int
     correct_candidates: int
     profile_calls: int
+    generator_calls: int
+    generator_usage: JsonDict
+    elapsed_seconds: float
     trust: JsonDict
     output_directory: str
 

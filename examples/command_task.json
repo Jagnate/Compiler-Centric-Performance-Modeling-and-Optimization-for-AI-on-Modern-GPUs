@@ -1,0 +1,53 @@
+{
+  "task_id": "mock_command_contract",
+  "description": "Exercise the subprocess JSON evaluator contract.",
+  "reference": "C = A @ B for fixed mock inputs.",
+  "base_parameters": {
+    "block_m": 128,
+    "block_n": 128,
+    "num_stages": 3,
+    "threads": 128
+  },
+  "search_space": {
+    "block_m": [64, 128],
+    "block_n": [64, 128],
+    "num_stages": [1, 2, 3],
+    "threads": [64, 128]
+  },
+  "budget": {
+    "rounds": 2,
+    "proposals_per_round": 6,
+    "beam_width": 2,
+    "min_promotions_per_round": 3,
+    "max_promotions_per_round": 5,
+    "ncu_improvement_threshold": 0.05,
+    "ncu_max_staleness_rounds": 2,
+    "ncu_plateau_rounds": 2,
+    "random_seed": 11
+  },
+  "evaluator": {
+    "type": "command",
+    "command": ["python3", "examples/mock_external_evaluator.py"],
+    "working_directory": "..",
+    "timeout_seconds": 30
+  },
+  "metadata": {
+    "external_mock_configuration": {
+      "minimum_latency_ms": 0.2,
+      "target_parameters": {
+        "block_m": 64,
+        "block_n": 64,
+        "num_stages": 2,
+        "threads": 128
+      },
+      "model_bias": -0.05,
+      "parameter_weights": {
+        "block_m": 0.1,
+        "block_n": 0.1,
+        "num_stages": 0.08,
+        "threads": 0.06
+      }
+    }
+  }
+}
+

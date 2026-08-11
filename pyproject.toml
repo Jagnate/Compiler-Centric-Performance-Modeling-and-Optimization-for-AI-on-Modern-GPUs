@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compiler-centric-kernel-optimization"
+version = "0.1.0"
+description = "Adaptive-fidelity GPU kernel optimization with analytical modeling and selective hardware feedback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Sijin" },
+]
+dependencies = []
+
+[project.scripts]
+kernel-opt = "kernel_optimization.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

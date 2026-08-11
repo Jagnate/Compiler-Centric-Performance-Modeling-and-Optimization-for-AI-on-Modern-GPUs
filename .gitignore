@@ -203,6 +203,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Kernel optimization artifacts
+results/
+artifacts/
+
 # Ruff stuff:
 .ruff_cache/
 

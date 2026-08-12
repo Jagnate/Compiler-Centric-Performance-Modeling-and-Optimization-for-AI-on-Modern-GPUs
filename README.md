@@ -98,7 +98,7 @@ GPU evaluator machine:
 - TileSight with the TIR interface;
 - CUDA and a supported GPU;
 - NCU for milestone profiling;
-- PyTorch for the included matmul reference check.
+- PyTorch for the included Matmul and Flash Attention reference checks.
 
 Install the controller in editable mode:
 
@@ -108,18 +108,43 @@ python3 -m pip install -e .
 
 Installation is optional. Commands can use `PYTHONPATH=src` instead.
 
-## Included Matmul Example
+## Included Workloads
 
 The repository contains:
 
 ```text
-examples/tilelang_matmul_kernel.py   API-editable input kernel
-examples/tilelang_matmul_task.json   immutable optimization contract
-examples/tilesight_matmul_adapter.py TileSight/CUDA/NCU evaluator
+examples/tilelang_matmul_kernel.py             API-editable Matmul seed
+examples/tilelang_matmul_task.json             Matmul optimization contract
+examples/tilelang_flash_attention_kernel.py    API-editable Flash Attention seed
+examples/tilelang_flash_attention_task.json    Flash Attention contract
+examples/tilesight_kernel_evaluator.py         shared TileSight/CUDA/NCU runtime
+examples/workloads/matmul.py                   immutable Matmul semantics
+examples/workloads/flash_attention.py          immutable attention semantics
 ```
 
-The task targets an RTX 3090 with a 2048 x 2048 x 2048 FP16 matmul workload.
-Edit the target and workload fields when running on another GPU or shape.
+Both tasks target an RTX 3090. Matmul uses a 2048 x 2048 x 2048 FP16 primary
+workload. Flash Attention uses B=1, H=32, S=1024, D=64 FP16 BSHD input. Edit
+the architecture, TileLang target, and semantic case shapes together when
+running on another GPU or workload.
+
+Before spending hosted-API credits, validate either seed through the exact
+generic evaluator used by search:
+
+```bash
+PYTHONPATH=src python3 examples/validate_seed_kernel.py \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output results/matmul_seed_validation
+
+PYTHONPATH=src python3 examples/validate_seed_kernel.py \
+  --source examples/tilelang_flash_attention_kernel.py \
+  --task examples/tilelang_flash_attention_task.json \
+  --output results/flash_attention_seed_validation
+```
+
+Add `--profile` to either command for one NCU collection. Without that flag the
+smoke run performs TileSight modeling, public multi-case correctness and CUDA
+Event timing, then a fresh held-out correctness and robust timing pass.
 
 ## Hosted API Configuration
 
@@ -139,6 +164,16 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --source examples/tilelang_matmul_kernel.py \
   --task examples/tilelang_matmul_task.json \
   --output results/matmul_api_run
+```
+
+Run Flash Attention through the same controller and evaluator by changing only
+the source, task, and output paths:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_flash_attention_kernel.py \
+  --task examples/tilelang_flash_attention_task.json \
+  --output results/flash_attention_api_run
 ```
 
 The CLI first sends a very small API preflight request. Authentication, model
@@ -229,16 +264,28 @@ The task JSON defines constraints around the open source space:
   "budget": {},
   "evaluator": {
     "type": "command",
-    "command": ["python3", "examples/tilesight_matmul_adapter.py"],
+    "command": ["python3", "examples/tilesight_kernel_evaluator.py"],
     "working_directory": "..",
     "timeout_seconds": 1800,
-    "environment": {"PYTHONPATH": "../TileSight"}
+    "environment": {"PYTHONPATH": "../TileSight"},
+    "runtime": {
+      "plugin": "examples/workloads/matmul.py",
+      "measurement_repeats": 2,
+      "final_repeats": 5,
+      "search_cases": [{"case_id": "primary"}],
+      "final_cases": [{
+        "case_id": "heldout-rectangular",
+        "factory_arguments": {"m": 3072, "n": 1024, "k": 2048}
+      }]
+    }
   }
 }
 ```
 
 Human configuration controls semantics, safety boundaries, target conditions,
-and cost budgets. It does not enumerate implementation choices.
+test cases, and cost budgets. It does not enumerate implementation choices.
+Only `target`, `workload`, and `constraints` enter generation prompts;
+`evaluator.runtime.final_cases` remain held out from the hosted model.
 
 ## Evaluator Contract
 
@@ -247,7 +294,7 @@ imports. For each fidelity stage it invokes:
 
 ```text
 <configured command>
-  --stage model|measure|profile
+  --stage model|measure|profile|final
   --request /temporary/request.json
   --response /temporary/response.json
 ```
@@ -267,7 +314,6 @@ The request contains candidate metadata and a temporary materialized source:
     "path": "/temporary/tilelang_matmul_kernel.py",
     "filename": "tilelang_matmul_kernel.py",
     "sha256": "..."
-  }
 }
 ```
 
@@ -330,9 +376,23 @@ A failed NCU attempt returns `valid=false`. It is counted as an attempted
 profile call but is not treated as fresh profiling evidence, so a later
 milestone can retry.
 
-The included matmul adapter implements all three stages against TileSight's TIR
-interface and runtime validation helpers. It runs NCU in a child process so the
-profiled launch is distinct from model ranking and CUDA Event measurement.
+### Final Stage
+
+After all search rounds, the seed and top measured beam candidates are compiled
+again in fresh evaluator processes. The final stage runs every public case,
+adds held-out cases that were absent from the API prompt, and collects several
+independent primary-case timing samples. It records median, mean, min, max,
+standard deviation, median absolute deviation, and coefficient of variation.
+The exported source is the lowest-median finalist that passes every case. A
+candidate that won the search timing but fails held-out correctness cannot be
+exported; the controller falls back to another validated finalist or the seed.
+
+The shared evaluator implements all four stages against TileSight's public TIR
+interface and runtime validation helpers. Workload plugins contain only the
+immutable reference, output indices, and case validation. Schedule parameters
+remain defaults in candidate source, so tile sizes, stages, threads, mappings,
+and algorithmic structure stay inside the LLM optimization space. NCU runs in a
+child process distinct from TileSight ranking and CUDA Event measurement.
 
 ## Adaptive Promotion
 
@@ -478,7 +538,7 @@ Coverage includes:
 - English prompt and evidence provenance;
 - source identity and immutable candidate materialization;
 - Python syntax, entrypoint, required-fragment, and forbidden-fragment checks;
-- subprocess source-file contract for all three fidelity stages;
+- subprocess source-file contract for all four fidelity stages;
 - adaptive promotion and source diversity;
 - rejection of invalid and incorrect generated kernels;
 - measured-beam integrity and `best_kernel.py` export.
@@ -490,6 +550,10 @@ Coverage includes:
 - cross-parent evidence propagation and lesson citation fields;
 - deterministic bottleneck categories and recommendations;
 - regime-local robust calibration with raw prediction preservation.
+- one generic evaluator contract shared by Matmul and Flash Attention;
+- public multi-case and held-out final correctness;
+- repeated timing statistics and fresh-process final selection;
+- rejection of a fast search winner when held-out semantics fail.
 
 ## Security Boundary
 

@@ -31,6 +31,9 @@ def create_backend(
                 working_directory = base_directory / working_directory
         timeout = float(configuration.pop("timeout_seconds", 300.0))
         environment = configuration.pop("environment", None)
+        runtime = configuration.pop("runtime", None)
+        if runtime is not None and not isinstance(runtime, dict):
+            raise ValueError("command evaluator runtime must be a JSON object")
         if configuration:
             raise ValueError(
                 "unsupported command evaluator fields: %s"

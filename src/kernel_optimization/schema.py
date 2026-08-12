@@ -52,6 +52,7 @@ class BudgetConfig:
     max_repairs_per_round: int = 2
     max_repair_depth: int = 2
     calibration_min_samples: int = 2
+    final_validation_candidates: int = 0
     random_seed: int = 0
 
     def __post_init__(self) -> None:
@@ -81,6 +82,9 @@ class BudgetConfig:
         _require_nonnegative_int("max_repair_depth", self.max_repair_depth)
         _require_positive_int(
             "calibration_min_samples", self.calibration_min_samples
+        )
+        _require_nonnegative_int(
+            "final_validation_candidates", self.final_validation_candidates
         )
         if isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int):
             raise ValueError("random_seed must be an integer")
@@ -430,6 +434,7 @@ class CandidateRecord:
     model: Optional[ModelEvaluation] = None
     measurement: Optional[Measurement] = None
     profile: Optional[ProfileEvaluation] = None
+    final_measurement: Optional[Measurement] = None
     failure: Optional[FailureEvidence] = None
     diagnosis: Optional[BottleneckDiagnosis] = None
     selection_reasons: List[str] = field(default_factory=list)
@@ -450,6 +455,9 @@ class CandidateRecord:
             "model": self.model.to_dict() if self.model else None,
             "measurement": self.measurement.to_dict() if self.measurement else None,
             "profile": self.profile.to_dict() if self.profile else None,
+            "final_measurement": (
+                self.final_measurement.to_dict() if self.final_measurement else None
+            ),
             "failure": self.failure.to_dict() if self.failure else None,
             "diagnosis": self.diagnosis.to_dict() if self.diagnosis else None,
             "selection_reasons": list(self.selection_reasons),
@@ -463,6 +471,7 @@ class CandidateRecord:
         model = data.get("model")
         measurement = data.get("measurement")
         profile = data.get("profile")
+        final_measurement = data.get("final_measurement")
         failure = data.get("failure")
         diagnosis = data.get("diagnosis")
         return cls(
@@ -471,6 +480,11 @@ class CandidateRecord:
             model=ModelEvaluation.from_dict(model) if model else None,
             measurement=Measurement.from_dict(measurement) if measurement else None,
             profile=ProfileEvaluation.from_dict(profile) if profile else None,
+            final_measurement=(
+                Measurement.from_dict(final_measurement)
+                if final_measurement
+                else None
+            ),
             failure=FailureEvidence.from_dict(failure) if failure else None,
             diagnosis=(
                 BottleneckDiagnosis.from_dict(diagnosis) if diagnosis else None
@@ -508,6 +522,11 @@ class SearchSummary:
     repair_candidates: int = 0
     evidence_lessons: int = 0
     calibration: JsonDict = field(default_factory=dict)
+    search_best_candidate_id: Optional[str] = None
+    search_best_latency_ms: Optional[float] = None
+    final_validation_calls: int = 0
+    final_validation_passes: int = 0
+    final_seed_latency_ms: Optional[float] = None
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

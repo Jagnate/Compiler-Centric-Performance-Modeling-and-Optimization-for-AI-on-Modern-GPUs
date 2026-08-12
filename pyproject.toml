@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compiler-centric-kernel-optimization"
-version = "0.4.0"
+version = "0.5.0"
 description = "Hosted-API GPU kernel source optimization with analytical modeling and selective hardware feedback."
 readme = "README.md"
 requires-python = ">=3.10"

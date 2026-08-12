@@ -12,7 +12,9 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=("model", "measure", "profile"), required=True)
+    parser.add_argument(
+        "--stage", choices=("model", "measure", "profile", "final"), required=True
+    )
     parser.add_argument("--request", type=Path, required=True)
     parser.add_argument("--response", type=Path, required=True)
     args = parser.parse_args()
@@ -39,12 +41,15 @@ def main() -> int:
             },
             "diagnostics": [],
         }
-    elif args.stage == "measure":
+    elif args.stage in {"measure", "final"}:
         response = {
             "correct": True,
             "latency_ms": 1.0,
             "samples_ms": [0.99, 1.0, 1.01],
-            "metrics": {"measurement_source": "test-contract"},
+            "metrics": {
+                "measurement_source": "test-contract",
+                "stage": args.stage,
+            },
             "error": None,
         }
     else:

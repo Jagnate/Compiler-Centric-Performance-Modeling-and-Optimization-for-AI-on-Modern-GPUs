@@ -1,8 +1,8 @@
 {
-  "task_id": "tilelang_matmul_2048_rtx3090",
-  "description": "Optimize a TileLang FP16 matrix multiplication kernel for an RTX 3090.",
-  "reference": "For row-major A[M,K] and transposed-storage B[N,K], compute C = A @ transpose(B) with float32 accumulation and float16 output.",
-  "entrypoint": "make_matmul_program",
+  "task_id": "tilelang_flash_attention_h32_s1024_d64_rtx3090",
+  "description": "Optimize a TileLang Flash Attention forward kernel in BSHD layout for an RTX 3090.",
+  "reference": "For BSHD float16 Q, K, and V, compute softmax(Q @ transpose(K) / sqrt(D)) @ V with optional causal masking and float32 accumulation.",
+  "entrypoint": "make_flash_attention_program",
   "language": "python",
   "target": {
     "architecture": "rtx3090",
@@ -11,11 +11,13 @@
   },
   "workload": {
     "factory_arguments": {
-      "m": 2048,
-      "n": 2048,
-      "k": 2048
+      "batch": 1,
+      "heads": 32,
+      "seq_len": 1024,
+      "dim": 64,
+      "is_causal": false
     },
-    "output_indices": [2],
+    "output_indices": [3],
     "atol": 0.01,
     "rtol": 0.01,
     "max_mismatched_ratio": 0.01,
@@ -26,10 +28,10 @@
   },
   "constraints": {
     "preserve_entrypoint": true,
-    "max_source_bytes": 200000,
+    "max_source_bytes": 300000,
     "required_fragments": [
       "from tilelang import language as T",
-      "def make_matmul_program"
+      "def make_flash_attention_program"
     ],
     "forbidden_fragments": [
       "subprocess",
@@ -51,7 +53,7 @@
     "max_repair_depth": 2,
     "calibration_min_samples": 2,
     "final_validation_candidates": 3,
-    "random_seed": 7
+    "random_seed": 11
   },
   "evaluator": {
     "type": "command",
@@ -62,7 +64,7 @@
       "PYTHONPATH": "../TileSight"
     },
     "runtime": {
-      "plugin": "examples/workloads/matmul.py",
+      "plugin": "examples/workloads/flash_attention.py",
       "architecture_profile": "ncu",
       "require_target_match": true,
       "model_collect_ptxas": true,
@@ -70,30 +72,48 @@
       "final_repeats": 5,
       "search_cases": [
         {
-          "case_id": "primary-m2048-n2048-k2048"
+          "case_id": "primary-b1-h32-s1024-d64"
         },
         {
-          "case_id": "public-m1024-n1024-k1024",
-          "factory_arguments": {"m": 1024, "n": 1024, "k": 1024}
+          "case_id": "public-b1-h2-s256-d64",
+          "factory_arguments": {
+            "batch": 1,
+            "heads": 2,
+            "seq_len": 256,
+            "dim": 64,
+            "is_causal": false
+          }
         }
       ],
       "final_cases": [
         {
-          "case_id": "heldout-m1536-n1536-k1536",
-          "factory_arguments": {"m": 1536, "n": 1536, "k": 1536}
+          "case_id": "heldout-causal-b1-h4-s512-d64",
+          "factory_arguments": {
+            "batch": 1,
+            "heads": 4,
+            "seq_len": 512,
+            "dim": 64,
+            "is_causal": true
+          }
         },
         {
-          "case_id": "heldout-m3072-n1024-k2048",
-          "factory_arguments": {"m": 3072, "n": 1024, "k": 2048}
+          "case_id": "heldout-b2-h8-s256-d64",
+          "factory_arguments": {
+            "batch": 2,
+            "heads": 8,
+            "seq_len": 256,
+            "dim": 64,
+            "is_causal": false
+          }
         }
       ],
-      "profile_directory": "results/ncu_profiles/matmul",
+      "profile_directory": "results/ncu_profiles/flash_attention",
       "ncu_set": "full",
       "ncu_cache_control": "all"
     }
   },
   "metadata": {
-    "kernel_family": "matmul",
+    "kernel_family": "flash-attention",
     "purpose": "End-to-end hosted-API source optimization example."
   }
 }

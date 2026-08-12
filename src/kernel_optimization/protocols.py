@@ -49,3 +49,6 @@ class PerformanceBackend(Protocol):
 
     def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
         ...
+
+    def finalize(self, task: TaskSpec, candidate: Candidate) -> Measurement:
+        ...

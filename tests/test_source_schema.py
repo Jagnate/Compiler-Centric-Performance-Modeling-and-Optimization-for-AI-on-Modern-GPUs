@@ -102,18 +102,26 @@ class SourceValidatorTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceValidationError, "entrypoint"):
             self.validator.validate(self.task, source, "kernel.py")
 
-    def test_included_tilelang_source_matches_its_task_contract(self) -> None:
+    def test_included_tilelang_sources_match_their_task_contracts(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
-        task = TaskSpec.from_json_file(
-            repository_root / "examples" / "tilelang_matmul_task.json"
+        examples = (
+            ("tilelang_matmul_task.json", "tilelang_matmul_kernel.py"),
+            (
+                "tilelang_flash_attention_task.json",
+                "tilelang_flash_attention_kernel.py",
+            ),
         )
-        source_path = repository_root / "examples" / "tilelang_matmul_kernel.py"
-
-        self.validator.validate(
-            task,
-            source_path.read_text(encoding="utf-8"),
-            source_path.name,
-        )
+        for task_name, source_name in examples:
+            with self.subTest(task=task_name):
+                task = TaskSpec.from_json_file(
+                    repository_root / "examples" / task_name
+                )
+                source_path = repository_root / "examples" / source_name
+                self.validator.validate(
+                    task,
+                    source_path.read_text(encoding="utf-8"),
+                    source_path.name,
+                )
 
     def test_rejects_forbidden_fragment(self) -> None:
         with self.assertRaisesRegex(SourceValidationError, "forbidden fragment"):

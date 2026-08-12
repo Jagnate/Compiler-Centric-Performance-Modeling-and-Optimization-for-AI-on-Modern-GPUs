@@ -64,6 +64,9 @@ class CommandBackend:
     def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
         return ProfileEvaluation.from_dict(self._run("profile", task, candidate))
 
+    def finalize(self, task: TaskSpec, candidate: Candidate) -> Measurement:
+        return Measurement.from_dict(self._run("final", task, candidate))
+
     def environment_manifest(self) -> Dict[str, Any]:
         environment, removed = self._build_environment()
         return {

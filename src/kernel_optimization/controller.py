@@ -42,7 +42,8 @@ _PHASE_ORDER = {
     "beam_updated": 5,
     "round_completed": 6,
     "search_stopped": 7,
-    "run_completed": 8,
+    "finalized": 8,
+    "run_completed": 9,
 }
 
 
@@ -89,6 +90,9 @@ class OptimizationController:
         self.repair_calls = 0
         self.repair_candidates = 0
         self._repairs_by_round: Dict[int, int] = {}
+        self.final_validation_calls = 0
+        self.final_validation_passes = 0
+        self._search_best_id: Optional[str] = None
         self.was_resumed = False
 
     def run(self) -> SearchSummary:
@@ -146,10 +150,40 @@ class OptimizationController:
                     break
                 completed_rounds = round_number
 
+            if self._search_best_id is None:
+                self._search_best_id = self.beam[0].candidate.candidate_id
+            search_best = self.records[self._search_best_id]
+            final_seed = seed
+            if self.task.budget.final_validation_candidates > 0:
+                final_best, final_seed = self._finalize_candidates(
+                    seed, completed_rounds
+                )
+                remaining = sorted(
+                    [
+                    item
+                    for item in self.beam
+                    if item.candidate.candidate_id
+                    != final_best.candidate.candidate_id
+                    and item.final_measurement is not None
+                    and item.final_measurement.correct
+                    ],
+                    key=lambda item: (
+                        float(item.final_measurement.latency_ms),
+                        item.candidate.candidate_id,
+                    ),
+                )
+                self.beam = ([final_best] + remaining)[: self.task.budget.beam_width]
+                self._checkpoint(
+                    phase="finalized",
+                    completed_round=completed_rounds,
+                    active_round=None,
+                )
             best_source_path = self.store.save_best(self.beam[0])
             summary = self._summary(
                 completed_rounds,
                 seed,
+                search_best,
+                final_seed,
                 best_source_path,
                 elapsed_seconds=time.perf_counter() - started_at,
             )
@@ -454,6 +488,10 @@ class OptimizationController:
             int(name): int(value)
             for name, value in dict(state.get("repairs_by_round") or {}).items()
         }
+        self.final_validation_calls = int(state.get("final_validation_calls", 0))
+        self.final_validation_passes = int(state.get("final_validation_passes", 0))
+        search_best_id = state.get("search_best_id")
+        self._search_best_id = str(search_best_id) if search_best_id else None
         self.calibrator = LatencyCalibrator.from_snapshot(
             state.get("calibration"), self.task.budget.calibration_min_samples
         )
@@ -1077,6 +1115,126 @@ class OptimizationController:
         self.profile_calls += 1
         return profile
 
+    def _finalize_candidates(
+        self, seed: CandidateRecord, completed_rounds: int
+    ) -> tuple[CandidateRecord, CandidateRecord]:
+        limit = self.task.budget.final_validation_candidates
+        search_candidates = list(self.beam[:limit])
+        candidates = [seed] + search_candidates
+        unique_candidates: List[CandidateRecord] = []
+        seen = set()
+        for record in candidates:
+            identifier = record.candidate.candidate_id
+            if identifier not in seen:
+                seen.add(identifier)
+                unique_candidates.append(record)
+
+        self.progress.emit(
+            "final_started",
+            "Running fresh held-out correctness and robust timing.",
+            candidates=len(unique_candidates),
+        )
+        for index, record in enumerate(unique_candidates, start=1):
+            if record.final_measurement is None:
+                self.progress.emit(
+                    "final_progress",
+                    "Validating a finalist in a fresh evaluator process.",
+                    candidate=index,
+                    total=len(unique_candidates),
+                    candidate_id=record.candidate.candidate_id,
+                )
+                finalizer = getattr(self.backend, "finalize", None)
+                try:
+                    if callable(finalizer):
+                        record.final_measurement = self._evaluate(
+                            "final",
+                            record.candidate,
+                            lambda record=record: finalizer(
+                                self.task, record.candidate
+                            ),
+                        )
+                    else:
+                        record.final_measurement = self._evaluate(
+                            "final",
+                            record.candidate,
+                            lambda record=record: self.backend.measure(
+                                self.task, record.candidate
+                            ),
+                        )
+                except Exception as error:
+                    record.final_measurement = Measurement(
+                        correct=False,
+                        error="%s: %s" % (type(error).__name__, error),
+                        metrics={"stage": "final", "infrastructure_failure": True},
+                    )
+                self.final_validation_calls += 1
+                if record.final_measurement.correct:
+                    self.final_validation_passes += 1
+                    record.selection_reasons.append("fresh-final-validation")
+                    record.state = "final-validated"
+                else:
+                    record.state = "final-validation-failed"
+                    record.decision_reason = (
+                        record.final_measurement.error
+                        or "Held-out final validation failed."
+                    )
+                self.store.save_candidate(record)
+                self.store.append_event(
+                    "candidate_finalized",
+                    {
+                        "completed_rounds": completed_rounds,
+                        "candidate_id": record.candidate.candidate_id,
+                        "correct": record.final_measurement.correct,
+                        "latency_ms": record.final_measurement.latency_ms,
+                        "error": record.final_measurement.error,
+                    },
+                )
+
+        finalized_records = [
+            item for item in self.records.values() if item.final_measurement is not None
+        ]
+        self.final_validation_calls = len(finalized_records)
+        self.final_validation_passes = sum(
+            item.final_measurement.correct for item in finalized_records
+        )
+
+        if seed.final_measurement is None or not seed.final_measurement.correct:
+            raise RuntimeError(
+                "the seed kernel failed fresh final validation; the task or evaluator is not stable"
+            )
+        eligible = [
+            item
+            for item in search_candidates
+            if item.final_measurement is not None
+            and item.final_measurement.correct
+            and item.final_measurement.latency_ms is not None
+        ]
+        if all(
+            item.candidate.candidate_id != seed.candidate.candidate_id
+            for item in eligible
+        ):
+            eligible.append(seed)
+        best = min(
+            eligible,
+            key=lambda item: (
+                float(item.final_measurement.latency_ms),
+                item.candidate.candidate_id,
+            ),
+        )
+        best.state = "final-validated-best"
+        best.decision_reason = (
+            "Passed fresh held-out correctness and had the best robust final latency."
+        )
+        self.store.save_candidate(best)
+        self.progress.emit(
+            "final_completed",
+            "Fresh final validation selected the exported kernel.",
+            candidate_id=best.candidate.candidate_id,
+            latency_ms=best.final_measurement.latency_ms,
+            passes=self.final_validation_passes,
+        )
+        return best, seed
+
     def _evaluate(
         self, stage: str, candidate: Candidate, operation: Callable[[], T]
     ) -> T:
@@ -1239,6 +1397,9 @@ class OptimizationController:
             "generator_usage": dict(self.generator_usage),
             "repair_calls": self.repair_calls,
             "repair_candidates": self.repair_candidates,
+            "final_validation_calls": self.final_validation_calls,
+            "final_validation_passes": self.final_validation_passes,
+            "search_best_id": self._search_best_id,
             "repairs_by_round": {
                 str(name): value for name, value in self._repairs_by_round.items()
             },
@@ -1259,6 +1420,9 @@ class OptimizationController:
                 "generator_usage": dict(self.generator_usage),
                 "repair_calls": self.repair_calls,
                 "repair_candidates": self.repair_candidates,
+                "final_validation_calls": self.final_validation_calls,
+                "final_validation_passes": self.final_validation_passes,
+                "search_best_id": self._search_best_id,
                 "repairs_by_round": {
                     str(name): value
                     for name, value in self._repairs_by_round.items()
@@ -1318,12 +1482,23 @@ class OptimizationController:
         self,
         completed_rounds: int,
         seed: CandidateRecord,
+        search_best: CandidateRecord,
+        final_seed: CandidateRecord,
         best_source_path: Path,
         elapsed_seconds: float,
     ) -> SearchSummary:
         best = self.beam[0]
-        seed_latency = float(seed.measurement.latency_ms)
-        best_latency = float(best.measurement.latency_ms)
+        final_enabled = self.task.budget.final_validation_candidates > 0
+        seed_latency = float(
+            final_seed.final_measurement.latency_ms
+            if final_enabled and final_seed.final_measurement is not None
+            else seed.measurement.latency_ms
+        )
+        best_latency = float(
+            best.final_measurement.latency_ms
+            if final_enabled and best.final_measurement is not None
+            else best.measurement.latency_ms
+        )
         measured = [item for item in self.records.values() if item.measurement]
         correct = [item for item in measured if item.measurement.correct]
         return SearchSummary(
@@ -1353,6 +1528,11 @@ class OptimizationController:
             repair_candidates=self.repair_candidates,
             evidence_lessons=len(self.evidence_memory.lessons),
             calibration=self.calibrator.to_dict(),
+            search_best_candidate_id=search_best.candidate.candidate_id,
+            search_best_latency_ms=float(search_best.measurement.latency_ms),
+            final_validation_calls=self.final_validation_calls,
+            final_validation_passes=self.final_validation_passes,
+            final_seed_latency_ms=(seed_latency if final_enabled else None),
         )
 
 

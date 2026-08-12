@@ -132,7 +132,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     progress = ProgressReporter(enabled=not args.quiet)
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.3.0",
+        "framework_version": "0.5.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,

@@ -40,12 +40,15 @@ class CommandSourceBackendTests(unittest.TestCase):
         modeled = backend.model(task, candidate)
         measured = backend.measure(task, candidate)
         profiled = backend.profile(task, candidate)
+        finalized = backend.finalize(task, candidate)
 
         self.assertTrue(modeled.valid)
         self.assertTrue(modeled.metrics["source_path_exists"])
         self.assertTrue(measured.correct)
         self.assertEqual(measured.metrics["measurement_source"], "test-contract")
         self.assertEqual(profiled.metrics["profile_source"], "test-contract")
+        self.assertTrue(finalized.correct)
+        self.assertEqual(finalized.metrics["stage"], "final")
 
     def test_example_task_resolves_adapter_from_repository_root(self) -> None:
         task_path = REPOSITORY_ROOT / "examples" / "tilelang_matmul_task.json"

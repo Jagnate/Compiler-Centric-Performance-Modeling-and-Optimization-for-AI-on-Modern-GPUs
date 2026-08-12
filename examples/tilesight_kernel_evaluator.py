@@ -236,6 +236,18 @@ def model_response(
         for item in program.diagnostics
     ]
     kernel_source = str(getattr(lowered, "kernel_source", "") or "")
+    compiled_source_sha256 = (
+        hashlib.sha256(kernel_source.encode("utf-8")).hexdigest()
+        if kernel_source
+        else None
+    )
+    compiled_identity = {
+        "compiled_source_sha256": compiled_source_sha256,
+        "target": target,
+        "grid_shape": [int(item) for item in model_input.grids],
+        "threads_per_block": int(program.threads_per_block),
+        "shared_memory_per_block": float(metrics.smem_footprint),
+    }
     ptxas = program.metadata.get("model_enrichment", {}).get("ptxas", {})
     response_metrics = {
         "ddr_util": float(metrics.ddr_util),
@@ -261,11 +273,15 @@ def model_response(
         "target": target,
         "environment": environment,
         "primary_case_id": primary["case_id"],
-        "compiled_source_sha256": (
-            hashlib.sha256(kernel_source.encode("utf-8")).hexdigest()
-            if kernel_source
+        "compiled_source_sha256": compiled_source_sha256,
+        "compiled_identity_sha256": (
+            hashlib.sha256(
+                json.dumps(compiled_identity, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if compiled_source_sha256
             else None
         ),
+        "compiled_identity": compiled_identity,
         "resource_provenance": dict(model_input.provenance),
         "ptxas": ptxas,
         "captured_passes": {

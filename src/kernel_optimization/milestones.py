@@ -17,6 +17,9 @@ class ProfileDecision:
 class NcuMilestonePolicy:
     """Choose at most one new NCU profile per optimization round."""
 
+    name = "milestone"
+    profile_seed = True
+
     def __init__(self, budget: BudgetConfig) -> None:
         self.budget = budget
         self.last_profile_round = 0
@@ -144,3 +147,73 @@ class NcuMilestonePolicy:
         if not candidates:
             return None
         return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+class EveryRoundProfilePolicy(NcuMilestonePolicy):
+    """Profile the best unprofiled measured candidate in every round."""
+
+    name = "every-round"
+
+    def decide(
+        self,
+        round_number: int,
+        best_before: CandidateRecord,
+        best_after: CandidateRecord,
+        measured_this_round: Sequence[CandidateRecord],
+        all_records: Sequence[CandidateRecord],
+    ) -> Optional[ProfileDecision]:
+        del best_before, best_after
+        candidates = [
+            item
+            for item in measured_this_round
+            if item.is_measured_correct
+            and item.candidate.candidate_id not in self.profiled_ids
+        ]
+        if not candidates:
+            candidates = [
+                item
+                for item in all_records
+                if item.is_measured_correct
+                and item.candidate.candidate_id not in self.profiled_ids
+            ]
+        if not candidates:
+            return None
+        candidate = min(
+            candidates,
+            key=lambda item: (
+                float(item.measurement.latency_ms),
+                item.candidate.candidate_id,
+            ),
+        )
+        return ProfileDecision(candidate.candidate.candidate_id, "every-round")
+
+
+class NoProfilePolicy(NcuMilestonePolicy):
+    """Disable NCU to isolate model and CUDA-event search behavior."""
+
+    name = "none"
+    profile_seed = False
+
+    def decide(
+        self,
+        round_number: int,
+        best_before: CandidateRecord,
+        best_after: CandidateRecord,
+        measured_this_round: Sequence[CandidateRecord],
+        all_records: Sequence[CandidateRecord],
+    ) -> Optional[ProfileDecision]:
+        del round_number, best_before, best_after, measured_this_round, all_records
+        return None
+
+
+def create_profile_policy(name: str, budget: BudgetConfig) -> NcuMilestonePolicy:
+    policies = {
+        "milestone": NcuMilestonePolicy,
+        "every-round": EveryRoundProfilePolicy,
+        "none": NoProfilePolicy,
+    }
+    try:
+        policy_type = policies[name]
+    except KeyError as error:
+        raise ValueError("unsupported profile policy %r" % name) from error
+    return policy_type(budget)

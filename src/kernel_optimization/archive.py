@@ -196,6 +196,20 @@ class ArtifactStore:
         self._write_json(path, summary.to_dict())
         return path
 
+    def save_json_artifact(self, filename: str, value: Mapping[str, Any]) -> Path:
+        """Atomically write one run-level JSON research artifact."""
+
+        path = self.root / filename
+        self._write_json(path, dict(value))
+        return path
+
+    def save_text_artifact(self, filename: str, value: str) -> Path:
+        """Atomically write one run-level text research artifact."""
+
+        path = self.root / filename
+        self._write_text(path, value)
+        return path
+
     def candidate_ids(self) -> Iterable[str]:
         for path in self.candidate_directory.iterdir():
             if path.is_dir() and (path / "record.json").is_file():

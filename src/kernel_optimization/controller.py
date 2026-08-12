@@ -10,11 +10,13 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypeV
 
 from .archive import ArtifactStore
 from .calibration import LatencyCalibrator
+from .costs import build_cost_ledger
 from .diagnosis import BottleneckAnalyzer, FailureClassifier
 from .evidence import GlobalEvidenceMemory
-from .milestones import NcuMilestonePolicy
+from .milestones import create_profile_policy
 from .progress import NullProgressReporter, ProgressReporter
 from .protocols import CandidateGenerator, PerformanceBackend
+from .reporting import expected_report_paths, write_research_artifacts
 from .schema import (
     Candidate,
     CandidateProposal,
@@ -25,7 +27,7 @@ from .schema import (
     SearchSummary,
     TaskSpec,
 )
-from .selection import AdaptiveSelectionPolicy
+from .selection import create_selection_policy
 from .source_validation import SourceValidationError, SourceValidator
 from .trust import TrustTracker
 
@@ -63,6 +65,14 @@ class OptimizationController:
         progress: Optional[ProgressReporter] = None,
         resume: bool = False,
         preflight_calls: int = 0,
+        preflight_usage: Optional[Mapping[str, float]] = None,
+        preflight_elapsed_seconds: float = 0.0,
+        selection_policy: str = "adaptive",
+        profile_policy: str = "milestone",
+        fixed_promotions_per_round: Optional[int] = None,
+        compiled_deduplication: bool = True,
+        api_input_price_per_million: Optional[float] = None,
+        api_output_price_per_million: Optional[float] = None,
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -75,8 +85,24 @@ class OptimizationController:
         self.progress = progress or NullProgressReporter()
         self.resume = resume
         self.preflight_calls = preflight_calls
-        self.selection = AdaptiveSelectionPolicy(task.budget)
-        self.milestones = NcuMilestonePolicy(task.budget)
+        self.api_request_attempts = preflight_calls
+        self.preflight_elapsed_seconds = float(preflight_elapsed_seconds)
+        self.selection_policy_name = selection_policy
+        self.profile_policy_name = profile_policy
+        self.fixed_promotions_per_round = fixed_promotions_per_round
+        self.compiled_deduplication = bool(compiled_deduplication)
+        self.api_input_price_per_million = api_input_price_per_million
+        self.api_output_price_per_million = api_output_price_per_million
+        for name, value in (
+            ("api_input_price_per_million", api_input_price_per_million),
+            ("api_output_price_per_million", api_output_price_per_million),
+        ):
+            if value is not None and value < 0:
+                raise ValueError("%s must be non-negative" % name)
+        self.selection = create_selection_policy(
+            selection_policy, task.budget, fixed_promotions_per_round
+        )
+        self.milestones = create_profile_policy(profile_policy, task.budget)
         self.trust = TrustTracker()
         self.calibrator = LatencyCalibrator(task.budget.calibration_min_samples)
         self.analyzer = BottleneckAnalyzer()
@@ -85,8 +111,18 @@ class OptimizationController:
         self.beam: List[CandidateRecord] = []
         self.profile_calls = 0
         self.generator_calls = 0
-        self.generator_usage: Dict[str, float] = {}
+        self.generator_usage: Dict[str, float] = {
+            str(name): float(value)
+            for name, value in dict(preflight_usage or {}).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
         self.stage_timings: Dict[str, Dict[str, float]] = {}
+        if preflight_calls > 0:
+            self.stage_timings["api_preflight"] = {
+                "calls": 1.0,
+                "failures": 0.0,
+                "seconds": self.preflight_elapsed_seconds,
+            }
         self.repair_calls = 0
         self.repair_candidates = 0
         self._repairs_by_round: Dict[int, int] = {}
@@ -94,6 +130,7 @@ class OptimizationController:
         self.final_validation_passes = 0
         self._search_best_id: Optional[str] = None
         self.was_resumed = False
+        self.compiled_hash_owners: Dict[str, str] = {}
 
     def run(self) -> SearchSummary:
         started_at = time.perf_counter()
@@ -188,6 +225,13 @@ class OptimizationController:
                 elapsed_seconds=time.perf_counter() - started_at,
             )
             self.store.save_summary(summary)
+            write_research_artifacts(
+                self.store,
+                self.task,
+                list(self.records.values()),
+                summary,
+                self.run_metadata,
+            )
             self._checkpoint(
                 phase="run_completed",
                 completed_round=completed_rounds,
@@ -280,7 +324,13 @@ class OptimizationController:
         else:
             modeled = generated
 
-        promotable = [item for item in modeled if item.model and item.model.valid]
+        promotable = [
+            item
+            for item in modeled
+            if item.model
+            and item.model.valid
+            and item.compiled_equivalent_to is None
+        ]
         if not self._phase_at_least(phase, "selected"):
             selected = self.selection.select(
                 self.task, promotable, self.beam, self.trust
@@ -291,7 +341,7 @@ class OptimizationController:
                 if record.candidate.candidate_id not in selected_set:
                     record.state = "modeled-not-promoted"
                     record.decision_reason = (
-                        "Not selected by adaptive promotion policy."
+                        "Not selected by the configured promotion policy."
                     )
                     self.store.save_candidate(record)
             best_before_id = self.beam[0].candidate.candidate_id
@@ -400,6 +450,7 @@ class OptimizationController:
             self.store.save_candidate(record)
             raise RuntimeError("the input kernel is invalid according to the model backend")
         record.model = self.calibrator.apply(self.task, record.model)
+        self._register_compiled_identity(record)
         try:
             record.measurement = self._evaluate(
                 "measure", candidate, lambda: self.backend.measure(self.task, candidate)
@@ -416,9 +467,10 @@ class OptimizationController:
             self.store.save_candidate(record)
             raise RuntimeError("the input kernel failed correctness")
         self.calibrator.observe(self.task, record)
-        record.profile = self._profile_candidate(candidate)
-        if record.profile.valid:
-            self.milestones.mark_profiled(record, round_number=0)
+        if self.milestones.profile_seed:
+            record.profile = self._profile_candidate(candidate)
+            if record.profile.valid:
+                self.milestones.mark_profiled(record, round_number=0)
         record.state = "measured-beam"
         record.selection_reasons.append("initial-source")
         record.decision_reason = "Verified and measured input kernel."
@@ -430,7 +482,7 @@ class OptimizationController:
                 "candidate_id": candidate.candidate_id,
                 "source_sha256": candidate.source_sha256,
                 "latency_ms": record.measurement.latency_ms,
-                "profile_valid": record.profile.valid,
+                "profile_valid": record.profile.valid if record.profile else None,
             },
         )
         self.progress.emit(
@@ -438,13 +490,20 @@ class OptimizationController:
             "Input kernel passed correctness and timing.",
             candidate_id=candidate.candidate_id,
             latency_ms=record.measurement.latency_ms,
-            profile_valid=record.profile.valid,
+            profile_valid=record.profile.valid if record.profile else None,
         )
         return record
 
     def _restore(
         self, expected_seed: Candidate, state: Mapping[str, Any]
     ) -> CandidateRecord:
+        archived_experiment = state.get("experiment")
+        if archived_experiment and dict(archived_experiment) != self._experiment_config():
+            raise ValueError(
+                "resume experiment policies do not match the archived checkpoint"
+            )
+        current_preflight_usage = dict(self.generator_usage)
+        current_stage_timings = dict(self.stage_timings)
         self.records = self.store.load_candidates()
         seed_records = [
             item for item in self.records.values() if item.candidate.generation == 0
@@ -470,11 +529,16 @@ class OptimizationController:
         if not self.beam:
             raise ValueError("resume checkpoint has no measured beam")
         self.profile_calls = int(state.get("profile_calls", 0))
+        self.api_request_attempts += int(
+            state.get("api_request_attempts", state.get("preflight_calls", 0))
+        )
         self.generator_calls = int(state.get("generator_calls", 0))
         self.generator_usage = {
             str(name): float(value)
             for name, value in dict(state.get("generator_usage") or {}).items()
         }
+        for name, value in current_preflight_usage.items():
+            self.generator_usage[name] = self.generator_usage.get(name, 0.0) + value
         self.stage_timings = {
             str(name): {
                 str(metric): float(value)
@@ -482,6 +546,10 @@ class OptimizationController:
             }
             for name, metrics in dict(state.get("stage_timings") or {}).items()
         }
+        for stage, metrics in current_stage_timings.items():
+            for name, value in metrics.items():
+                stored = self.stage_timings.setdefault(stage, {})
+                stored[name] = stored.get(name, 0.0) + float(value)
         self.repair_calls = int(state.get("repair_calls", 0))
         self.repair_candidates = int(state.get("repair_candidates", 0))
         self._repairs_by_round = {
@@ -523,7 +591,10 @@ class OptimizationController:
         self.trust = TrustTracker.from_snapshot(state.get("trust_snapshot"))
         self._rebuild_trust()
         self.milestones.restore(state.get("milestones"))
-        self.selection.restore(state.get("selection_random_state"))
+        self.selection.restore(
+            state.get("selection_state", state.get("selection_random_state"))
+        )
+        self._rebuild_compiled_hash_owners()
         self.preflight_calls += int(state.get("preflight_calls", 0))
         self.was_resumed = True
         return seed
@@ -677,6 +748,7 @@ class OptimizationController:
             metadata = dict(
                 getattr(self.generator, "last_call_metadata", {}) or {}
             )
+            self._record_api_attempts(metadata)
             self.store.save_api_call(
                 "round-%03d-generate-failed" % round_number,
                 {
@@ -702,6 +774,7 @@ class OptimizationController:
         elapsed = time.perf_counter() - started_at
         self._record_stage_timing("api_generate", elapsed, failed=False)
         metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
+        self._record_api_attempts(metadata)
         self._accumulate_generator_usage(metadata.get("usage"))
         self.store.save_api_call(
             "round-%03d-generate" % round_number,
@@ -779,6 +852,7 @@ class OptimizationController:
             metadata = dict(
                 getattr(self.generator, "last_call_metadata", {}) or {}
             )
+            self._record_api_attempts(metadata)
             self.store.save_api_call(
                 "round-%03d-repair-failed" % round_number,
                 {
@@ -805,6 +879,7 @@ class OptimizationController:
         elapsed = time.perf_counter() - started_at
         self._record_stage_timing("api_repair", elapsed, failed=False)
         metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
+        self._record_api_attempts(metadata)
         self._accumulate_generator_usage(metadata.get("usage"))
         self.store.save_api_call(
             "round-%03d-repair" % round_number,
@@ -920,10 +995,27 @@ class OptimizationController:
                 )
             if record.model.valid:
                 record.model = self.calibrator.apply(self.task, record.model)
-                record.state = "modeled"
                 record.failure = None
                 parent = self.records.get(record.candidate.parent_id or "")
                 record.diagnosis = self.analyzer.diagnose(record, parent)
+                equivalent_to = self._register_compiled_identity(record)
+                if equivalent_to is not None:
+                    record.state = "compiled-equivalent"
+                    record.decision_reason = (
+                        "Skipped hardware evaluation because the compiled execution "
+                        "identity matches candidate %s." % equivalent_to
+                    )
+                    self.store.append_event(
+                        "compiled_candidate_deduplicated",
+                        {
+                            "round": round_number,
+                            "candidate_id": record.candidate.candidate_id,
+                            "equivalent_to": equivalent_to,
+                            "compiled_identity_sha256": self._compiled_identity_hash(record),
+                        },
+                    )
+                else:
+                    record.state = "modeled"
             else:
                 record.state = "model-invalid"
                 record.decision_reason = "Rejected by compiler or performance model."
@@ -1014,6 +1106,8 @@ class OptimizationController:
             repair_records.append(repaired)
             if repaired.failure is not None:
                 queue.append(repaired)
+                continue
+            if repaired.compiled_equivalent_to is not None:
                 continue
             measured = self._measure_candidates([repaired], round_number)
             if measured:
@@ -1390,9 +1484,11 @@ class OptimizationController:
             "calibration": self.calibrator.snapshot(),
             "evidence_memory": self.evidence_memory.snapshot(),
             "milestones": self.milestones.snapshot(),
-            "selection_random_state": self.selection.snapshot(),
+            "selection_state": self.selection.snapshot(),
+            "experiment": self._experiment_config(),
             "profile_calls": self.profile_calls,
             "preflight_calls": self.preflight_calls,
+            "api_request_attempts": self.api_request_attempts,
             "generator_calls": self.generator_calls,
             "generator_usage": dict(self.generator_usage),
             "repair_calls": self.repair_calls,
@@ -1416,6 +1512,7 @@ class OptimizationController:
             {
                 "profile_calls": self.profile_calls,
                 "preflight_calls": self.preflight_calls,
+                "api_request_attempts": self.api_request_attempts,
                 "generator_calls": self.generator_calls,
                 "generator_usage": dict(self.generator_usage),
                 "repair_calls": self.repair_calls,
@@ -1478,6 +1575,69 @@ class OptimizationController:
                 continue
             self.generator_usage[name] = self.generator_usage.get(name, 0.0) + float(value)
 
+    def _record_api_attempts(self, metadata: Mapping[str, Any]) -> None:
+        attempts = metadata.get("attempts", 1)
+        if isinstance(attempts, (int, float)) and not isinstance(attempts, bool):
+            self.api_request_attempts += max(1, int(attempts))
+
+    @staticmethod
+    def _compiled_identity_hash(record: CandidateRecord) -> Optional[str]:
+        if record.model is None:
+            return None
+        value = record.model.metrics.get("compiled_identity_sha256")
+        if not value:
+            value = record.model.metrics.get("compiled_source_sha256")
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip().lower()
+
+    def _register_compiled_identity(
+        self, record: CandidateRecord
+    ) -> Optional[str]:
+        if not self.compiled_deduplication:
+            record.compiled_equivalent_to = None
+            return None
+        compiled_hash = self._compiled_identity_hash(record)
+        if compiled_hash is None:
+            return None
+        identifier = record.candidate.candidate_id
+        owner = self.compiled_hash_owners.get(compiled_hash)
+        if owner is not None and owner != identifier:
+            record.compiled_equivalent_to = owner
+            return owner
+        self.compiled_hash_owners[compiled_hash] = identifier
+        record.compiled_equivalent_to = None
+        return None
+
+    def _rebuild_compiled_hash_owners(self) -> None:
+        self.compiled_hash_owners = {}
+        if not self.compiled_deduplication:
+            return
+        for record in sorted(
+            self.records.values(),
+            key=lambda item: (
+                item.candidate.generation,
+                item.candidate.candidate_id,
+            ),
+        ):
+            if record.model is None or not record.model.valid:
+                continue
+            compiled_hash = self._compiled_identity_hash(record)
+            if compiled_hash is None:
+                continue
+            owner = record.compiled_equivalent_to or record.candidate.candidate_id
+            self.compiled_hash_owners.setdefault(compiled_hash, owner)
+
+    def _experiment_config(self) -> Dict[str, Any]:
+        return {
+            "selection_policy": self.selection_policy_name,
+            "profile_policy": self.profile_policy_name,
+            "fixed_promotions_per_round": self.fixed_promotions_per_round,
+            "compiled_deduplication": self.compiled_deduplication,
+            "api_input_price_per_million": self.api_input_price_per_million,
+            "api_output_price_per_million": self.api_output_price_per_million,
+        }
+
     def _summary(
         self,
         completed_rounds: int,
@@ -1501,6 +1661,19 @@ class OptimizationController:
         )
         measured = [item for item in self.records.values() if item.measurement]
         correct = [item for item in measured if item.measurement.correct]
+        ledger = build_cost_ledger(
+            self.records.values(),
+            stage_timings=self.stage_timings,
+            generator_usage=self.generator_usage,
+            preflight_calls=self.preflight_calls,
+            provider_api_requests=self.api_request_attempts,
+            generator_calls=self.generator_calls,
+            repair_calls=self.repair_calls,
+            profile_calls=self.profile_calls,
+            final_validation_calls=self.final_validation_calls,
+            api_input_price_per_million=self.api_input_price_per_million,
+            api_output_price_per_million=self.api_output_price_per_million,
+        )
         return SearchSummary(
             task_id=self.task.task_id,
             best_candidate_id=best.candidate.candidate_id,
@@ -1533,6 +1706,16 @@ class OptimizationController:
             final_validation_calls=self.final_validation_calls,
             final_validation_passes=self.final_validation_passes,
             final_seed_latency_ms=(seed_latency if final_enabled else None),
+            selection_policy=self.selection_policy_name,
+            profile_policy=self.profile_policy_name,
+            fixed_promotions_per_round=self.fixed_promotions_per_round,
+            compiled_deduplication=self.compiled_deduplication,
+            compiled_equivalent_candidates=sum(
+                item.compiled_equivalent_to is not None
+                for item in self.records.values()
+            ),
+            cost_ledger=ledger,
+            report_paths=expected_report_paths(self.store.root),
         )
 
 

@@ -439,6 +439,7 @@ class CandidateRecord:
     diagnosis: Optional[BottleneckDiagnosis] = None
     selection_reasons: List[str] = field(default_factory=list)
     decision_reason: Optional[str] = None
+    compiled_equivalent_to: Optional[str] = None
 
     @property
     def is_measured_correct(self) -> bool:
@@ -462,6 +463,7 @@ class CandidateRecord:
             "diagnosis": self.diagnosis.to_dict() if self.diagnosis else None,
             "selection_reasons": list(self.selection_reasons),
             "decision_reason": self.decision_reason,
+            "compiled_equivalent_to": self.compiled_equivalent_to,
         }
 
     @classmethod
@@ -491,6 +493,7 @@ class CandidateRecord:
             ),
             selection_reasons=list(data.get("selection_reasons") or []),
             decision_reason=data.get("decision_reason"),
+            compiled_equivalent_to=data.get("compiled_equivalent_to"),
         )
 
 
@@ -527,6 +530,13 @@ class SearchSummary:
     final_validation_calls: int = 0
     final_validation_passes: int = 0
     final_seed_latency_ms: Optional[float] = None
+    selection_policy: str = "adaptive"
+    profile_policy: str = "milestone"
+    fixed_promotions_per_round: Optional[int] = None
+    compiled_deduplication: bool = True
+    compiled_equivalent_candidates: int = 0
+    cost_ledger: JsonDict = field(default_factory=dict)
+    report_paths: JsonDict = field(default_factory=dict)
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

@@ -132,6 +132,7 @@ class GenericEvaluatorTests(unittest.TestCase):
             response["metrics"]["compiled_source_sha256"],
             hashlib.sha256(b"compiled cuda source").hexdigest(),
         )
+        self.assertIsNotNone(response["metrics"]["compiled_identity_sha256"])
 
     def test_final_stage_adds_held_out_case_and_fresh_statistics(self) -> None:
         source = (

@@ -78,12 +78,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resume an interrupted run from --output checkpoints.",
     )
+    parser.add_argument(
+        "--selection-policy",
+        choices=("adaptive", "model-top", "random", "measure-all"),
+        default="adaptive",
+        help="Candidate promotion strategy. Use a fixed budget for equal-cost ablations.",
+    )
+    parser.add_argument(
+        "--promotions-per-round",
+        type=int,
+        help="Fix CUDA measurement promotions per round across search strategies.",
+    )
+    parser.add_argument(
+        "--profile-policy",
+        choices=("milestone", "every-round", "none"),
+        default="milestone",
+        help="NCU allocation policy used by this experiment.",
+    )
+    parser.add_argument(
+        "--no-compiled-dedup",
+        action="store_true",
+        help="Measure candidates even when their compiled execution identity matches.",
+    )
+    parser.add_argument(
+        "--api-input-price-per-million",
+        type=float,
+        help="Optional hosted-model input-token price used only for cost reporting.",
+    )
+    parser.add_argument(
+        "--api-output-price-per-million",
+        type=float,
+        help="Optional hosted-model output-token price used only for cost reporting.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress lines.")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.promotions_per_round is not None and args.promotions_per_round <= 0:
+        raise SystemExit("--promotions-per-round must be positive")
+    for name in ("api_input_price_per_million", "api_output_price_per_million"):
+        value = getattr(args, name)
+        if value is not None and value < 0:
+            raise SystemExit("--%s must be non-negative" % name.replace("_", "-"))
+    if (args.api_input_price_per_million is None) != (
+        args.api_output_price_per_million is None
+    ):
+        raise SystemExit(
+            "API cost reporting requires both input and output token prices"
+        )
     source_path = Path(args.source).expanduser().resolve()
     task_path = Path(args.task).expanduser().resolve()
     if not source_path.is_file():
@@ -132,7 +176,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     progress = ProgressReporter(enabled=not args.quiet)
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.5.0",
+        "framework_version": "0.6.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -143,6 +187,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "max_tokens_field": args.api_max_tokens_field,
             "max_retries": args.api_retries,
             "api_key_environment_variable": args.api_key_env,
+        },
+        "experiment": {
+            "selection_policy": args.selection_policy,
+            "fixed_promotions_per_round": args.promotions_per_round,
+            "profile_policy": args.profile_policy,
+            "compiled_deduplication": not args.no_compiled_dedup,
+            "api_input_price_per_million": args.api_input_price_per_million,
+            "api_output_price_per_million": args.api_output_price_per_million,
         },
         "resume_requested": args.resume,
     }
@@ -157,6 +209,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     preflight_calls = 0
+    preflight_usage = {}
+    preflight_elapsed_seconds = 0.0
     if not args.skip_api_preflight:
         progress.emit(
             "api_preflight",
@@ -189,6 +243,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "API preflight failed before any compiler/GPU work: %s" % error
             ) from error
         preflight_calls = int(preflight.get("attempts", 1))
+        preflight_usage = dict(preflight.get("usage") or {})
+        preflight_elapsed_seconds = float(preflight.get("elapsed_seconds", 0.0))
         store.save_api_call("preflight", preflight, generator.last_exchange)
         store.append_event("api_preflight_completed", preflight)
         progress.emit(
@@ -209,6 +265,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         progress=progress,
         resume=args.resume,
         preflight_calls=preflight_calls,
+        preflight_usage=preflight_usage,
+        preflight_elapsed_seconds=preflight_elapsed_seconds,
+        selection_policy=args.selection_policy,
+        profile_policy=args.profile_policy,
+        fixed_promotions_per_round=args.promotions_per_round,
+        compiled_deduplication=not args.no_compiled_dedup,
+        api_input_price_per_million=args.api_input_price_per_million,
+        api_output_price_per_million=args.api_output_price_per_million,
     )
     summary = controller.run()
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))

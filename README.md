@@ -62,6 +62,9 @@ Python syntax and task-invariant validation                     |
 TileSight model for every valid candidate                       |
    |                                                           |
    v                                                           |
+Compiled-code equivalence deduplication                         |
+   |                                                           |
+   v                                                           |
 Adaptive promotion                                             |
    |  model top + low confidence + source diversity + audit    |
    v                                                           |
@@ -174,6 +177,14 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --source examples/tilelang_flash_attention_kernel.py \
   --task examples/tilelang_flash_attention_task.json \
   --output results/flash_attention_api_run
+```
+
+The default experiment uses `--selection-policy adaptive`,
+`--profile-policy milestone`, and compiled-code deduplication. To give promotion
+ablations the same CUDA measurement cap per round, add for example:
+
+```bash
+--promotions-per-round 4
 ```
 
 The CLI first sends a very small API preflight request. Authentication, model
@@ -415,6 +426,50 @@ Each promoted batch combines:
 This policy preserves a route to discover candidates that an imperfect model
 misranks.
 
+The CLI also exposes `model-top` and deterministic `random` policies for
+equal-budget ablations. `measure-all` is a deliberately more expensive upper
+baseline and ignores the fixed promotion count. Different source candidates
+whose model stage emits the same compiled execution identity are represented in
+the trajectory but only the first is eligible for CUDA measurement. The identity
+combines generated CUDA source, target, grid, threads, and shared memory. Disable
+this conservative cost optimization with `--no-compiled-dedup`.
+
+## Equal-Budget Experiment Suites
+
+Run all three comparable promotion policies for Matmul:
+
+```bash
+PYTHONPATH=src python3 examples/run_experiment_suite.py \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output-root results/matmul_policy_suite \
+  --promotions-per-round 4
+```
+
+Run the same protocol for Flash Attention:
+
+```bash
+PYTHONPATH=src python3 examples/run_experiment_suite.py \
+  --source examples/tilelang_flash_attention_kernel.py \
+  --task examples/tilelang_flash_attention_task.json \
+  --output-root results/flash_attention_policy_suite \
+  --promotions-per-round 4
+```
+
+Use `--dry-run` to inspect commands without API or GPU work. The default suite
+runs `adaptive,model-top,random`; `--policies` may select a subset or include
+`measure-all`. It uses `every-round` NCU so each strategy has the same configured
+profile allocation, and holds proposal count, rounds, final validation, and the
+per-round promotion cap fixed. Invalid or compiled-equivalent source pools can
+consume less than that cap, so reports retain actual call counts. Hosted model
+sampling can still produce different source pools, so publish repeated trials
+rather than treating one run as a statistically complete comparison.
+
+For a no-NCU ablation, add `--profile-policy none`. To study event-triggered NCU,
+add `--profile-policy milestone`. Optional
+`--api-input-price-per-million` and `--api-output-price-per-million` values add
+an estimated hosted-model cost to reports; they never affect selection.
+
 ## Feedback, Repair, And Calibration
 
 Failures are evidence rather than discarded rows. Static validation, compiler
@@ -463,8 +518,8 @@ single Matmul or Flash Attention observation into a global TileSight formula.
 
 ## NCU Milestones
 
-The input source is profiled once. The controller then profiles at most one new
-candidate per round when it observes:
+Under the default `milestone` policy, the input source is profiled once. The
+controller then profiles at most one new candidate per round when it observes:
 
 - a meaningful measured improvement;
 - disagreement between predicted and measured direction;
@@ -488,6 +543,11 @@ Every run writes:
   state.json
   failure.json                  # present after a failed attempt
   summary.json
+  experiment_manifest.json
+  experiment_report.md
+  trajectory.json
+  trajectory.csv
+  candidate_graph.json
   best_candidate.json
   best_kernel.py
   api_calls/
@@ -523,6 +583,14 @@ wall-clock time. `events.jsonl`, checkpoints, candidate histories, API calls,
 and evaluator attempts form a timestamped audit trail rather than a final-only
 summary.
 
+The cost ledger keeps evaluator wall time separate from the sum of observed
+kernel latency samples. The latter excludes compilation, correctness, warmup,
+process startup, and NCU replay and therefore must not be reported as total GPU
+experiment cost. `trajectory.*` provides one row per generated or repaired
+candidate, while `candidate_graph.json` preserves proposal and repair edges.
+`experiment_report.md` is the concise result intended for inspection, and the
+JSON/CSV artifacts support later statistical analysis.
+
 ## Offline Tests
 
 Tests use a fake API transport and test-only evaluator classes. They make no
@@ -554,6 +622,11 @@ Coverage includes:
 - public multi-case and held-out final correctness;
 - repeated timing statistics and fresh-process final selection;
 - rejection of a fast search winner when held-out semantics fail.
+- equal-budget adaptive, model-top, and random promotion policies;
+- optional no-NCU and every-round NCU allocation policies;
+- compiled-code equivalence deduplication before hardware measurement;
+- API/evaluator/hardware cost accounting and trajectory reports;
+- reproducible Matmul and Flash Attention experiment-suite commands.
 
 ## Security Boundary
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -31,7 +32,11 @@ def main() -> int:
             "predicted_latency_ms": 1.25,
             "bottleneck": "tensor-core",
             "confidence": "high",
-            "metrics": {"source_path_exists": source_path.is_file()},
+            "metrics": {
+                "source_path_exists": source_path.is_file(),
+                "secret_visible": bool(os.environ.get("TEST_API_KEY")),
+                "safe_environment": os.environ.get("SAFE_TEST_ENV"),
+            },
             "diagnostics": [],
         }
     elif args.stage == "measure":

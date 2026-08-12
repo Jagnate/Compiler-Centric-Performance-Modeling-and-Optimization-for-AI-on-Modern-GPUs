@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from .backends import CommandBackend
 from .protocols import PerformanceBackend
 from .schema import TaskSpec
 
 
-def create_backend(task: TaskSpec, base_directory: Path) -> PerformanceBackend:
+def create_backend(
+    task: TaskSpec,
+    base_directory: Path,
+    artifact_directory: Optional[Path] = None,
+) -> PerformanceBackend:
     """Create the evaluator declared by TaskSpec.evaluator."""
 
     configuration = dict(task.evaluator)
@@ -36,6 +41,7 @@ def create_backend(task: TaskSpec, base_directory: Path) -> PerformanceBackend:
             timeout_seconds=timeout,
             working_directory=working_directory,
             environment=environment,
+            artifact_directory=artifact_directory,
         )
     raise ValueError(
         "unsupported evaluator type %r; source optimization requires a command evaluator"

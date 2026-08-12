@@ -81,3 +81,20 @@ class TrustTracker:
             "score": self.score,
         }
 
+    def snapshot(self) -> Dict[str, Any]:
+        """Return the lossless state needed to resume online calibration."""
+
+        return {
+            "relative_errors": list(self.relative_errors),
+            "direction_correct": self.direction_correct,
+            "direction_total": self.direction_total,
+        }
+
+    @classmethod
+    def from_snapshot(cls, value: Optional[Dict[str, Any]]) -> "TrustTracker":
+        data = dict(value or {})
+        return cls(
+            relative_errors=[float(item) for item in data.get("relative_errors", [])],
+            direction_correct=int(data.get("direction_correct", 0)),
+            direction_total=int(data.get("direction_total", 0)),
+        )

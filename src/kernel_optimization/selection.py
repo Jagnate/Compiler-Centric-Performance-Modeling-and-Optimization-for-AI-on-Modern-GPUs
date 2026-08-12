@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 import random
-from typing import List, Sequence
+from typing import Any, List, Sequence
 
 from .schema import BudgetConfig, CandidateRecord, TaskSpec
 from .trust import TrustTracker
@@ -35,6 +35,15 @@ class AdaptiveSelectionPolicy:
         high = self.budget.max_promotions_per_round
         adaptive = int(round(high - trust.score * (high - low)))
         return min(available, max(low, min(high, adaptive)))
+
+    def snapshot(self) -> Any:
+        """Return JSON-serializable random state for deterministic resume."""
+
+        return self.random.getstate()
+
+    def restore(self, value: Any) -> None:
+        if value is not None:
+            self.random.setstate(_nested_tuple(value))
 
     def select(
         self,
@@ -127,3 +136,9 @@ class AdaptiveSelectionPolicy:
             ).ratio()
             for reference in references
         )
+
+
+def _nested_tuple(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_nested_tuple(item) for item in value)
+    return value

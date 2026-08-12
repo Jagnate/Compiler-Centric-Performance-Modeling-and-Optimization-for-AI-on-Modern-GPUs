@@ -229,6 +229,13 @@ class Candidate:
             result.pop("source_code")
         return result
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "Candidate":
+        data = dict(value)
+        data["expected_effect"] = dict(data.get("expected_effect") or {})
+        data["proposal_metadata"] = dict(data.get("proposal_metadata") or {})
+        return cls(**data)
+
 
 @dataclass(frozen=True)
 class ModelEvaluation:
@@ -335,6 +342,23 @@ class CandidateRecord:
             "decision_reason": self.decision_reason,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CandidateRecord":
+        data = dict(value)
+        candidate = Candidate.from_dict(data["candidate"])
+        model = data.get("model")
+        measurement = data.get("measurement")
+        profile = data.get("profile")
+        return cls(
+            candidate=candidate,
+            state=str(data.get("state", "generated")),
+            model=ModelEvaluation.from_dict(model) if model else None,
+            measurement=Measurement.from_dict(measurement) if measurement else None,
+            profile=ProfileEvaluation.from_dict(profile) if profile else None,
+            selection_reasons=list(data.get("selection_reasons") or []),
+            decision_reason=data.get("decision_reason"),
+        )
+
 
 @dataclass(frozen=True)
 class SearchSummary:
@@ -357,6 +381,9 @@ class SearchSummary:
     elapsed_seconds: float
     trust: JsonDict
     output_directory: str
+    preflight_calls: int = 0
+    resumed: bool = False
+    stage_timings: JsonDict = field(default_factory=dict)
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from .schema import BudgetConfig, CandidateRecord
 
@@ -26,6 +26,19 @@ class NcuMilestonePolicy:
     def mark_profiled(self, record: CandidateRecord, round_number: int) -> None:
         self.profiled_ids.add(record.candidate.candidate_id)
         self.last_profile_round = round_number
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "last_profile_round": self.last_profile_round,
+            "plateau_rounds": self.plateau_rounds,
+            "profiled_ids": sorted(self.profiled_ids),
+        }
+
+    def restore(self, value: Optional[Mapping[str, Any]]) -> None:
+        data = dict(value or {})
+        self.last_profile_round = int(data.get("last_profile_round", 0))
+        self.plateau_rounds = int(data.get("plateau_rounds", 0))
+        self.profiled_ids = set(str(item) for item in data.get("profiled_ids", []))
 
     def decide(
         self,

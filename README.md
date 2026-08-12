@@ -141,6 +141,32 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --output results/matmul_api_run
 ```
 
+The CLI first sends a very small API preflight request. Authentication, model
+access, quota, and endpoint failures are therefore detected before TileLang
+compilation, CUDA timing, or seed NCU profiling begins. Progress is flushed to
+stderr for every API, model, measurement, profile, and round boundary.
+
+Transient rate-limit, connection, and server failures use bounded exponential
+retry. Quota exhaustion and other permanent client errors fail immediately.
+Provider requests and responses are archived without authorization headers or
+API-key values.
+
+Resume an interrupted artifact directory without repeating completed stages:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output results/matmul_api_run \
+  --resume
+```
+
+`--resume` verifies the task and source digest, reconstructs candidate records,
+the measured beam, model trust, NCU milestone state, counters, and the active
+round, then continues from the latest durable checkpoint. Use
+`--skip-api-preflight` only when the endpoint does not support a minimal
+chat-completions request.
+
 The CLI has no mock or parameter-search mode. A hosted API and a command
 evaluator are required for a production run.
 
@@ -350,15 +376,29 @@ Every run writes:
 ```text
 <output>/
   task.json
+  environment.json
   events.jsonl
   state.json
+  failure.json                  # present after a failed attempt
   summary.json
   best_candidate.json
   best_kernel.py
+  api_calls/
+    0001_preflight.json
+    0002_round-001-generate.json
+  checkpoints/
+    00001_round_none_seed_completed.json
+    ...
+  evaluator_attempts/
+    <candidate-id>/
+      model_001/{request.json,response.json,stdout.log,attempt.json,...}
   candidates/
     <candidate-id>/
       record.json
       <original-source-name>.py
+      history/
+        0001_generated.json
+        ...
 ```
 
 Candidate records retain lineage, source hash, optimization hypothesis, model
@@ -366,9 +406,14 @@ evidence, correctness and timing results, optional NCU evidence, selection
 reasons, and final state. Failed and non-promoted sources remain available for
 analysis. `task.json` also records the hosted model, endpoint, sampling
 temperature, framework version, and API-key environment-variable name, but
-never the API key value. `summary.json` records API call count and accumulates
+never the API key value. Evaluator subprocesses also remove key, token, secret,
+password, and credential environment variables before generated code is
+loaded. `summary.json` records API call count and accumulates
 numeric token-usage fields returned by the provider, alongside model, hardware,
-NCU call counts, and total controller wall-clock time.
+NCU call counts, per-stage wall-clock time, resume status, and total controller
+wall-clock time. `events.jsonl`, checkpoints, candidate histories, API calls,
+and evaluator attempts form a timestamped audit trail rather than a final-only
+summary.
 
 ## Offline Tests
 
@@ -389,6 +434,10 @@ Coverage includes:
 - adaptive promotion and source diversity;
 - rejection of invalid and incorrect generated kernels;
 - measured-beam integrity and `best_kernel.py` export.
+- retryable versus permanent hosted-API failures and API preflight;
+- secret removal at the evaluator process boundary;
+- persistent evaluator request/response/log artifacts;
+- interruption recovery without repeating seed model, timing, or NCU work.
 
 ## Security Boundary
 

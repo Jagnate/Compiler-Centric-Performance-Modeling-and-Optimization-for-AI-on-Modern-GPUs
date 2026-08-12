@@ -10,6 +10,7 @@ from unittest import mock
 
 from kernel_optimization.generators.api import (
     ApiGeneratorConfig,
+    HostedApiError,
     OpenAICompatibleGenerator,
 )
 from kernel_optimization.schema import Candidate, TaskSpec
@@ -121,6 +122,111 @@ class ApiSourceGeneratorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "is not set"):
                 generator.generate(task, parent, {}, [], count=1)
+
+    def test_retryable_failure_is_retried_and_archived_in_metadata(self) -> None:
+        calls = []
+        sleeps = []
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, payload, timeout
+            calls.append(1)
+            if len(calls) == 1:
+                raise HostedApiError(
+                    "temporary rate limit",
+                    status_code=429,
+                    error_code="rate_limit_exceeded",
+                    retryable=True,
+                    retry_after_seconds=0.25,
+                )
+            return {
+                "id": "retry-success",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "candidates": [
+                                        {
+                                            "hypothesis": "Retry succeeded.",
+                                            "source_code": "def make_kernel():\n    return 2\n",
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ],
+            }
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+            ),
+            transport=transport,
+            sleeper=sleeps.append,
+        )
+        task = make_task()
+        parent = Candidate.seed(task, "def make_kernel():\n    return 1\n", "kernel.py")
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            proposals = generator.generate(task, parent, {}, [], count=1)
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [0.25])
+        self.assertEqual(generator.last_call_metadata["attempts"], 2)
+
+    def test_nonretryable_quota_failure_stops_immediately(self) -> None:
+        calls = []
+
+        def transport(*args):
+            calls.append(args)
+            raise HostedApiError(
+                "insufficient quota",
+                status_code=429,
+                error_code="insufficient_quota",
+                retryable=False,
+            )
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+            ),
+            transport=transport,
+            sleeper=lambda delay: self.fail("must not sleep"),
+        )
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            with self.assertRaisesRegex(HostedApiError, "insufficient quota"):
+                generator.preflight()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(generator.last_call_metadata["error"]["error_code"], "insufficient_quota")
+
+    def test_preflight_uses_a_small_request(self) -> None:
+        captured = {}
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, timeout
+            captured.update(payload)
+            return {"id": "preflight-ok", "choices": [{"message": {"content": "{}"}}]}
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+                max_output_tokens=12000,
+            ),
+            transport=transport,
+        )
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            metadata = generator.preflight()
+
+        self.assertEqual(metadata["kind"], "preflight")
+        self.assertLessEqual(captured["max_completion_tokens"], 128)
+        self.assertNotIn("temperature", captured)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,10 @@ from .archive import ArtifactStore
 from .controller import OptimizationController
 from .factory import create_backend
 from .generators import ApiGeneratorConfig, OpenAICompatibleGenerator
-from .schema import TaskSpec
+from .manifest import collect_environment_manifest
+from .progress import ProgressReporter
+from .schema import Candidate, TaskSpec
+from .source_validation import SourceValidator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,7 +50,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Environment variable containing the hosted API key.",
     )
     parser.add_argument("--api-timeout", type=float, default=120.0)
-    parser.add_argument("--api-temperature", type=float, default=0.4)
+    parser.add_argument(
+        "--api-temperature",
+        type=float,
+        help="Optional sampling temperature. Omitted by default for model compatibility.",
+    )
+    parser.add_argument("--api-max-output-tokens", type=int, default=12000)
+    parser.add_argument(
+        "--api-max-tokens-field",
+        choices=("max_tokens", "max_completion_tokens"),
+        default="max_completion_tokens",
+    )
+    parser.add_argument("--api-retries", type=int, default=3)
+    parser.add_argument("--api-retry-backoff", type=float, default=2.0)
+    parser.add_argument(
+        "--no-json-response-format",
+        action="store_true",
+        help="Do not request the OpenAI-compatible JSON object response format.",
+    )
+    parser.add_argument(
+        "--skip-api-preflight",
+        action="store_true",
+        help="Skip the tiny API request that normally runs before GPU evaluation.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted run from --output checkpoints.",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress lines.")
     return parser
 
 
@@ -62,6 +93,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     task = TaskSpec.from_json_file(task_path)
     source_code = source_path.read_text(encoding="utf-8")
+    seed = Candidate.seed(task, source_code, source_path.name)
+    SourceValidator().validate(task, source_code, source_path.name)
     api_url = args.api_url or os.environ.get("KERNEL_OPT_API_URL")
     api_model = args.api_model or os.environ.get("KERNEL_OPT_API_MODEL")
     if not api_url or not api_model:
@@ -79,14 +112,90 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             api_key_environment_variable=args.api_key_env,
             timeout_seconds=args.api_timeout,
             temperature=args.api_temperature,
+            max_output_tokens=args.api_max_output_tokens,
+            max_tokens_field=args.api_max_tokens_field,
+            max_retries=args.api_retries,
+            retry_backoff_seconds=args.api_retry_backoff,
+            use_json_object=not args.no_json_response_format,
         )
     )
-    backend = create_backend(task, task_path.parent)
     output = Path(args.output).expanduser() if args.output else _default_output(task)
     output = output.resolve()
-    if output.exists() and any(output.iterdir()):
+    if args.resume and not output.exists():
+        raise SystemExit("Cannot resume because the output directory does not exist: %s" % output)
+    if output.exists() and any(output.iterdir()) and not args.resume:
         raise SystemExit(
-            "Output directory is not empty; choose a fresh path: %s" % output
+            "Output directory is not empty; choose a fresh path or add --resume: %s"
+            % output
+        )
+
+    progress = ProgressReporter(enabled=not args.quiet)
+    store = ArtifactStore(output)
+    run_metadata = {
+        "framework_version": "0.3.0",
+        "generator": {
+            "type": "hosted-api",
+            "api_url": api_url,
+            "model": api_model,
+            "temperature": args.api_temperature,
+            "timeout_seconds": args.api_timeout,
+            "max_output_tokens": args.api_max_output_tokens,
+            "max_tokens_field": args.api_max_tokens_field,
+            "max_retries": args.api_retries,
+            "api_key_environment_variable": args.api_key_env,
+        },
+        "resume_requested": args.resume,
+    }
+    store.initialize(task, seed, run_metadata)
+    backend = create_backend(
+        task,
+        task_path.parent,
+        artifact_directory=store.evaluator_directory,
+    )
+    store.save_environment_manifest(
+        collect_environment_manifest(task, backend, source_path, task_path)
+    )
+
+    preflight_calls = 0
+    if not args.skip_api_preflight:
+        progress.emit(
+            "api_preflight",
+            "Checking API authentication, model access, and quota before GPU work.",
+            model=api_model,
+        )
+        try:
+            preflight = generator.preflight()
+        except Exception as error:
+            metadata = dict(generator.last_call_metadata)
+            store.save_api_call(
+                "preflight-failed", metadata, generator.last_exchange
+            )
+            store.save_failure(
+                {
+                    "stage": "api-preflight",
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                    "resumable": True,
+                }
+            )
+            store.append_event(
+                "api_preflight_failed",
+                {
+                    "error": "%s: %s" % (type(error).__name__, error),
+                    "provider": metadata,
+                },
+            )
+            raise SystemExit(
+                "API preflight failed before any compiler/GPU work: %s" % error
+            ) from error
+        preflight_calls = int(preflight.get("attempts", 1))
+        store.save_api_call("preflight", preflight, generator.last_exchange)
+        store.append_event("api_preflight_completed", preflight)
+        progress.emit(
+            "api_ready",
+            "Hosted API preflight passed.",
+            attempts=preflight_calls,
+            elapsed_seconds=round(float(preflight.get("elapsed_seconds", 0.0)), 3),
         )
 
     controller = OptimizationController(
@@ -95,18 +204,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         source_name=source_path.name,
         generator=generator,
         backend=backend,
-        store=ArtifactStore(output),
-        run_metadata={
-            "framework_version": "0.2.0",
-            "generator": {
-                "type": "hosted-api",
-                "api_url": api_url,
-                "model": api_model,
-                "temperature": args.api_temperature,
-                "timeout_seconds": args.api_timeout,
-                "api_key_environment_variable": args.api_key_env,
-            },
-        },
+        store=store,
+        run_metadata=run_metadata,
+        progress=progress,
+        resume=args.resume,
+        preflight_calls=preflight_calls,
     )
     summary = controller.run()
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))

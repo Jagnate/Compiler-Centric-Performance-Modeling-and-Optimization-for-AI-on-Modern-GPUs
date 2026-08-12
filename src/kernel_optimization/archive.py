@@ -179,6 +179,11 @@ class ArtifactStore:
         self._write_json(path, dict(value))
         return path
 
+    def save_evidence_memory(self, value: Mapping[str, Any]) -> Path:
+        path = self.root / "evidence_memory.json"
+        self._write_json(path, dict(value))
+        return path
+
     def save_failure(self, value: Mapping[str, Any]) -> Path:
         path = self.root / "failure.json"
         payload = dict(value)

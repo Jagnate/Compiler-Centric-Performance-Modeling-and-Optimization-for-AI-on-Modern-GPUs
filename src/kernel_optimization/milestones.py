@@ -125,20 +125,20 @@ class NcuMilestonePolicy:
                 or parent.model is None
                 or record.measurement is None
                 or parent.measurement is None
-                or record.model.predicted_latency_ms is None
-                or parent.model.predicted_latency_ms is None
+                or record.model.ranking_latency_ms is None
+                or parent.model.ranking_latency_ms is None
                 or record.measurement.latency_ms is None
                 or parent.measurement.latency_ms is None
             ):
                 continue
             predicted_improves = (
-                record.model.predicted_latency_ms < parent.model.predicted_latency_ms
+                record.model.ranking_latency_ms < parent.model.ranking_latency_ms
             )
             measured_improves = record.measurement.latency_ms < parent.measurement.latency_ms
             if predicted_improves != measured_improves:
                 magnitude = abs(
-                    (record.model.predicted_latency_ms - parent.model.predicted_latency_ms)
-                    / parent.model.predicted_latency_ms
+                    (record.model.ranking_latency_ms - parent.model.ranking_latency_ms)
+                    / parent.model.ranking_latency_ms
                 )
                 candidates.append((magnitude, record.candidate.candidate_id, record))
         if not candidates:

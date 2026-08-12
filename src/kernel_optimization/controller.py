@@ -9,11 +9,15 @@ import traceback
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypeVar
 
 from .archive import ArtifactStore
+from .calibration import LatencyCalibrator
+from .diagnosis import BottleneckAnalyzer, FailureClassifier
+from .evidence import GlobalEvidenceMemory
 from .milestones import NcuMilestonePolicy
 from .progress import NullProgressReporter, ProgressReporter
 from .protocols import CandidateGenerator, PerformanceBackend
 from .schema import (
     Candidate,
+    CandidateProposal,
     CandidateRecord,
     Measurement,
     ModelEvaluation,
@@ -73,12 +77,18 @@ class OptimizationController:
         self.selection = AdaptiveSelectionPolicy(task.budget)
         self.milestones = NcuMilestonePolicy(task.budget)
         self.trust = TrustTracker()
+        self.calibrator = LatencyCalibrator(task.budget.calibration_min_samples)
+        self.analyzer = BottleneckAnalyzer()
+        self.evidence_memory = GlobalEvidenceMemory()
         self.records: Dict[str, CandidateRecord] = {}
         self.beam: List[CandidateRecord] = []
         self.profile_calls = 0
         self.generator_calls = 0
         self.generator_usage: Dict[str, float] = {}
         self.stage_timings: Dict[str, Dict[str, float]] = {}
+        self.repair_calls = 0
+        self.repair_candidates = 0
+        self._repairs_by_round: Dict[int, int] = {}
         self.was_resumed = False
 
     def run(self) -> SearchSummary:
@@ -220,6 +230,12 @@ class OptimizationController:
 
         if not self._phase_at_least(phase, "modeled"):
             modeled = self._model_candidates(generated, round_number)
+            repaired = self._repair_model_failures(modeled, round_number)
+            modeled.extend(repaired)
+            candidate_ids = _unique(
+                candidate_ids
+                + [item.candidate.candidate_id for item in repaired]
+            )
             resume_state = self._checkpoint(
                 phase="modeled",
                 completed_round=round_number - 1,
@@ -265,6 +281,18 @@ class OptimizationController:
 
         if not self._phase_at_least(phase, "measured"):
             measured = self._measure_candidates(selected, round_number)
+            repair_records, repair_measured = self._repair_measurement_failures(
+                selected, round_number
+            )
+            measured.extend(repair_measured)
+            candidate_ids = _unique(
+                candidate_ids
+                + [item.candidate.candidate_id for item in repair_records]
+            )
+            selected_ids = _unique(
+                selected_ids
+                + [item.candidate.candidate_id for item in repair_records]
+            )
             resume_state = self._checkpoint(
                 phase="measured",
                 completed_round=round_number - 1,
@@ -332,9 +360,12 @@ class OptimizationController:
                 diagnostics=["%s: %s" % (type(error).__name__, error)],
             )
         if not record.model.valid:
+            record.failure = FailureClassifier.model(record.model)
+            self._diagnose_and_remember(record, None, round_number=0)
             record.state = "seed-model-invalid"
             self.store.save_candidate(record)
             raise RuntimeError("the input kernel is invalid according to the model backend")
+        record.model = self.calibrator.apply(self.task, record.model)
         try:
             record.measurement = self._evaluate(
                 "measure", candidate, lambda: self.backend.measure(self.task, candidate)
@@ -345,15 +376,19 @@ class OptimizationController:
                 error="%s: %s" % (type(error).__name__, error),
             )
         if not record.measurement.correct:
+            record.failure = FailureClassifier.measurement(record.measurement)
+            self._diagnose_and_remember(record, None, round_number=0)
             record.state = "seed-correctness-failed"
             self.store.save_candidate(record)
             raise RuntimeError("the input kernel failed correctness")
+        self.calibrator.observe(self.task, record)
         record.profile = self._profile_candidate(candidate)
         if record.profile.valid:
             self.milestones.mark_profiled(record, round_number=0)
         record.state = "measured-beam"
         record.selection_reasons.append("initial-source")
         record.decision_reason = "Verified and measured input kernel."
+        self._diagnose_and_remember(record, None, round_number=0)
         self.store.save_candidate(record)
         self.store.append_event(
             "seed_initialized",
@@ -413,6 +448,40 @@ class OptimizationController:
             }
             for name, metrics in dict(state.get("stage_timings") or {}).items()
         }
+        self.repair_calls = int(state.get("repair_calls", 0))
+        self.repair_candidates = int(state.get("repair_candidates", 0))
+        self._repairs_by_round = {
+            int(name): int(value)
+            for name, value in dict(state.get("repairs_by_round") or {}).items()
+        }
+        self.calibrator = LatencyCalibrator.from_snapshot(
+            state.get("calibration"), self.task.budget.calibration_min_samples
+        )
+        if not self.calibrator.observations:
+            for record in sorted(
+                self.records.values(),
+                key=lambda item: (
+                    item.candidate.generation,
+                    item.candidate.candidate_id,
+                ),
+            ):
+                self.calibrator.observe(self.task, record)
+        self.evidence_memory = GlobalEvidenceMemory.from_snapshot(
+            state.get("evidence_memory")
+        )
+        if not self.evidence_memory.lessons:
+            for record in sorted(
+                self.records.values(),
+                key=lambda item: (
+                    item.candidate.generation,
+                    item.candidate.candidate_id,
+                ),
+            ):
+                if record.diagnosis is not None:
+                    parent = self.records.get(record.candidate.parent_id or "")
+                    self.evidence_memory.ingest(
+                        record, parent, record.candidate.generation
+                    )
         self.trust = TrustTracker.from_snapshot(state.get("trust_snapshot"))
         self._rebuild_trust()
         self.milestones.restore(state.get("milestones"))
@@ -426,11 +495,18 @@ class OptimizationController:
             item
             for item in self.records.values()
             if item.candidate.generation == round_number
+            and item.candidate.lineage_kind == "proposal"
         ]
         proposals_left = max(
             0, self.task.budget.proposals_per_round - len(existing)
         )
         parents = list(self.beam)
+        static_failures = [
+            item
+            for item in self.records.values()
+            if item.candidate.generation == round_number
+            and item.state == "static-invalid"
+        ]
         for index, parent_record in enumerate(parents):
             parents_left = len(parents) - index
             request_count = int(math.ceil(proposals_left / parents_left))
@@ -448,12 +524,7 @@ class OptimizationController:
                         proposal,
                         generation=round_number,
                     )
-                    self.source_validator.validate(
-                        self.task,
-                        candidate.source_code,
-                        candidate.source_name,
-                    )
-                except (SourceValidationError, ValueError) as error:
+                except ValueError as error:
                     self.store.append_event(
                         "proposal_rejected",
                         {
@@ -475,13 +546,45 @@ class OptimizationController:
                     continue
                 record = CandidateRecord(candidate=candidate)
                 self.records[candidate.candidate_id] = record
+                try:
+                    self.source_validator.validate(
+                        self.task,
+                        candidate.source_code,
+                        candidate.source_name,
+                    )
+                except SourceValidationError as error:
+                    record.state = "static-invalid"
+                    record.failure = FailureClassifier.static(error)
+                    record.decision_reason = str(error)
+                    self._diagnose_and_remember(
+                        record, parent_record, round_number
+                    )
+                    static_failures.append(record)
+                    self.store.append_event(
+                        "proposal_rejected",
+                        {
+                            "round": round_number,
+                            "candidate_id": candidate.candidate_id,
+                            "parent_id": parent_record.candidate.candidate_id,
+                            "hypothesis": proposal.hypothesis,
+                            "failure": record.failure.to_dict(),
+                        },
+                    )
                 self.store.save_candidate(record)
+
+        repair_queue = list(static_failures)
+        while repair_queue and self._repair_budget_available(round_number):
+            failed = repair_queue.pop(0)
+            repaired = self._repair_candidate(failed, round_number)
+            if repaired is not None and repaired.state == "static-invalid":
+                repair_queue.append(repaired)
 
         generated = sorted(
             (
                 item
                 for item in self.records.values()
                 if item.candidate.generation == round_number
+                and item.failure is None
             ),
             key=lambda item: item.candidate.candidate_id,
         )
@@ -490,6 +593,12 @@ class OptimizationController:
             {
                 "round": round_number,
                 "new_candidates": len(generated),
+                "static_failures": len(static_failures),
+                "repair_candidates": sum(
+                    item.candidate.lineage_kind == "repair"
+                    for item in self.records.values()
+                    if item.candidate.generation == round_number
+                ),
                 "requested_proposals": self.task.budget.proposals_per_round,
             },
         )
@@ -586,6 +695,163 @@ class OptimizationController:
         )
         return proposals
 
+    def _repair_candidate(
+        self, failed: CandidateRecord, round_number: int
+    ) -> Optional[CandidateRecord]:
+        repair_method = getattr(self.generator, "repair", None)
+        failure = failed.failure
+        if (
+            not callable(repair_method)
+            or failure is None
+            or not failure.retryable
+            or failed.candidate.repair_depth >= self.task.budget.max_repair_depth
+            or not self._repair_budget_available(round_number)
+        ):
+            return None
+
+        self.repair_calls += 1
+        self.generator_calls += 1
+        self._repairs_by_round[round_number] = (
+            self._repairs_by_round.get(round_number, 0) + 1
+        )
+        started_at = time.perf_counter()
+        self.progress.emit(
+            "repair_started",
+            "Requesting a bounded source repair.",
+            round=round_number,
+            failed_candidate_id=failed.candidate.candidate_id,
+            failure_category=failure.category,
+            repair_depth=failed.candidate.repair_depth + 1,
+        )
+        failure_payload = {
+            "failure": failure.to_dict(),
+            "diagnosis": failed.diagnosis.to_dict() if failed.diagnosis else None,
+        }
+        try:
+            proposal: CandidateProposal = repair_method(
+                task=self.task,
+                failed=failed.candidate,
+                failure=failure_payload,
+                evidence=self._evidence(failed),
+                history=self._history(),
+            )
+        except Exception as error:
+            elapsed = time.perf_counter() - started_at
+            self._record_stage_timing("api_repair", elapsed, failed=True)
+            metadata = dict(
+                getattr(self.generator, "last_call_metadata", {}) or {}
+            )
+            self.store.save_api_call(
+                "round-%03d-repair-failed" % round_number,
+                {
+                    "round": round_number,
+                    "failed_candidate_id": failed.candidate.candidate_id,
+                    "failure": failure_payload,
+                    "provider": metadata,
+                    "error": "%s: %s" % (type(error).__name__, error),
+                },
+                getattr(self.generator, "last_exchange", None),
+            )
+            self.store.append_event(
+                "repair_api_failed",
+                {
+                    "round": round_number,
+                    "failed_candidate_id": failed.candidate.candidate_id,
+                    "error": "%s: %s" % (type(error).__name__, error),
+                    "provider": metadata,
+                },
+            )
+            self._persist_runtime_counters()
+            return None
+
+        elapsed = time.perf_counter() - started_at
+        self._record_stage_timing("api_repair", elapsed, failed=False)
+        metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
+        self._accumulate_generator_usage(metadata.get("usage"))
+        self.store.save_api_call(
+            "round-%03d-repair" % round_number,
+            {
+                "round": round_number,
+                "failed_candidate_id": failed.candidate.candidate_id,
+                "failure": failure_payload,
+                "provider": metadata,
+            },
+            getattr(self.generator, "last_exchange", None),
+        )
+
+        try:
+            candidate = Candidate.from_repair(
+                self.task,
+                failed.candidate,
+                proposal,
+                generation=round_number,
+            )
+        except ValueError as error:
+            self.store.append_event(
+                "repair_rejected",
+                {
+                    "round": round_number,
+                    "failed_candidate_id": failed.candidate.candidate_id,
+                    "error": str(error),
+                },
+            )
+            return None
+        if candidate.candidate_id in self.records:
+            self.store.append_event(
+                "repair_deduplicated",
+                {
+                    "round": round_number,
+                    "failed_candidate_id": failed.candidate.candidate_id,
+                    "candidate_id": candidate.candidate_id,
+                },
+            )
+            return None
+
+        record = CandidateRecord(candidate=candidate)
+        self.records[candidate.candidate_id] = record
+        self.repair_candidates += 1
+        try:
+            self.source_validator.validate(
+                self.task, candidate.source_code, candidate.source_name
+            )
+        except SourceValidationError as error:
+            record.state = "static-invalid"
+            record.failure = FailureClassifier.static(error)
+            record.decision_reason = str(error)
+            self._diagnose_and_remember(record, failed, round_number)
+            event = "repair_static_failed"
+        else:
+            record.state = "generated"
+            record.decision_reason = "Generated by bounded repair."
+            self.store.save_candidate(record)
+            event = "repair_generated"
+        self.store.append_event(
+            event,
+            {
+                "round": round_number,
+                "failed_candidate_id": failed.candidate.candidate_id,
+                "candidate_id": candidate.candidate_id,
+                "repair_depth": candidate.repair_depth,
+                "elapsed_seconds": elapsed,
+            },
+        )
+        self.progress.emit(
+            event,
+            "Repair candidate materialized.",
+            round=round_number,
+            candidate_id=candidate.candidate_id,
+            static_valid=record.failure is None,
+        )
+        return record
+
+    def _repair_budget_available(self, round_number: int) -> bool:
+        return (
+            self.task.budget.max_repairs_per_round > 0
+            and self.task.budget.max_repair_depth > 0
+            and self._repairs_by_round.get(round_number, 0)
+            < self.task.budget.max_repairs_per_round
+        )
+
     def _model_candidates(
         self, records: Sequence[CandidateRecord], round_number: int
     ) -> List[CandidateRecord]:
@@ -615,12 +881,38 @@ class OptimizationController:
                     diagnostics=["%s: %s" % (type(error).__name__, error)],
                 )
             if record.model.valid:
+                record.model = self.calibrator.apply(self.task, record.model)
                 record.state = "modeled"
+                record.failure = None
+                parent = self.records.get(record.candidate.parent_id or "")
+                record.diagnosis = self.analyzer.diagnose(record, parent)
             else:
                 record.state = "model-invalid"
                 record.decision_reason = "Rejected by compiler or performance model."
+                record.failure = FailureClassifier.model(record.model)
+                parent = self.records.get(record.candidate.parent_id or "")
+                self._diagnose_and_remember(record, parent, round_number)
             self.store.save_candidate(record)
         return list(records)
+
+    def _repair_model_failures(
+        self, records: Sequence[CandidateRecord], round_number: int
+    ) -> List[CandidateRecord]:
+        repaired_records: List[CandidateRecord] = []
+        queue = [item for item in records if item.failure is not None]
+        while queue and self._repair_budget_available(round_number):
+            failed = queue.pop(0)
+            repaired = self._repair_candidate(failed, round_number)
+            if repaired is None:
+                continue
+            if repaired.failure is not None:
+                queue.append(repaired)
+                continue
+            self._model_candidates([repaired], round_number)
+            repaired_records.append(repaired)
+            if repaired.failure is not None:
+                queue.append(repaired)
+        return repaired_records
 
     def _measure_candidates(
         self, records: Sequence[CandidateRecord], round_number: int
@@ -652,15 +944,45 @@ class OptimizationController:
             if record.measurement.correct:
                 record.state = "measured"
                 record.decision_reason = "Correctness passed and latency was measured."
+                record.failure = None
+                self.calibrator.observe(self.task, record)
                 measured.append(record)
             else:
                 record.state = "correctness-failed"
                 record.decision_reason = (
                     record.measurement.error or "Correctness failed."
                 )
-            self.store.save_candidate(record)
+                record.failure = FailureClassifier.measurement(record.measurement)
+            parent = self.records.get(record.candidate.parent_id or "")
+            self._diagnose_and_remember(record, parent, round_number)
         self._rebuild_trust()
         return measured
+
+    def _repair_measurement_failures(
+        self, records: Sequence[CandidateRecord], round_number: int
+    ) -> tuple[List[CandidateRecord], List[CandidateRecord]]:
+        repair_records: List[CandidateRecord] = []
+        measured_repairs: List[CandidateRecord] = []
+        queue = [item for item in records if item.failure is not None]
+        while queue and self._repair_budget_available(round_number):
+            failed = queue.pop(0)
+            repaired = self._repair_candidate(failed, round_number)
+            if repaired is None:
+                continue
+            if repaired.failure is not None:
+                queue.append(repaired)
+                continue
+            self._model_candidates([repaired], round_number)
+            repair_records.append(repaired)
+            if repaired.failure is not None:
+                queue.append(repaired)
+                continue
+            measured = self._measure_candidates([repaired], round_number)
+            if measured:
+                measured_repairs.extend(measured)
+            elif repaired.failure is not None:
+                queue.append(repaired)
+        return repair_records, measured_repairs
 
     def _update_beam(self, measured: Sequence[CandidateRecord]) -> None:
         pool = {item.candidate.candidate_id: item for item in self.beam}
@@ -725,6 +1047,8 @@ class OptimizationController:
             if reason not in record.selection_reasons:
                 record.selection_reasons.append(reason)
             event = "candidate_profile_failed"
+        parent = self.records.get(record.candidate.parent_id or "")
+        self._diagnose_and_remember(record, parent, round_number)
         self.store.save_candidate(record)
         self.store.append_event(
             event,
@@ -794,6 +1118,28 @@ class OptimizationController:
         )
         return result
 
+    def _diagnose_and_remember(
+        self,
+        record: CandidateRecord,
+        parent: Optional[CandidateRecord],
+        round_number: int,
+    ) -> None:
+        record.diagnosis = self.analyzer.diagnose(record, parent)
+        self.store.save_candidate(record)
+        lesson = self.evidence_memory.ingest(record, parent, round_number)
+        self.store.save_evidence_memory(self.evidence_memory.snapshot())
+        if lesson is not None:
+            self.store.append_event(
+                "evidence_lesson_added",
+                {
+                    "round": round_number,
+                    "lesson_id": lesson.lesson_id,
+                    "candidate_id": record.candidate.candidate_id,
+                    "kind": lesson.kind,
+                    "bottleneck": lesson.bottleneck,
+                },
+            )
+
     def _evidence(self, record: CandidateRecord) -> Dict[str, Any]:
         return {
             "observed": {
@@ -804,6 +1150,8 @@ class OptimizationController:
             },
             "predicted": record.model.to_dict() if record.model else None,
             "model_trust": self.trust.to_dict(),
+            "calibration": self.calibrator.to_dict(),
+            "shared_memory": self.evidence_memory.for_prompt(record),
         }
 
     def _history(self) -> List[Dict[str, Any]]:
@@ -822,11 +1170,30 @@ class OptimizationController:
                 "source_sha256": item.candidate.source_sha256,
                 "hypothesis": item.candidate.hypothesis,
                 "state": item.state,
+                "lineage_kind": item.candidate.lineage_kind,
+                "repair_depth": item.candidate.repair_depth,
                 "predicted_latency_ms": (
                     item.model.predicted_latency_ms if item.model else None
                 ),
+                "calibrated_predicted_latency_ms": (
+                    item.model.calibrated_latency_ms if item.model else None
+                ),
                 "measured_latency_ms": (
                     item.measurement.latency_ms if item.measurement else None
+                ),
+                "failure": item.failure.to_dict() if item.failure else None,
+                "diagnosis": (
+                    {
+                        "category": item.diagnosis.category,
+                        "confidence": item.diagnosis.confidence,
+                        "summary": item.diagnosis.summary,
+                        "recommendations": item.diagnosis.recommendations,
+                    }
+                    if item.diagnosis
+                    else None
+                ),
+                "profile_bottleneck": (
+                    item.profile.bottleneck if item.profile else None
                 ),
             }
             for item in records[-20:]
@@ -862,12 +1229,19 @@ class OptimizationController:
             ),
             "trust": self.trust.to_dict(),
             "trust_snapshot": self.trust.snapshot(),
+            "calibration": self.calibrator.snapshot(),
+            "evidence_memory": self.evidence_memory.snapshot(),
             "milestones": self.milestones.snapshot(),
             "selection_random_state": self.selection.snapshot(),
             "profile_calls": self.profile_calls,
             "preflight_calls": self.preflight_calls,
             "generator_calls": self.generator_calls,
             "generator_usage": dict(self.generator_usage),
+            "repair_calls": self.repair_calls,
+            "repair_candidates": self.repair_candidates,
+            "repairs_by_round": {
+                str(name): value for name, value in self._repairs_by_round.items()
+            },
             "stage_timings": self.stage_timings,
         }
         self.store.save_state(state)
@@ -883,6 +1257,14 @@ class OptimizationController:
                 "preflight_calls": self.preflight_calls,
                 "generator_calls": self.generator_calls,
                 "generator_usage": dict(self.generator_usage),
+                "repair_calls": self.repair_calls,
+                "repair_candidates": self.repair_candidates,
+                "repairs_by_round": {
+                    str(name): value
+                    for name, value in self._repairs_by_round.items()
+                },
+                "calibration": self.calibrator.snapshot(),
+                "evidence_memory": self.evidence_memory.snapshot(),
                 "stage_timings": self.stage_timings,
             }
         )
@@ -967,4 +1349,18 @@ class OptimizationController:
             preflight_calls=self.preflight_calls,
             resumed=self.was_resumed,
             stage_timings=self.stage_timings,
+            repair_calls=self.repair_calls,
+            repair_candidates=self.repair_candidates,
+            evidence_lessons=len(self.evidence_memory.lessons),
+            calibration=self.calibrator.to_dict(),
         )
+
+
+def _unique(values: Sequence[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

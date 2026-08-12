@@ -58,7 +58,7 @@ class AdaptiveSelectionPolicy:
             for record in modeled
             if record.model is not None
             and record.model.valid
-            and record.model.predicted_latency_ms is not None
+            and record.model.ranking_latency_ms is not None
         ]
         target = self.promotion_count(len(valid), trust)
         if target >= len(valid):
@@ -80,7 +80,7 @@ class AdaptiveSelectionPolicy:
         ranked = sorted(
             valid,
             key=lambda item: (
-                float(item.model.predicted_latency_ms),
+                float(item.model.ranking_latency_ms),
                 item.candidate.candidate_id,
             ),
         )

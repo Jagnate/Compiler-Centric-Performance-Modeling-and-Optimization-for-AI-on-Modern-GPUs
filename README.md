@@ -355,6 +355,52 @@ Each promoted batch combines:
 This policy preserves a route to discover candidates that an imperfect model
 misranks.
 
+## Feedback, Repair, And Calibration
+
+Failures are evidence rather than discarded rows. Static validation, compiler
+or lowering failures, runtime failures, and correctness mismatches are assigned
+stable categories with the original concise diagnostics. Each failed proposal
+may enter a bounded repair chain controlled by:
+
+```json
+{
+  "max_repairs_per_round": 2,
+  "max_repair_depth": 2
+}
+```
+
+A repair API call receives the complete failed source, classified failure,
+deterministic diagnosis, recent candidate history, and shared run evidence. It
+must return one complete replacement source. Repair candidates have explicit
+`lineage_kind=repair`, `repair_depth`, and a parent pointing to the failed
+candidate. Repair API calls and materialized sources are counted separately in
+the summary and remain subject to syntax, compiler, correctness, and timing
+gates.
+
+The deterministic diagnosis layer normalizes common TileSight and NCU fields
+and reports a category, confidence, supporting evidence, limiting factors, and
+actionable recommendations. It recognizes resource-limited occupancy,
+register spills, shared-memory bank conflicts, launch underfill, DRAM/L2/shared
+memory pressure, Tensor/CUDA/SFU compute pressure, and generally low
+utilization. A raw maximum-utilization label is still retained in the backend
+response, but the API receives the structured interpretation.
+
+Every correctness outcome, failure, and successful NCU milestone creates a
+run-level evidence lesson. Lessons include an ID, observed fact, supporting
+metrics, tested hypothesis, result, confidence, source regions, and recommended
+next action. Relevant lessons are sent to every beam parent, including evidence
+from candidates that did not enter that parent lineage. Generated sources are
+asked to cite their motivating lesson IDs in `metadata.evidence_ids`.
+
+Latency calibration is deliberately outside TileSight. The controller keeps
+the raw analytical latency and optionally adds a calibrated latency for search
+ranking. Scale factors use a robust median of measured/raw ratios grouped by
+architecture, kernel family, analytical bottleneck, register regime, and
+shared-memory regime. Calibration is disabled until the configured minimum
+sample count is available, is clamped conservatively, records dispersion, and
+downgrades confidence when the regime is unstable. This avoids embedding a
+single Matmul or Flash Attention observation into a global TileSight formula.
+
 ## NCU Milestones
 
 The input source is profiled once. The controller then profiles at most one new
@@ -377,6 +423,7 @@ Every run writes:
 <output>/
   task.json
   environment.json
+  evidence_memory.json
   events.jsonl
   state.json
   failure.json                  # present after a failed attempt
@@ -402,7 +449,8 @@ Every run writes:
 ```
 
 Candidate records retain lineage, source hash, optimization hypothesis, model
-evidence, correctness and timing results, optional NCU evidence, selection
+evidence, raw and calibrated predictions, structured diagnosis, classified
+failure context, correctness and timing results, optional NCU evidence, selection
 reasons, and final state. Failed and non-promoted sources remain available for
 analysis. `task.json` also records the hosted model, endpoint, sampling
 temperature, framework version, and API-key environment-variable name, but
@@ -438,6 +486,10 @@ Coverage includes:
 - secret removal at the evaluator process boundary;
 - persistent evaluator request/response/log artifacts;
 - interruption recovery without repeating seed model, timing, or NCU work.
+- bounded static/compiler/correctness repair with explicit lineage;
+- cross-parent evidence propagation and lesson citation fields;
+- deterministic bottleneck categories and recommendations;
+- regime-local robust calibration with raw prediction preservation.
 
 ## Security Boundary
 

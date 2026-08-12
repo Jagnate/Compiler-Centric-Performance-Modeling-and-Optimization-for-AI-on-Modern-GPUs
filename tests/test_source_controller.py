@@ -48,6 +48,7 @@ class SourceOptimizationControllerTests(unittest.TestCase):
                 min_promotions_per_round=4,
                 max_promotions_per_round=4,
                 ncu_improvement_threshold=0.05,
+                max_repairs_per_round=0,
                 random_seed=3,
             ),
         )

@@ -3,9 +3,11 @@
 from .controller import OptimizationController
 from .schema import (
     BudgetConfig,
+    BottleneckDiagnosis,
     Candidate,
     CandidateProposal,
     CandidateRecord,
+    FailureEvidence,
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
@@ -16,9 +18,11 @@ from .source_validation import SourceValidationError, SourceValidator
 
 __all__ = [
     "BudgetConfig",
+    "BottleneckDiagnosis",
     "Candidate",
     "CandidateProposal",
     "CandidateRecord",
+    "FailureEvidence",
     "Measurement",
     "ModelEvaluation",
     "OptimizationController",
@@ -29,4 +33,4 @@ __all__ = [
     "TaskSpec",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

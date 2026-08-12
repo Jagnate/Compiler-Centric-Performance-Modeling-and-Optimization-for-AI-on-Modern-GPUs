@@ -27,6 +27,16 @@ class CandidateGenerator(Protocol):
     ) -> List[CandidateProposal]:
         ...
 
+    def repair(
+        self,
+        task: TaskSpec,
+        failed: Candidate,
+        failure: Dict[str, Any],
+        evidence: Dict[str, Any],
+        history: Sequence[Dict[str, Any]],
+    ) -> CandidateProposal:
+        ...
+
 
 class PerformanceBackend(Protocol):
     """Evaluate candidates at progressively more expensive fidelity levels."""

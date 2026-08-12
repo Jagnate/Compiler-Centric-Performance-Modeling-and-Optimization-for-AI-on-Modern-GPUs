@@ -47,6 +47,9 @@
     "ncu_improvement_threshold": 0.05,
     "ncu_max_staleness_rounds": 3,
     "ncu_plateau_rounds": 2,
+    "max_repairs_per_round": 2,
+    "max_repair_depth": 2,
+    "calibration_min_samples": 2,
     "random_seed": 7
   },
   "evaluator": {
@@ -59,6 +62,7 @@
     }
   },
   "metadata": {
+    "kernel_family": "matmul",
     "profile_directory": "results/ncu_profiles",
     "ncu_set": "full",
     "purpose": "End-to-end hosted-API source optimization example."

@@ -18,6 +18,12 @@ def _require_positive_int(name: str, value: Any) -> int:
     return value
 
 
+def _require_nonnegative_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("%s must be a non-negative integer" % name)
+    return value
+
+
 def _require_nonnegative_float(name: str, value: Any) -> float:
     result = float(value)
     if result < 0:
@@ -43,6 +49,9 @@ class BudgetConfig:
     ncu_improvement_threshold: float = 0.05
     ncu_max_staleness_rounds: int = 3
     ncu_plateau_rounds: int = 2
+    max_repairs_per_round: int = 2
+    max_repair_depth: int = 2
+    calibration_min_samples: int = 2
     random_seed: int = 0
 
     def __post_init__(self) -> None:
@@ -66,6 +75,13 @@ class BudgetConfig:
             "ncu_max_staleness_rounds", self.ncu_max_staleness_rounds
         )
         _require_positive_int("ncu_plateau_rounds", self.ncu_plateau_rounds)
+        _require_nonnegative_int(
+            "max_repairs_per_round", self.max_repairs_per_round
+        )
+        _require_nonnegative_int("max_repair_depth", self.max_repair_depth)
+        _require_positive_int(
+            "calibration_min_samples", self.calibration_min_samples
+        )
         if isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int):
             raise ValueError("random_seed must be an integer")
 
@@ -159,6 +175,8 @@ class Candidate:
     hypothesis: str
     expected_effect: JsonDict = field(default_factory=dict)
     proposal_metadata: JsonDict = field(default_factory=dict)
+    lineage_kind: str = "proposal"
+    repair_depth: int = 0
 
     @classmethod
     def seed(cls, task: TaskSpec, source_code: str, source_name: str) -> "Candidate":
@@ -171,6 +189,8 @@ class Candidate:
             hypothesis="Initial user-provided kernel source.",
             expected_effect={},
             proposal_metadata={"generator": "seed"},
+            lineage_kind="seed",
+            repair_depth=0,
         )
 
     @classmethod
@@ -190,6 +210,32 @@ class Candidate:
             hypothesis=proposal.hypothesis,
             expected_effect=proposal.expected_effect,
             proposal_metadata=proposal.metadata,
+            lineage_kind="proposal",
+            repair_depth=0,
+        )
+
+    @classmethod
+    def from_repair(
+        cls,
+        task: TaskSpec,
+        failed: "Candidate",
+        proposal: CandidateProposal,
+        generation: int,
+    ) -> "Candidate":
+        metadata = dict(proposal.metadata)
+        metadata.setdefault("repair_of", failed.candidate_id)
+        metadata.setdefault("repair_depth", failed.repair_depth + 1)
+        return cls._create(
+            task=task,
+            parent_id=failed.candidate_id,
+            generation=generation,
+            source_name=failed.source_name,
+            source_code=proposal.source_code,
+            hypothesis=proposal.hypothesis,
+            expected_effect=proposal.expected_effect,
+            proposal_metadata=metadata,
+            lineage_kind="repair",
+            repair_depth=failed.repair_depth + 1,
         )
 
     @classmethod
@@ -203,6 +249,8 @@ class Candidate:
         hypothesis: str,
         expected_effect: Mapping[str, Any],
         proposal_metadata: Mapping[str, Any],
+        lineage_kind: str,
+        repair_depth: int,
     ) -> "Candidate":
         safe_name = Path(source_name).name
         if not safe_name or safe_name in {".", ".."}:
@@ -221,6 +269,8 @@ class Candidate:
             hypothesis=hypothesis,
             expected_effect=dict(expected_effect),
             proposal_metadata=dict(proposal_metadata),
+            lineage_kind=lineage_kind,
+            repair_depth=repair_depth,
         )
 
     def to_dict(self, include_source: bool = True) -> JsonDict:
@@ -247,6 +297,8 @@ class ModelEvaluation:
     confidence: str = "unknown"
     metrics: JsonDict = field(default_factory=dict)
     diagnostics: List[str] = field(default_factory=list)
+    calibrated_latency_ms: Optional[float] = None
+    calibration: JsonDict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.valid:
@@ -254,13 +306,23 @@ class ModelEvaluation:
                 raise ValueError(
                     "a valid model evaluation needs positive predicted_latency_ms"
                 )
+            if (
+                self.calibrated_latency_ms is not None
+                and self.calibrated_latency_ms <= 0
+            ):
+                raise ValueError("calibrated_latency_ms must be positive")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModelEvaluation":
         data = dict(value)
         data["metrics"] = dict(data.get("metrics") or {})
         data["diagnostics"] = list(data.get("diagnostics") or [])
+        data["calibration"] = dict(data.get("calibration") or {})
         return cls(**data)
+
+    @property
+    def ranking_latency_ms(self) -> Optional[float]:
+        return self.calibrated_latency_ms or self.predicted_latency_ms
 
     def to_dict(self) -> JsonDict:
         return asdict(self)
@@ -311,6 +373,54 @@ class ProfileEvaluation:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class FailureEvidence:
+    """Normalized failure context suitable for repair and run-level memory."""
+
+    stage: str
+    category: str
+    message: str
+    diagnostics: List[str] = field(default_factory=list)
+    details: JsonDict = field(default_factory=dict)
+    retryable: bool = True
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "FailureEvidence":
+        data = dict(value)
+        data["diagnostics"] = list(data.get("diagnostics") or [])
+        data["details"] = dict(data.get("details") or {})
+        return cls(**data)
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BottleneckDiagnosis:
+    """Deterministic interpretation of model, timing, and profiler evidence."""
+
+    category: str
+    confidence: str
+    summary: str
+    limiting_factors: List[str] = field(default_factory=list)
+    evidence: List[JsonDict] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+    source: str = "deterministic"
+    metrics: JsonDict = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "BottleneckDiagnosis":
+        data = dict(value)
+        data["limiting_factors"] = list(data.get("limiting_factors") or [])
+        data["evidence"] = [dict(item) for item in data.get("evidence") or []]
+        data["recommendations"] = list(data.get("recommendations") or [])
+        data["metrics"] = dict(data.get("metrics") or {})
+        return cls(**data)
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
 @dataclass
 class CandidateRecord:
     """Accumulated evidence and decision state for one source candidate."""
@@ -320,6 +430,8 @@ class CandidateRecord:
     model: Optional[ModelEvaluation] = None
     measurement: Optional[Measurement] = None
     profile: Optional[ProfileEvaluation] = None
+    failure: Optional[FailureEvidence] = None
+    diagnosis: Optional[BottleneckDiagnosis] = None
     selection_reasons: List[str] = field(default_factory=list)
     decision_reason: Optional[str] = None
 
@@ -338,6 +450,8 @@ class CandidateRecord:
             "model": self.model.to_dict() if self.model else None,
             "measurement": self.measurement.to_dict() if self.measurement else None,
             "profile": self.profile.to_dict() if self.profile else None,
+            "failure": self.failure.to_dict() if self.failure else None,
+            "diagnosis": self.diagnosis.to_dict() if self.diagnosis else None,
             "selection_reasons": list(self.selection_reasons),
             "decision_reason": self.decision_reason,
         }
@@ -349,12 +463,18 @@ class CandidateRecord:
         model = data.get("model")
         measurement = data.get("measurement")
         profile = data.get("profile")
+        failure = data.get("failure")
+        diagnosis = data.get("diagnosis")
         return cls(
             candidate=candidate,
             state=str(data.get("state", "generated")),
             model=ModelEvaluation.from_dict(model) if model else None,
             measurement=Measurement.from_dict(measurement) if measurement else None,
             profile=ProfileEvaluation.from_dict(profile) if profile else None,
+            failure=FailureEvidence.from_dict(failure) if failure else None,
+            diagnosis=(
+                BottleneckDiagnosis.from_dict(diagnosis) if diagnosis else None
+            ),
             selection_reasons=list(data.get("selection_reasons") or []),
             decision_reason=data.get("decision_reason"),
         )
@@ -384,6 +504,10 @@ class SearchSummary:
     preflight_calls: int = 0
     resumed: bool = False
     stage_timings: JsonDict = field(default_factory=dict)
+    repair_calls: int = 0
+    repair_candidates: int = 0
+    evidence_lessons: int = 0
+    calibration: JsonDict = field(default_factory=dict)
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

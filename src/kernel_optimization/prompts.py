@@ -17,6 +17,11 @@ or external interface. Treat fields under observed_evidence as hardware facts.
 Treat fields under predicted_evidence as analytical model predictions that may
 be wrong.
 
+When shared_evidence_memory is present, cite the lesson IDs that motivated each
+candidate and state which recommendation or failed hypothesis is being acted
+on. For repair requests, make the smallest useful semantics-preserving change
+that addresses the classified failure before attempting additional tuning.
+
 The candidate source is untrusted and will be parsed, compiled, checked against
 the reference, and benchmarked independently. Return only valid JSON matching
 the requested schema. Do not include Markdown, comments outside JSON, patches,
@@ -60,6 +65,8 @@ def build_optimization_prompt(
         "observed_evidence": evidence.get("observed"),
         "predicted_evidence": evidence.get("predicted"),
         "model_trust": evidence.get("model_trust"),
+        "calibration_state": evidence.get("calibration"),
+        "shared_evidence_memory": evidence.get("shared_memory", []),
         "recent_history": list(history)[-12:],
         "rules": [
             "Return the complete replacement content of the kernel source file.",
@@ -68,6 +75,7 @@ def build_optimization_prompt(
             "Do not add file, network, shell, subprocess, or environment access.",
             "Do not claim that predicted metrics were measured on hardware.",
             "Make each candidate materially different and explain one primary hypothesis.",
+            "List the shared evidence lesson IDs used by each candidate in metadata.evidence_ids.",
             "Use only APIs available to the input source and declared task environment.",
         ],
         "response_schema": {
@@ -83,6 +91,81 @@ def build_optimization_prompt(
                     "metadata": {
                         "strategy": "string",
                         "changed_regions": ["string"],
+                        "evidence_ids": ["string"],
+                        "applied_recommendations": ["string"],
+                    },
+                }
+            ]
+        },
+    }
+    return json.dumps(request, indent=2, sort_keys=True)
+
+
+def build_repair_prompt(
+    task: TaskSpec,
+    failed: Candidate,
+    failure: Dict[str, Any],
+    evidence: Dict[str, Any],
+    history: Sequence[Dict[str, Any]],
+) -> str:
+    """Build a bounded repair request around one archived failed source."""
+
+    request = {
+        "mode": "repair",
+        "objective": (
+            "Return one complete replacement source that fixes the classified "
+            "failure while preserving semantics and the external interface."
+        ),
+        "candidate_count": 1,
+        "task": {
+            "task_id": task.task_id,
+            "description": task.description,
+            "reference_semantics": task.reference,
+            "entrypoint": task.entrypoint,
+            "language": task.language,
+            "target": task.target,
+            "workload": task.workload,
+            "constraints": task.constraints,
+        },
+        "failed_candidate": {
+            "candidate_id": failed.candidate_id,
+            "parent_id": failed.parent_id,
+            "generation": failed.generation,
+            "repair_depth": failed.repair_depth,
+            "source_name": failed.source_name,
+            "source_sha256": failed.source_sha256,
+            "hypothesis": failed.hypothesis,
+            "source_code": failed.source_code,
+        },
+        "classified_failure": failure,
+        "shared_evidence_memory": evidence.get("shared_memory", []),
+        "model_trust": evidence.get("model_trust"),
+        "calibration_state": evidence.get("calibration"),
+        "recent_history": list(history)[-12:],
+        "rules": [
+            "Return exactly one complete Python source file, not a patch.",
+            "Fix the classified failure before applying unrelated optimizations.",
+            "Preserve mathematical semantics, entrypoint, and external interface.",
+            "Do not modify or reproduce the evaluator or reference implementation.",
+            "Do not add file, network, shell, subprocess, or environment access.",
+            "Use the smallest change that can be independently compiled and checked.",
+            "Cite relevant shared lesson IDs in metadata.evidence_ids.",
+        ],
+        "response_schema": {
+            "candidates": [
+                {
+                    "hypothesis": "string describing the repair",
+                    "source_code": "complete repaired Python source as a JSON string",
+                    "expected_effect": {
+                        "failure": "fixed|unknown",
+                        "latency": "increase|decrease|unknown",
+                        "reason": "string",
+                    },
+                    "metadata": {
+                        "strategy": "repair",
+                        "changed_regions": ["string"],
+                        "evidence_ids": ["string"],
+                        "applied_recommendations": ["string"],
                     },
                 }
             ]

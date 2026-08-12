@@ -13,6 +13,7 @@ class TrustTracker:
     """Track absolute error and local optimization-direction agreement."""
 
     relative_errors: List[float] = field(default_factory=list)
+    raw_relative_errors: List[float] = field(default_factory=list)
     direction_correct: int = 0
     direction_total: int = 0
 
@@ -23,22 +24,27 @@ class TrustTracker:
     ) -> None:
         if not record.is_measured_correct or record.model is None:
             return
-        predicted = record.model.predicted_latency_ms
+        predicted = record.model.ranking_latency_ms
         measured = record.measurement.latency_ms if record.measurement else None
         if predicted is None or measured is None or measured <= 0:
             return
         self.relative_errors.append(abs(predicted - measured) / measured)
+        raw_predicted = record.model.predicted_latency_ms
+        if raw_predicted is not None:
+            self.raw_relative_errors.append(
+                abs(raw_predicted - measured) / measured
+            )
 
         if (
             parent is None
             or not parent.is_measured_correct
             or parent.model is None
-            or parent.model.predicted_latency_ms is None
+            or parent.model.ranking_latency_ms is None
             or parent.measurement is None
             or parent.measurement.latency_ms is None
         ):
             return
-        predicted_delta = predicted - parent.model.predicted_latency_ms
+        predicted_delta = predicted - parent.model.ranking_latency_ms
         measured_delta = measured - parent.measurement.latency_ms
         if abs(predicted_delta) <= 1e-12 or abs(measured_delta) <= 1e-12:
             return
@@ -59,6 +65,12 @@ class TrustTracker:
         return self.direction_correct / self.direction_total
 
     @property
+    def raw_mean_absolute_relative_error(self) -> Optional[float]:
+        if not self.raw_relative_errors:
+            return None
+        return sum(self.raw_relative_errors) / len(self.raw_relative_errors)
+
+    @property
     def score(self) -> float:
         """Return a conservative zero-to-one model trust score."""
 
@@ -75,6 +87,8 @@ class TrustTracker:
         return {
             "measured_samples": len(self.relative_errors),
             "mean_absolute_relative_error": self.mean_absolute_relative_error,
+            "ranking_mean_absolute_relative_error": self.mean_absolute_relative_error,
+            "raw_mean_absolute_relative_error": self.raw_mean_absolute_relative_error,
             "direction_correct": self.direction_correct,
             "direction_total": self.direction_total,
             "direction_accuracy": self.direction_accuracy,
@@ -86,6 +100,7 @@ class TrustTracker:
 
         return {
             "relative_errors": list(self.relative_errors),
+            "raw_relative_errors": list(self.raw_relative_errors),
             "direction_correct": self.direction_correct,
             "direction_total": self.direction_total,
         }
@@ -95,6 +110,9 @@ class TrustTracker:
         data = dict(value or {})
         return cls(
             relative_errors=[float(item) for item in data.get("relative_errors", [])],
+            raw_relative_errors=[
+                float(item) for item in data.get("raw_relative_errors", [])
+            ],
             direction_correct=int(data.get("direction_correct", 0)),
             direction_total=int(data.get("direction_total", 0)),
         )

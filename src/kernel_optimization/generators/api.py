@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-from ..prompts import SYSTEM_PROMPT, build_optimization_prompt
+from ..prompts import SYSTEM_PROMPT, build_optimization_prompt, build_repair_prompt
 from ..schema import Candidate, CandidateProposal, TaskSpec
 
 
@@ -134,6 +134,29 @@ class OpenAICompatibleGenerator:
         count: int,
     ) -> List[CandidateProposal]:
         prompt = build_optimization_prompt(task, parent, evidence, history, count)
+        return self._generate_from_prompt(prompt, count=count, kind="generate")
+
+    def repair(
+        self,
+        task: TaskSpec,
+        failed: Candidate,
+        failure: Dict[str, Any],
+        evidence: Dict[str, Any],
+        history: Sequence[Dict[str, Any]],
+    ) -> CandidateProposal:
+        prompt = build_repair_prompt(
+            task,
+            failed,
+            failure,
+            evidence,
+            history,
+        )
+        proposals = self._generate_from_prompt(prompt, count=1, kind="repair")
+        return proposals[0]
+
+    def _generate_from_prompt(
+        self, prompt: str, *, count: int, kind: str
+    ) -> List[CandidateProposal]:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
@@ -147,7 +170,7 @@ class OpenAICompatibleGenerator:
             payload["response_format"] = {"type": "json_object"}
         if self.config.max_output_tokens is not None:
             payload[self.config.max_tokens_field] = self.config.max_output_tokens
-        response = self._request(payload, kind="generate")
+        response = self._request(payload, kind=kind)
         content = self._response_content(response)
         data = json.loads(_strip_json_fence(content))
         raw_candidates = data.get("candidates") if isinstance(data, dict) else data

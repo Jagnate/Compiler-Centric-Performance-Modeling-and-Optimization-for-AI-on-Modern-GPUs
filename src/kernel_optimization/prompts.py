@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Sequence
 
+from .prompt_compression import compact_failure_context, compress_prompt_context
 from .schema import Candidate, TaskSpec
 
 
@@ -38,6 +39,7 @@ def build_optimization_prompt(
 ) -> str:
     """Build one source optimization request with explicit evidence provenance."""
 
+    context = compress_prompt_context(evidence, history)
     request = {
         "objective": (
             "Propose diverse complete kernel source files that preserve semantics "
@@ -62,12 +64,13 @@ def build_optimization_prompt(
             "hypothesis": parent.hypothesis,
             "source_code": parent.source_code,
         },
-        "observed_evidence": evidence.get("observed"),
-        "predicted_evidence": evidence.get("predicted"),
-        "model_trust": evidence.get("model_trust"),
-        "calibration_state": evidence.get("calibration"),
-        "shared_evidence_memory": evidence.get("shared_memory", []),
-        "recent_history": list(history)[-12:],
+        "observed_evidence": context.evidence.get("observed"),
+        "predicted_evidence": context.evidence.get("predicted"),
+        "model_trust": context.evidence.get("model_trust"),
+        "calibration_state": context.evidence.get("calibration"),
+        "shared_evidence_memory": context.evidence.get("shared_memory", []),
+        "recent_history": context.history,
+        "context_provenance": context.provenance,
         "rules": [
             "Return the complete replacement content of the kernel source file.",
             "Preserve mathematical semantics, entrypoint, and external interface.",
@@ -110,6 +113,7 @@ def build_repair_prompt(
 ) -> str:
     """Build a bounded repair request around one archived failed source."""
 
+    context = compress_prompt_context(evidence, history)
     request = {
         "mode": "repair",
         "objective": (
@@ -137,11 +141,12 @@ def build_repair_prompt(
             "hypothesis": failed.hypothesis,
             "source_code": failed.source_code,
         },
-        "classified_failure": failure,
-        "shared_evidence_memory": evidence.get("shared_memory", []),
-        "model_trust": evidence.get("model_trust"),
-        "calibration_state": evidence.get("calibration"),
-        "recent_history": list(history)[-12:],
+        "classified_failure": compact_failure_context(failure),
+        "shared_evidence_memory": context.evidence.get("shared_memory", []),
+        "model_trust": context.evidence.get("model_trust"),
+        "calibration_state": context.evidence.get("calibration"),
+        "recent_history": context.history,
+        "context_provenance": context.provenance,
         "rules": [
             "Return exactly one complete Python source file, not a patch.",
             "Fix the classified failure before applying unrelated optimizations.",

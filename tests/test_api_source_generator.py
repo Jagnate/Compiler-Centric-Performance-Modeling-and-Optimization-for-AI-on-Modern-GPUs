@@ -12,6 +12,7 @@ from kernel_optimization.generators.api import (
     ApiGeneratorConfig,
     HostedApiError,
     OpenAICompatibleGenerator,
+    _request_too_large,
 )
 from kernel_optimization.schema import Candidate, TaskSpec
 
@@ -227,6 +228,22 @@ class ApiSourceGeneratorTests(unittest.TestCase):
         self.assertEqual(metadata["kind"], "preflight")
         self.assertLessEqual(captured["max_completion_tokens"], 128)
         self.assertNotIn("temperature", captured)
+
+    def test_oversized_token_request_is_not_treated_as_transient(self) -> None:
+        body = json.dumps(
+            {
+                "error": {
+                    "message": (
+                        "Request too large for this model. The input or output "
+                        "tokens must be reduced in order to run successfully."
+                    ),
+                    "type": "tokens",
+                    "code": "rate_limit_exceeded",
+                }
+            }
+        )
+        self.assertTrue(_request_too_large(body))
+        self.assertFalse(_request_too_large('{"error":{"message":"Try later"}}'))
 
 
 if __name__ == "__main__":

@@ -57,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-max-output-tokens", type=int, default=12000)
     parser.add_argument(
+        "--api-max-input-tokens",
+        type=int,
+        default=60000,
+        help=(
+            "Conservative local input-token budget checked before network access. "
+            "Prompt context is compressed before this check."
+        ),
+    )
+    parser.add_argument(
         "--api-max-tokens-field",
         choices=("max_tokens", "max_completion_tokens"),
         default="max_completion_tokens",
@@ -149,6 +158,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not os.environ.get(args.api_key_env):
         raise SystemExit("API key environment variable %s is not set" % args.api_key_env)
 
+    progress = ProgressReporter(enabled=not args.quiet)
+
+    def report_api_request(size):
+        progress.emit(
+            "api_request_ready",
+            "API request prepared with a bounded prompt context.",
+            kind=size.get("kind"),
+            estimated_input_tokens=size.get("estimated_input_tokens"),
+            max_output_tokens=size.get("max_output_tokens"),
+            estimated_reserved_tokens=size.get("estimated_reserved_tokens"),
+            input_budget=size.get("max_input_tokens"),
+            user_characters=size.get("user_characters"),
+        )
+
     generator = OpenAICompatibleGenerator(
         ApiGeneratorConfig(
             api_url=api_url,
@@ -157,11 +180,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             timeout_seconds=args.api_timeout,
             temperature=args.api_temperature,
             max_output_tokens=args.api_max_output_tokens,
+            max_input_tokens=args.api_max_input_tokens,
             max_tokens_field=args.api_max_tokens_field,
             max_retries=args.api_retries,
             retry_backoff_seconds=args.api_retry_backoff,
             use_json_object=not args.no_json_response_format,
-        )
+        ),
+        request_observer=report_api_request,
     )
     output = Path(args.output).expanduser() if args.output else _default_output(task)
     output = output.resolve()
@@ -173,7 +198,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             % output
         )
 
-    progress = ProgressReporter(enabled=not args.quiet)
     store = ArtifactStore(output)
     run_metadata = {
         "framework_version": "0.6.0",
@@ -184,6 +208,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "temperature": args.api_temperature,
             "timeout_seconds": args.api_timeout,
             "max_output_tokens": args.api_max_output_tokens,
+            "max_input_tokens": args.api_max_input_tokens,
             "max_tokens_field": args.api_max_tokens_field,
             "max_retries": args.api_retries,
             "api_key_environment_variable": args.api_key_env,

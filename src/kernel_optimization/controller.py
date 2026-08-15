@@ -1399,6 +1399,9 @@ class OptimizationController:
                 if record.measurement
                 else None,
                 "profile": record.profile.to_dict() if record.profile else None,
+                "diagnosis": (
+                    record.diagnosis.to_dict() if record.diagnosis else None
+                ),
             },
             "predicted": record.model.to_dict() if record.model else None,
             "model_trust": self.trust.to_dict(),

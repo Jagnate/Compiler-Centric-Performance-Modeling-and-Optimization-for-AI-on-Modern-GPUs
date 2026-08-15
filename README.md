@@ -192,6 +192,23 @@ access, quota, and endpoint failures are therefore detected before TileLang
 compilation, CUDA timing, or seed NCU profiling begins. Progress is flushed to
 stderr for every API, model, measurement, profile, and round boundary.
 
+Before each generation or repair call, the controller deterministically
+compresses accumulated TileSight, NCU, diagnosis, lesson, and history data into
+a bounded key-metric view. Complete source code, task semantics, and the
+response contract remain lossless. Full raw evidence stays in the artifact
+directory and the prompt records hashes and compression counts for provenance.
+The progress stream reports a conservative input-token estimate before network
+access. By default, requests estimated above 60,000 input tokens fail locally
+instead of consuming an oversized provider request. The budgets can be changed
+explicitly:
+
+```bash
+--api-max-input-tokens 60000 --api-max-output-tokens 12000
+```
+
+The input count is an intentionally conservative dependency-free estimate;
+provider usage metadata remains authoritative after a successful call.
+
 Transient rate-limit, connection, and server failures use bounded exponential
 retry. Quota exhaustion and other permanent client errors fail immediately.
 Provider requests and responses are archived without authorization headers or

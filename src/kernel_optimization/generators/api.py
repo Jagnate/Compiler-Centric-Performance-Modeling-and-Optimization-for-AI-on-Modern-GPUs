@@ -11,6 +11,11 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from ..prompt_compression import (
+    PromptBudgetError,
+    enforce_prompt_budget,
+    prompt_size_metadata,
+)
 from ..prompts import SYSTEM_PROMPT, build_optimization_prompt, build_repair_prompt
 from ..schema import Candidate, CandidateProposal, TaskSpec
 
@@ -18,6 +23,7 @@ from ..schema import Candidate, CandidateProposal, TaskSpec
 Transport = Callable[
     [str, Mapping[str, str], Mapping[str, Any], float], Mapping[str, Any]
 ]
+RequestObserver = Callable[[Mapping[str, Any]], None]
 
 
 class HostedApiError(RuntimeError):
@@ -66,6 +72,7 @@ class ApiGeneratorConfig:
     max_retries: int = 3
     retry_backoff_seconds: float = 2.0
     use_json_object: bool = True
+    max_input_tokens: int = 60000
 
     def __post_init__(self) -> None:
         if not self.api_url.startswith(("http://", "https://")):
@@ -78,6 +85,8 @@ class ApiGeneratorConfig:
             raise ValueError("temperature must be non-negative")
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when provided")
+        if self.max_input_tokens <= 0:
+            raise ValueError("max_input_tokens must be positive")
         if self.max_tokens_field not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError(
                 "max_tokens_field must be max_tokens or max_completion_tokens"
@@ -96,10 +105,12 @@ class OpenAICompatibleGenerator:
         config: ApiGeneratorConfig,
         transport: Optional[Transport] = None,
         sleeper: Callable[[float], None] = time.sleep,
+        request_observer: Optional[RequestObserver] = None,
     ) -> None:
         self.config = config
         self.transport = transport or _post_json
         self.sleeper = sleeper
+        self.request_observer = request_observer
         self.last_call_metadata: Dict[str, Any] = {}
         self.last_exchange: Dict[str, Any] = {}
         self.total_api_requests = 0
@@ -122,7 +133,13 @@ class OpenAICompatibleGenerator:
         payload[self.config.max_tokens_field] = min(
             self.config.max_output_tokens or 128, 128
         )
-        response = self._request(payload, kind="preflight")
+        size = prompt_size_metadata(
+            payload["messages"][0]["content"],
+            payload["messages"][1]["content"],
+            payload[self.config.max_tokens_field],
+        )
+        self._observe_request("preflight", size)
+        response = self._request(payload, kind="preflight", prompt_size=size)
         return dict(self.last_call_metadata)
 
     def generate(
@@ -170,7 +187,36 @@ class OpenAICompatibleGenerator:
             payload["response_format"] = {"type": "json_object"}
         if self.config.max_output_tokens is not None:
             payload[self.config.max_tokens_field] = self.config.max_output_tokens
-        response = self._request(payload, kind=kind)
+        size = prompt_size_metadata(
+            SYSTEM_PROMPT,
+            prompt,
+            self.config.max_output_tokens,
+        )
+        self._observe_request(kind, size)
+        try:
+            enforce_prompt_budget(size, self.config.max_input_tokens)
+        except PromptBudgetError as error:
+            error_metadata = {
+                "type": type(error).__name__,
+                "message": str(error),
+                "error_code": "local_prompt_budget_exceeded",
+                "retryable": False,
+            }
+            self.last_call_metadata = {
+                "kind": kind,
+                "requested_model": self.config.model,
+                "attempts": 0,
+                "prompt_size": dict(size),
+                "error": error_metadata,
+            }
+            self.last_exchange = {
+                "request": dict(payload),
+                "kind": kind,
+                "prompt_size": dict(size),
+                "error": error_metadata,
+            }
+            raise
+        response = self._request(payload, kind=kind, prompt_size=size)
         content = self._response_content(response)
         data = json.loads(_strip_json_fence(content))
         raw_candidates = data.get("candidates") if isinstance(data, dict) else data
@@ -190,7 +236,11 @@ class OpenAICompatibleGenerator:
         return proposals
 
     def _request(
-        self, payload: Mapping[str, Any], *, kind: str
+        self,
+        payload: Mapping[str, Any],
+        *,
+        kind: str,
+        prompt_size: Optional[Mapping[str, Any]] = None,
     ) -> Mapping[str, Any]:
         api_key = os.environ.get(self.config.api_key_environment_variable)
         if not api_key:
@@ -204,7 +254,11 @@ class OpenAICompatibleGenerator:
         }
         started_at = time.perf_counter()
         attempts = 0
-        self.last_exchange = {"request": dict(payload), "kind": kind}
+        self.last_exchange = {
+            "request": dict(payload),
+            "kind": kind,
+            "prompt_size": dict(prompt_size or {}),
+        }
         while True:
             attempts += 1
             self.total_api_requests += 1
@@ -222,6 +276,7 @@ class OpenAICompatibleGenerator:
                     "requested_model": self.config.model,
                     "attempts": attempts,
                     "elapsed_seconds": time.perf_counter() - started_at,
+                    "prompt_size": dict(prompt_size or {}),
                     "error": error.to_dict(),
                 }
                 self.last_exchange["error"] = error.to_dict()
@@ -247,9 +302,18 @@ class OpenAICompatibleGenerator:
             "usage": dict(response.get("usage") or {}),
             "attempts": attempts,
             "elapsed_seconds": time.perf_counter() - started_at,
+            "prompt_size": dict(prompt_size or {}),
         }
         self.last_exchange["response"] = dict(response)
         return response
+
+    def _observe_request(self, kind: str, size: Mapping[str, Any]) -> None:
+        if self.request_observer is None:
+            return
+        value = dict(size)
+        value["kind"] = kind
+        value["max_input_tokens"] = self.config.max_input_tokens
+        self.request_observer(value)
 
     @staticmethod
     def _response_content(response: Mapping[str, Any]) -> str:
@@ -295,6 +359,7 @@ def _post_json(
         retryable = error.code >= 500 or (
             error.code == 429
             and error_code not in {"insufficient_quota", "credit_balance_exhausted"}
+            and not _request_too_large(body)
         )
         retry_after = _retry_after(error.headers.get("Retry-After"))
         raise HostedApiError(
@@ -328,6 +393,13 @@ def _error_code(body: str) -> Optional[str]:
         return None
     code = error.get("code") or error.get("type")
     return str(code) if code is not None else None
+
+
+def _request_too_large(body: str) -> bool:
+    lowered = body.lower()
+    return "request too large" in lowered or (
+        "input or output tokens" in lowered and "must be reduced" in lowered
+    )
 
 
 def _retry_after(value: Optional[str]) -> Optional[float]:

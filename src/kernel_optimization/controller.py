@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 import time
 import traceback
@@ -21,6 +22,7 @@ from .schema import (
     Candidate,
     CandidateProposal,
     CandidateRecord,
+    FailureEvidence,
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
@@ -29,6 +31,12 @@ from .schema import (
 )
 from .selection import create_selection_policy
 from .source_validation import SourceValidationError, SourceValidator
+from .structural_search import (
+    SourceNoveltyAnalyzer,
+    StrategyAssignment,
+    StructuralStrategyPortfolio,
+    bind_strategy_assignments,
+)
 from .trust import TrustTracker
 
 
@@ -73,6 +81,7 @@ class OptimizationController:
         compiled_deduplication: bool = True,
         api_input_price_per_million: Optional[float] = None,
         api_output_price_per_million: Optional[float] = None,
+        structural_search_policy: str = "off",
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -93,6 +102,13 @@ class OptimizationController:
         self.compiled_deduplication = bool(compiled_deduplication)
         self.api_input_price_per_million = api_input_price_per_million
         self.api_output_price_per_million = api_output_price_per_million
+        if structural_search_policy not in {"enforce", "observe", "off"}:
+            raise ValueError(
+                "structural_search_policy must be enforce, observe, or off"
+            )
+        self.structural_search_policy = structural_search_policy
+        self.strategy_portfolio = StructuralStrategyPortfolio()
+        self.novelty_analyzer = SourceNoveltyAnalyzer()
         for name, value in (
             ("api_input_price_per_million", api_input_price_per_million),
             ("api_output_price_per_million", api_output_price_per_million),
@@ -606,9 +622,40 @@ class OptimizationController:
             if item.candidate.generation == round_number
             and item.candidate.lineage_kind == "proposal"
         ]
-        proposals_left = max(
-            0, self.task.budget.proposals_per_round - len(existing)
+        assignments = (
+            self.strategy_portfolio.plan(
+                self.task,
+                round_number,
+                self.task.budget.proposals_per_round,
+                evidence=self._strategy_planning_evidence(self.beam[0]),
+            )
+            if self.structural_search_policy != "off"
+            else []
         )
+        used_slots = {
+            str(item.candidate.proposal_metadata.get("strategy_slot"))
+            for item in existing
+            if item.candidate.proposal_metadata.get("strategy_slot")
+        }
+        remaining_assignments = [
+            item for item in assignments if item.slot not in used_slots
+        ]
+        proposals_left = (
+            len(remaining_assignments)
+            if assignments
+            else max(0, self.task.budget.proposals_per_round - len(existing))
+        )
+        if assignments:
+            self.store.append_event(
+                "strategy_portfolio_planned",
+                {
+                    "round": round_number,
+                    "policy": self.structural_search_policy,
+                    "planning_candidate_id": self.beam[0].candidate.candidate_id,
+                    "assignments": [item.to_dict() for item in assignments],
+                    "remaining_slots": [item.slot for item in remaining_assignments],
+                },
+            )
         parents = list(self.beam)
         static_failures = [
             item
@@ -621,10 +668,27 @@ class OptimizationController:
             request_count = int(math.ceil(proposals_left / parents_left))
             if request_count <= 0:
                 break
+            requested_assignments = remaining_assignments[:request_count]
             proposals = self._generate_from_parent(
-                round_number, parent_record, request_count
+                round_number,
+                parent_record,
+                request_count,
+                requested_assignments,
             )
-            proposals_left -= len(proposals)
+            if assignments:
+                returned_slots = {
+                    str(proposal.metadata.get("strategy_slot"))
+                    for proposal in proposals
+                    if proposal.metadata.get("strategy_slot")
+                }
+                remaining_assignments = [
+                    item
+                    for item in remaining_assignments
+                    if item.slot not in returned_slots
+                ]
+                proposals_left = len(remaining_assignments)
+            else:
+                proposals_left -= len(proposals)
             for proposal in proposals:
                 try:
                     candidate = Candidate.from_proposal(
@@ -679,6 +743,12 @@ class OptimizationController:
                             "failure": record.failure.to_dict(),
                         },
                     )
+                else:
+                    self._validate_candidate_novelty(
+                        record,
+                        parent_record,
+                        round_number,
+                    )
                 self.store.save_candidate(record)
 
         repair_queue = list(static_failures)
@@ -703,12 +773,18 @@ class OptimizationController:
                 "round": round_number,
                 "new_candidates": len(generated),
                 "static_failures": len(static_failures),
+                "strategy_failures": sum(
+                    item.state == "strategy-invalid"
+                    for item in self.records.values()
+                    if item.candidate.generation == round_number
+                ),
                 "repair_candidates": sum(
                     item.candidate.lineage_kind == "repair"
                     for item in self.records.values()
                     if item.candidate.generation == round_number
                 ),
                 "requested_proposals": self.task.budget.proposals_per_round,
+                "structural_search_policy": self.structural_search_policy,
             },
         )
         self.progress.emit(
@@ -724,6 +800,7 @@ class OptimizationController:
         round_number: int,
         parent_record: CandidateRecord,
         request_count: int,
+        strategy_assignments: Sequence[StrategyAssignment] = (),
     ):
         self.generator_calls += 1
         started_at = time.perf_counter()
@@ -734,11 +811,23 @@ class OptimizationController:
             parent_id=parent_record.candidate.candidate_id,
             requested=request_count,
         )
+        evidence = self._evidence(parent_record)
+        if strategy_assignments:
+            evidence = dict(evidence)
+            evidence["generation_request"] = {
+                "round": round_number,
+                "strategy_assignments": [
+                    item.to_dict() for item in strategy_assignments
+                ],
+                "discovered_strategy_memory": self._discovered_strategy_memory(
+                    round_number
+                ),
+            }
         try:
             proposals = self.generator.generate(
                 task=self.task,
                 parent=parent_record.candidate,
-                evidence=self._evidence(parent_record),
+                evidence=evidence,
                 history=self._history(),
                 count=request_count,
             )
@@ -755,6 +844,9 @@ class OptimizationController:
                     "round": round_number,
                     "parent_id": parent_record.candidate.candidate_id,
                     "requested_candidates": request_count,
+                    "strategy_assignments": [
+                        item.to_dict() for item in strategy_assignments
+                    ],
                     "provider": metadata,
                     "error": "%s: %s" % (type(error).__name__, error),
                 },
@@ -776,6 +868,7 @@ class OptimizationController:
         metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
         self._record_api_attempts(metadata)
         self._accumulate_generator_usage(metadata.get("usage"))
+        proposals = bind_strategy_assignments(proposals, strategy_assignments)
         self.store.save_api_call(
             "round-%03d-generate" % round_number,
             {
@@ -783,6 +876,9 @@ class OptimizationController:
                 "parent_id": parent_record.candidate.candidate_id,
                 "requested_candidates": request_count,
                 "returned_candidates": len(proposals),
+                "strategy_assignments": [
+                    item.to_dict() for item in strategy_assignments
+                ],
                 "provider": metadata,
             },
             getattr(self.generator, "last_exchange", None),
@@ -794,6 +890,10 @@ class OptimizationController:
                 "parent_id": parent_record.candidate.candidate_id,
                 "requested_candidates": request_count,
                 "returned_candidates": len(proposals),
+                "strategy_slots": [
+                    proposal.metadata.get("strategy_slot")
+                    for proposal in proposals
+                ],
                 "provider": metadata,
             },
         )
@@ -805,6 +905,112 @@ class OptimizationController:
             elapsed_seconds=round(elapsed, 3),
         )
         return proposals
+
+    def _validate_candidate_novelty(
+        self,
+        record: CandidateRecord,
+        baseline: CandidateRecord,
+        round_number: int,
+    ) -> bool:
+        """Record AST provenance and enforce the assigned portfolio lane."""
+
+        if self.structural_search_policy == "off":
+            return True
+        report = self.novelty_analyzer.analyze(
+            baseline.candidate.source_code,
+            record.candidate.source_code,
+            self.task.entrypoint,
+        )
+        metadata = dict(record.candidate.proposal_metadata)
+        structural_required = bool(metadata.get("structural_required"))
+        open_strategy = (
+            metadata.get("strategy_id") == "open-structural-exploration"
+        )
+        discovered_strategy = str(
+            metadata.get("discovered_strategy") or ""
+        ).strip()
+        missing_open_strategy_name = open_strategy and not discovered_strategy
+        no_meaningful_change = not report.meaningful_change
+        structural_mismatch = structural_required and not report.structural_change
+        mismatch = (
+            no_meaningful_change
+            or structural_mismatch
+            or missing_open_strategy_name
+        )
+        status = (
+            "rejected"
+            if mismatch and self.structural_search_policy == "enforce"
+            else "observed-mismatch"
+            if mismatch
+            else "accepted"
+        )
+        metadata.update(
+            {
+                "novelty_parent_id": baseline.candidate.candidate_id,
+                "ast_novelty": report.to_dict(),
+                "strategy_validation": status,
+            }
+        )
+        record.candidate = replace(
+            record.candidate,
+            proposal_metadata=metadata,
+        )
+        event = {
+            "round": round_number,
+            "candidate_id": record.candidate.candidate_id,
+            "parent_id": baseline.candidate.candidate_id,
+            "strategy_slot": metadata.get("strategy_slot"),
+            "strategy_id": metadata.get("strategy_id"),
+            "structural_required": structural_required,
+            "discovered_strategy": discovered_strategy or None,
+            "policy": self.structural_search_policy,
+            "status": status,
+            "novelty": report.to_dict(),
+        }
+        self.store.append_event("proposal_novelty_checked", event)
+        if status != "rejected":
+            if mismatch:
+                record.decision_reason = (
+                    "AST novelty mismatch retained by observe policy."
+                )
+            return True
+
+        if missing_open_strategy_name:
+            category = "open-strategy-metadata-missing"
+            message = (
+                "Open structural exploration must name the discovered strategy "
+                "in metadata.discovered_strategy."
+            )
+        elif structural_mismatch:
+            category = "structural-strategy-mismatch"
+            message = (
+                "Strategy %s requires a structural AST change, but the candidate "
+                "was classified as %s."
+                % (metadata.get("strategy_id"), report.classification)
+            )
+        else:
+            category = "no-meaningful-source-change"
+            message = (
+                "Candidate changes only formatting, docstrings, or local names."
+            )
+        record.state = "strategy-invalid"
+        record.failure = FailureEvidence(
+            stage="strategy-validation",
+            category=category,
+            message=message,
+            diagnostics=[
+                "Changing only existing tile/thread/stage values is accepted only "
+                "in the parameter-tuning strategy lane."
+            ],
+            details=event,
+            retryable=False,
+        )
+        record.decision_reason = message
+        self.store.append_event(
+            "proposal_strategy_rejected",
+            {**event, "failure": record.failure.to_dict()},
+        )
+        return False
 
     def _repair_candidate(
         self, failed: CandidateRecord, round_number: int
@@ -892,6 +1098,30 @@ class OptimizationController:
             getattr(self.generator, "last_exchange", None),
         )
 
+        inherited_metadata = dict(proposal.metadata)
+        for name in (
+            "strategy_slot",
+            "strategy_id",
+            "requested_strategy_title",
+            "structural_required",
+            "strategy_binding",
+            "reported_strategy_slot",
+            "reported_strategy_id",
+            "novelty_parent_id",
+            "strategy_selection_reason",
+            "strategy_evidence_terms",
+            "discovered_strategy",
+            "related_existing_strategies",
+        ):
+            if name in failed.candidate.proposal_metadata:
+                inherited_metadata[name] = failed.candidate.proposal_metadata[name]
+        proposal = CandidateProposal(
+            hypothesis=proposal.hypothesis,
+            source_code=proposal.source_code,
+            expected_effect=proposal.expected_effect,
+            metadata=inherited_metadata,
+        )
+
         try:
             candidate = Candidate.from_repair(
                 self.task,
@@ -934,10 +1164,20 @@ class OptimizationController:
             self._diagnose_and_remember(record, failed, round_number)
             event = "repair_static_failed"
         else:
-            record.state = "generated"
-            record.decision_reason = "Generated by bounded repair."
-            self.store.save_candidate(record)
-            event = "repair_generated"
+            baseline_id = (
+                record.candidate.proposal_metadata.get("novelty_parent_id")
+                or failed.candidate.parent_id
+            )
+            baseline = self.records.get(str(baseline_id)) if baseline_id else None
+            if baseline is not None and not self._validate_candidate_novelty(
+                record, baseline, round_number
+            ):
+                event = "repair_strategy_failed"
+            else:
+                record.state = "generated"
+                record.decision_reason = "Generated by bounded repair."
+                event = "repair_generated"
+        self.store.save_candidate(record)
         self.store.append_event(
             event,
             {
@@ -1409,6 +1649,110 @@ class OptimizationController:
             "shared_memory": self.evidence_memory.for_prompt(record),
         }
 
+    @staticmethod
+    def _strategy_planning_evidence(record: CandidateRecord) -> Dict[str, Any]:
+        """Return stable pre-round evidence used only to rank known strategies."""
+
+        return {
+            "model": (
+                {
+                    "bottleneck": record.model.bottleneck,
+                    "confidence": record.model.confidence,
+                    "diagnostics": record.model.diagnostics,
+                }
+                if record.model
+                else None
+            ),
+            "profile": (
+                {
+                    "bottleneck": record.profile.bottleneck,
+                }
+                if record.profile and record.profile.valid
+                else None
+            ),
+            "diagnosis": (
+                {
+                    "category": record.diagnosis.category,
+                    "confidence": record.diagnosis.confidence,
+                    "summary": record.diagnosis.summary,
+                    "limiting_factors": record.diagnosis.limiting_factors,
+                    "recommendations": record.diagnosis.recommendations,
+                    "source": record.diagnosis.source,
+                }
+                if record.diagnosis
+                else None
+            ),
+        }
+
+    def _discovered_strategy_memory(
+        self, round_number: int
+    ) -> List[Dict[str, Any]]:
+        """Summarize earlier AI-discovered strategies and measured outcomes."""
+
+        memory = []
+        for record in self.records.values():
+            if record.candidate.generation >= round_number:
+                continue
+            proposal = record.candidate.proposal_metadata
+            if proposal.get("strategy_id") != "open-structural-exploration":
+                continue
+            discovered = str(
+                proposal.get("discovered_strategy") or ""
+            ).strip()[:160]
+            if not discovered:
+                continue
+            related_value = proposal.get("related_existing_strategies") or []
+            if isinstance(related_value, str):
+                related = [related_value]
+            elif isinstance(related_value, Sequence):
+                related = [str(item) for item in related_value]
+            else:
+                related = []
+            parent = self.records.get(record.candidate.parent_id or "")
+            relative_improvement = None
+            status = "not-measured"
+            if record.is_measured_correct:
+                status = "measured"
+                if parent is not None and parent.is_measured_correct:
+                    parent_latency = float(parent.measurement.latency_ms)
+                    relative_improvement = (
+                        parent_latency - float(record.measurement.latency_ms)
+                    ) / parent_latency
+                    status = (
+                        "measured-improvement"
+                        if relative_improvement > 0
+                        else "measured-regression-or-tie"
+                    )
+            elif record.failure is not None:
+                status = "rejected:%s" % record.failure.category
+            elif record.model is not None and record.model.valid:
+                status = "model-only"
+            memory.append(
+                {
+                    "candidate_id": record.candidate.candidate_id,
+                    "generation": record.candidate.generation,
+                    "discovered_strategy": discovered,
+                    "related_existing_strategies": related[:6],
+                    "hypothesis": record.candidate.hypothesis[:500],
+                    "status": status,
+                    "relative_improvement_vs_parent": relative_improvement,
+                    "measured_latency_ms": (
+                        record.measurement.latency_ms
+                        if record.measurement and record.measurement.correct
+                        else None
+                    ),
+                }
+            )
+        memory.sort(
+            key=lambda item: (
+                item["status"] != "measured-improvement",
+                -float(item["relative_improvement_vs_parent"] or 0.0),
+                -int(item["generation"]),
+                str(item["candidate_id"]),
+            )
+        )
+        return memory[:8]
+
     def _history(self) -> List[Dict[str, Any]]:
         records = sorted(
             self.records.values(),
@@ -1424,6 +1768,32 @@ class OptimizationController:
                 "generation": item.candidate.generation,
                 "source_sha256": item.candidate.source_sha256,
                 "hypothesis": item.candidate.hypothesis,
+                "strategy_slot": item.candidate.proposal_metadata.get(
+                    "strategy_slot"
+                ),
+                "strategy_id": item.candidate.proposal_metadata.get("strategy_id"),
+                "strategy_validation": item.candidate.proposal_metadata.get(
+                    "strategy_validation"
+                ),
+                "strategy_selection_reason": (
+                    item.candidate.proposal_metadata.get(
+                        "strategy_selection_reason"
+                    )
+                ),
+                "discovered_strategy": item.candidate.proposal_metadata.get(
+                    "discovered_strategy"
+                ),
+                "related_existing_strategies": (
+                    item.candidate.proposal_metadata.get(
+                        "related_existing_strategies"
+                    )
+                ),
+                "novelty_classification": dict(
+                    item.candidate.proposal_metadata.get("ast_novelty") or {}
+                ).get("classification"),
+                "structural_change": dict(
+                    item.candidate.proposal_metadata.get("ast_novelty") or {}
+                ).get("structural_change"),
                 "state": item.state,
                 "lineage_kind": item.candidate.lineage_kind,
                 "repair_depth": item.candidate.repair_depth,
@@ -1637,6 +2007,7 @@ class OptimizationController:
             "profile_policy": self.profile_policy_name,
             "fixed_promotions_per_round": self.fixed_promotions_per_round,
             "compiled_deduplication": self.compiled_deduplication,
+            "structural_search_policy": self.structural_search_policy,
             "api_input_price_per_million": self.api_input_price_per_million,
             "api_output_price_per_million": self.api_output_price_per_million,
         }
@@ -1716,6 +2087,48 @@ class OptimizationController:
             compiled_equivalent_candidates=sum(
                 item.compiled_equivalent_to is not None
                 for item in self.records.values()
+            ),
+            structural_search_policy=self.structural_search_policy,
+            structural_candidates=sum(
+                bool(
+                    dict(item.candidate.proposal_metadata.get("ast_novelty") or {}).get(
+                        "structural_change"
+                    )
+                )
+                for item in self.records.values()
+            ),
+            parameter_only_candidates=sum(
+                dict(item.candidate.proposal_metadata.get("ast_novelty") or {}).get(
+                    "classification"
+                )
+                == "parameter-only"
+                for item in self.records.values()
+            ),
+            strategy_rejected_candidates=sum(
+                item.state == "strategy-invalid" for item in self.records.values()
+            ),
+            open_exploration_candidates=sum(
+                item.candidate.proposal_metadata.get("strategy_id")
+                == "open-structural-exploration"
+                for item in self.records.values()
+            ),
+            discovered_strategy_count=len(
+                {
+                    str(
+                        item.candidate.proposal_metadata.get(
+                            "discovered_strategy"
+                        )
+                    ).strip()
+                    for item in self.records.values()
+                    if item.candidate.proposal_metadata.get("strategy_id")
+                    == "open-structural-exploration"
+                    and str(
+                        item.candidate.proposal_metadata.get(
+                            "discovered_strategy"
+                        )
+                        or ""
+                    ).strip()
+                }
             ),
             cost_ledger=ledger,
             report_paths=expected_report_paths(self.store.root),

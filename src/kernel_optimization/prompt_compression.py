@@ -426,6 +426,14 @@ def _compact_history_record(value: Mapping[str, Any]) -> Dict[str, Any]:
         "calibrated_predicted_latency_ms",
         "measured_latency_ms",
         "profile_bottleneck",
+        "strategy_slot",
+        "strategy_id",
+        "strategy_validation",
+        "strategy_selection_reason",
+        "discovered_strategy",
+        "related_existing_strategies",
+        "novelty_classification",
+        "structural_change",
     ):
         if key in data:
             result[key] = _bounded_value(data[key], depth=1)

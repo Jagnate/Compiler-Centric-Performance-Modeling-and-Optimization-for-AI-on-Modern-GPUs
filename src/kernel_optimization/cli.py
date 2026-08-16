@@ -110,6 +110,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Measure candidates even when their compiled execution identity matches.",
     )
     parser.add_argument(
+        "--structural-search-policy",
+        choices=("enforce", "observe", "off"),
+        default="enforce",
+        help=(
+            "Assign a structural strategy portfolio and enforce or only record "
+            "parent-relative AST novelty."
+        ),
+    )
+    parser.add_argument(
         "--api-input-price-per-million",
         type=float,
         help="Optional hosted-model input-token price used only for cost reporting.",
@@ -200,7 +209,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.6.0",
+        "framework_version": "0.7.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -218,6 +227,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "fixed_promotions_per_round": args.promotions_per_round,
             "profile_policy": args.profile_policy,
             "compiled_deduplication": not args.no_compiled_dedup,
+            "structural_search_policy": args.structural_search_policy,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,
         },
@@ -296,6 +306,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         profile_policy=args.profile_policy,
         fixed_promotions_per_round=args.promotions_per_round,
         compiled_deduplication=not args.no_compiled_dedup,
+        structural_search_policy=args.structural_search_policy,
         api_input_price_per_million=args.api_input_price_per_million,
         api_output_price_per_million=args.api_output_price_per_million,
     )

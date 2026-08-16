@@ -7,9 +7,14 @@ GPU kernel optimization.
 
 The current system accepts a GPU kernel source file as its primary input. A
 hosted language-model API proposes complete replacement implementations in an
-implicit, open-ended code space. TileSight evaluates all statically valid
-candidates cheaply, while correctness checks, CUDA Event timing, and selective
-NCU profiling provide progressively more expensive hardware evidence.
+open-ended code space. A deterministic strategy portfolio reserves one proposal
+for parameter tuning and one for open structural exploration, then ranks known
+memory, data-movement, execution, pipeline, and decomposition strategies from
+the current TileSight/NCU evidence. A parent-relative AST check verifies whether
+each claimed structural candidate actually changes executable structure.
+TileSight evaluates accepted candidates cheaply, while correctness checks, CUDA
+Event timing, and selective NCU profiling provide progressively more expensive
+hardware evidence.
 
 ## Research Question
 
@@ -21,7 +26,9 @@ Each evidence source has a distinct role:
 
 ```text
 Hosted LLM       proposes complete candidate kernel sources
+Strategy planner reserves open exploration and ranks known directions
 Static validator rejects malformed or contract-breaking Python
+AST novelty      rejects parameter-only claims in structural lanes
 TileSight        predicts latency, resources, utilization, and bottlenecks
 Correctness      protects mathematical semantics
 CUDA Events      provide the measured latency used to rank the official beam
@@ -59,6 +66,9 @@ Hosted API proposes complete replacement source files          |
 Python syntax and task-invariant validation                     |
    |                                                           |
    v                                                           |
+Parent-relative AST novelty and strategy validation             |
+   |  parameter lane or verified structural transformation     |
+   v                                                           |
 TileSight model for every valid candidate                       |
    |                                                           |
    v                                                           |
@@ -85,7 +95,10 @@ answer.
 The open-ended source space is not enumerated. The hosted model acts as a
 proposal policy and samples a small number of promising transformations each
 round. The controller uses adaptive-fidelity evaluation to decide where scarce
-GPU and NCU calls should be spent.
+GPU and NCU calls should be spent. The portfolio constrains proposal intent,
+not implementation syntax or the set of legal transformations. The model still
+writes complete source, may combine strategy families, and can name a previously
+unrepresented transformation in the open-exploration slot.
 
 ## Requirements
 
@@ -180,12 +193,45 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
 ```
 
 The default experiment uses `--selection-policy adaptive`,
-`--profile-policy milestone`, and compiled-code deduplication. To give promotion
-ablations the same CUDA measurement cap per round, add for example:
+`--profile-policy milestone`, `--structural-search-policy enforce`, and
+compiled-code deduplication. To give promotion ablations the same CUDA
+measurement cap per round, add for example:
 
 ```bash
 --promotions-per-round 4
 ```
+
+Structural search has three reproducible modes:
+
+```bash
+--structural-search-policy enforce  # reject false structural claims before modeling
+--structural-search-policy observe  # record AST classifications without rejecting
+--structural-search-policy off      # reproduce the earlier unconstrained proposal loop
+```
+
+In `enforce` mode, changing only existing numeric defaults, thread counts, or
+`num_stages` is valid only for the `parameter-tuning` lane. Structural lanes
+must change executable AST after docstrings, formatting, local renaming, and
+existing tuning values are normalized. The archived candidate metadata records
+the assigned strategy, AST hashes, changed tuning values, and structural
+signals. This is a novelty gate, not a proof that the transformation is correct
+or fast; the existing correctness and hardware stages remain authoritative.
+
+With the usual six proposals per round, allocation is:
+
+```text
+1 parameter-tuning baseline
+1 open-structural-exploration candidate
+4 known structural strategies ranked by current bottleneck evidence
+```
+
+The open slot is deliberately not a catch-all parameter candidate. It must name
+the proposed transformation in `metadata.discovered_strategy`, explain overlaps
+with known lanes in `metadata.related_existing_strategies`, and pass the same AST
+structural gate. Measured outcomes from discovered strategies are summarized in
+subsequent prompts, allowing later rounds to deepen successful ideas. Strategy
+assignments are coverage priors rather than a whitelist, so every candidate may
+combine compatible transformations.
 
 The CLI first sends a very small API preflight request. Authentication, model
 access, quota, and endpoint failures are therefore detected before TileLang
@@ -249,6 +295,10 @@ The endpoint must accept an OpenAI-compatible `messages` request and return
       },
       "metadata": {
         "strategy": "pipeline",
+        "strategy_slot": "r001-s04-pipeline-structure",
+        "strategy_id": "pipeline-structure",
+        "discovered_strategy": null,
+        "related_existing_strategies": ["data-movement"],
         "changed_regions": ["shared-memory staging loop"]
       }
     }

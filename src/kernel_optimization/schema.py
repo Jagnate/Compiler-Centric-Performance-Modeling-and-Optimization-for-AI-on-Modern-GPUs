@@ -535,6 +535,12 @@ class SearchSummary:
     fixed_promotions_per_round: Optional[int] = None
     compiled_deduplication: bool = True
     compiled_equivalent_candidates: int = 0
+    structural_search_policy: str = "off"
+    structural_candidates: int = 0
+    parameter_only_candidates: int = 0
+    strategy_rejected_candidates: int = 0
+    open_exploration_candidates: int = 0
+    discovered_strategy_count: int = 0
     cost_ledger: JsonDict = field(default_factory=dict)
     report_paths: JsonDict = field(default_factory=dict)
 

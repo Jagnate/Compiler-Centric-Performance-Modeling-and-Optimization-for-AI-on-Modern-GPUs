@@ -73,6 +73,7 @@ def write_research_artifacts(
                 "profile": summary.profile_policy,
                 "fixed_promotions_per_round": summary.fixed_promotions_per_round,
                 "compiled_deduplication": summary.compiled_deduplication,
+                "structural_search_policy": summary.structural_search_policy,
             },
             "outcome": summary.to_dict(),
         },
@@ -92,6 +93,8 @@ def _trajectory_row(record: CandidateRecord) -> Dict[str, Any]:
     compiled_identity_hash = (
         model.metrics.get("compiled_identity_sha256") if model else None
     )
+    proposal = record.candidate.proposal_metadata
+    novelty = dict(proposal.get("ast_novelty") or {})
     return {
         "candidate_id": record.candidate.candidate_id,
         "parent_id": record.candidate.parent_id,
@@ -104,6 +107,22 @@ def _trajectory_row(record: CandidateRecord) -> Dict[str, Any]:
         "compiled_equivalent_to": record.compiled_equivalent_to,
         "state": record.state,
         "hypothesis": record.candidate.hypothesis,
+        "strategy_slot": proposal.get("strategy_slot"),
+        "strategy_id": proposal.get("strategy_id"),
+        "structural_required": proposal.get("structural_required"),
+        "strategy_validation": proposal.get("strategy_validation"),
+        "strategy_selection_reason": proposal.get("strategy_selection_reason"),
+        "strategy_evidence_terms": proposal.get("strategy_evidence_terms", []),
+        "discovered_strategy": proposal.get("discovered_strategy"),
+        "related_existing_strategies": proposal.get(
+            "related_existing_strategies", []
+        ),
+        "novelty_classification": novelty.get("classification"),
+        "structural_change": novelty.get("structural_change"),
+        "changed_tuning_parameters": novelty.get(
+            "changed_tuning_parameters", []
+        ),
+        "structural_signals": novelty.get("structural_signals", []),
         "selection_reasons": list(record.selection_reasons),
         "decision_reason": record.decision_reason,
         "raw_model_latency_ms": model.predicted_latency_ms if model else None,
@@ -135,6 +154,18 @@ def _trajectory_csv(rows: Sequence[Mapping[str, Any]]) -> str:
     for row in rows:
         value = dict(row)
         value["selection_reasons"] = "|".join(value.get("selection_reasons") or [])
+        value["changed_tuning_parameters"] = "|".join(
+            value.get("changed_tuning_parameters") or []
+        )
+        value["structural_signals"] = "|".join(
+            value.get("structural_signals") or []
+        )
+        value["strategy_evidence_terms"] = "|".join(
+            value.get("strategy_evidence_terms") or []
+        )
+        value["related_existing_strategies"] = "|".join(
+            value.get("related_existing_strategies") or []
+        )
         writer.writerow(value)
     return output.getvalue()
 
@@ -162,6 +193,8 @@ def _experiment_markdown(
         % _format(summary.fixed_promotions_per_round),
         "| Compiled-code deduplication | %s |"
         % ("enabled" if summary.compiled_deduplication else "disabled"),
+        "| Structural search policy | `%s` |"
+        % summary.structural_search_policy,
         "| Completed rounds | %d |" % summary.completed_rounds,
         "",
         "## Outcome",
@@ -177,6 +210,16 @@ def _experiment_markdown(
         "| Measured candidates | %d |" % summary.measured_candidates,
         "| Compiled-equivalent candidates skipped | %d |"
         % summary.compiled_equivalent_candidates,
+        "| AST-verified structural candidates | %d |"
+        % summary.structural_candidates,
+        "| Parameter-only candidates | %d |"
+        % summary.parameter_only_candidates,
+        "| Strategy-invalid candidates rejected | %d |"
+        % summary.strategy_rejected_candidates,
+        "| Open-exploration candidates | %d |"
+        % summary.open_exploration_candidates,
+        "| Unique discovered strategy names | %d |"
+        % summary.discovered_strategy_count,
         "",
         "## Cost Ledger",
         "",
@@ -229,6 +272,39 @@ def _experiment_markdown(
                     _format(best.measurement.latency_ms),
                 )
             )
+    discoveries = [
+        record
+        for record in records
+        if record.candidate.proposal_metadata.get("strategy_id")
+        == "open-structural-exploration"
+        and record.candidate.proposal_metadata.get("discovered_strategy")
+    ]
+    lines.extend(["", "## Open Strategy Discoveries", ""])
+    if discoveries:
+        lines.extend(
+            [
+                "| Candidate | Discovered strategy | State | Measured latency (ms) |",
+                "| --- | --- | --- | ---: |",
+            ]
+        )
+        for record in discoveries:
+            lines.append(
+                "| `%s` | `%s` | `%s` | %s |"
+                % (
+                    record.candidate.candidate_id,
+                    record.candidate.proposal_metadata.get(
+                        "discovered_strategy"
+                    ),
+                    record.state,
+                    _format(
+                        record.measurement.latency_ms
+                        if record.measurement and record.measurement.correct
+                        else None
+                    ),
+                )
+            )
+    else:
+        lines.append("No open strategy was named in this run.")
     lines.extend(
         [
             "",

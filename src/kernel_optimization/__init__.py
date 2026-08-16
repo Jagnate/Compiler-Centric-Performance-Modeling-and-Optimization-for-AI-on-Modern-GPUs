@@ -15,6 +15,12 @@ from .schema import (
     TaskSpec,
 )
 from .source_validation import SourceValidationError, SourceValidator
+from .structural_search import (
+    SourceNoveltyAnalyzer,
+    SourceNoveltyReport,
+    StrategyAssignment,
+    StructuralStrategyPortfolio,
+)
 
 __all__ = [
     "BudgetConfig",
@@ -30,7 +36,11 @@ __all__ = [
     "SearchSummary",
     "SourceValidationError",
     "SourceValidator",
+    "SourceNoveltyAnalyzer",
+    "SourceNoveltyReport",
+    "StrategyAssignment",
+    "StructuralStrategyPortfolio",
     "TaskSpec",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"

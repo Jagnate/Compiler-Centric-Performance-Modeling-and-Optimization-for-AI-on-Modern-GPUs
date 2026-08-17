@@ -18,6 +18,7 @@ def build_cost_ledger(
     repair_calls: int,
     profile_calls: int,
     final_validation_calls: int,
+    planner_calls: int = 0,
     api_input_price_per_million: Optional[float] = None,
     api_output_price_per_million: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -64,7 +65,7 @@ def build_cost_ledger(
     )
     api_seconds = sum(
         float(stage_copy.get(stage, {}).get("seconds", 0.0))
-        for stage in ("api_preflight", "api_generate", "api_repair")
+        for stage in ("api_preflight", "api_plan", "api_generate", "api_repair")
     )
 
     return {
@@ -72,6 +73,7 @@ def build_cost_ledger(
             "preflight_attempts": int(preflight_calls),
             "provider_request_attempts": int(provider_api_requests),
             "logical_generator_calls": int(generator_calls),
+            "planner_calls": int(planner_calls),
             "repair_calls": int(repair_calls),
             "usage": dict(generator_usage),
             "input_tokens": input_tokens,

@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-max-output-tokens", type=int, default=12000)
     parser.add_argument(
+        "--api-planner-max-output-tokens",
+        type=int,
+        default=2000,
+        help="Small output budget for the strategy-allocation request.",
+    )
+    parser.add_argument(
         "--api-max-input-tokens",
         type=int,
         default=60000,
@@ -114,8 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("enforce", "observe", "off"),
         default="enforce",
         help=(
-            "Assign a structural strategy portfolio and enforce or only record "
-            "parent-relative AST novelty."
+            "Enforce, observe, or disable parent-relative AST novelty checks."
+        ),
+    )
+    parser.add_argument(
+        "--strategy-allocation-policy",
+        choices=("ai-planned", "fixed", "unconstrained"),
+        default="ai-planned",
+        help=(
+            "Use an evidence-guided AI plan, the legacy fixed portfolio, or no "
+            "explicit strategy slots."
         ),
     )
     parser.add_argument(
@@ -189,6 +203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             timeout_seconds=args.api_timeout,
             temperature=args.api_temperature,
             max_output_tokens=args.api_max_output_tokens,
+            planner_max_output_tokens=args.api_planner_max_output_tokens,
             max_input_tokens=args.api_max_input_tokens,
             max_tokens_field=args.api_max_tokens_field,
             max_retries=args.api_retries,
@@ -209,7 +224,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.7.0",
+        "framework_version": "0.8.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -217,6 +232,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "temperature": args.api_temperature,
             "timeout_seconds": args.api_timeout,
             "max_output_tokens": args.api_max_output_tokens,
+            "planner_max_output_tokens": args.api_planner_max_output_tokens,
             "max_input_tokens": args.api_max_input_tokens,
             "max_tokens_field": args.api_max_tokens_field,
             "max_retries": args.api_retries,
@@ -228,6 +244,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "profile_policy": args.profile_policy,
             "compiled_deduplication": not args.no_compiled_dedup,
             "structural_search_policy": args.structural_search_policy,
+            "strategy_allocation_policy": args.strategy_allocation_policy,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,
         },
@@ -307,6 +324,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fixed_promotions_per_round=args.promotions_per_round,
         compiled_deduplication=not args.no_compiled_dedup,
         structural_search_policy=args.structural_search_policy,
+        strategy_allocation_policy=args.strategy_allocation_policy,
         api_input_price_per_million=args.api_input_price_per_million,
         api_output_price_per_million=args.api_output_price_per_million,
     )

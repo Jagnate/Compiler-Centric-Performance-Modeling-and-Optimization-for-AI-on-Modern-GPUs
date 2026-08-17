@@ -34,6 +34,7 @@ from .source_validation import SourceValidationError, SourceValidator
 from .structural_search import (
     SourceNoveltyAnalyzer,
     StrategyAssignment,
+    StrategyPlan,
     StructuralStrategyPortfolio,
     bind_strategy_assignments,
 )
@@ -82,6 +83,7 @@ class OptimizationController:
         api_input_price_per_million: Optional[float] = None,
         api_output_price_per_million: Optional[float] = None,
         structural_search_policy: str = "off",
+        strategy_allocation_policy: str = "fixed",
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -107,6 +109,15 @@ class OptimizationController:
                 "structural_search_policy must be enforce, observe, or off"
             )
         self.structural_search_policy = structural_search_policy
+        if strategy_allocation_policy not in {
+            "ai-planned",
+            "fixed",
+            "unconstrained",
+        }:
+            raise ValueError(
+                "strategy_allocation_policy must be ai-planned, fixed, or unconstrained"
+            )
+        self.strategy_allocation_policy = strategy_allocation_policy
         self.strategy_portfolio = StructuralStrategyPortfolio()
         self.novelty_analyzer = SourceNoveltyAnalyzer()
         for name, value in (
@@ -127,6 +138,9 @@ class OptimizationController:
         self.beam: List[CandidateRecord] = []
         self.profile_calls = 0
         self.generator_calls = 0
+        self.planner_calls = 0
+        self.planner_fallbacks = 0
+        self.strategy_plans: List[Dict[str, Any]] = []
         self.generator_usage: Dict[str, float] = {
             str(name): float(value)
             for name, value in dict(preflight_usage or {}).items()
@@ -247,6 +261,7 @@ class OptimizationController:
                 list(self.records.values()),
                 summary,
                 self.run_metadata,
+                self.strategy_plans,
             )
             self._checkpoint(
                 phase="run_completed",
@@ -298,6 +313,7 @@ class OptimizationController:
             generated = self._generate_round(round_number)
             candidate_ids = [item.candidate.candidate_id for item in generated]
             if not generated:
+                self._record_round_strategy_outcomes(round_number)
                 self.store.append_event(
                     "round_stopped",
                     {"round": round_number, "reason": "no-new-valid-source-candidates"},
@@ -428,6 +444,7 @@ class OptimizationController:
                 self.beam[0],
                 measured,
             )
+            self._record_round_strategy_outcomes(round_number)
             self._checkpoint(
                 phase="round_completed",
                 completed_round=round_number,
@@ -549,6 +566,13 @@ class OptimizationController:
             state.get("api_request_attempts", state.get("preflight_calls", 0))
         )
         self.generator_calls = int(state.get("generator_calls", 0))
+        self.planner_calls = int(state.get("planner_calls", 0))
+        self.planner_fallbacks = int(state.get("planner_fallbacks", 0))
+        self.strategy_plans = [
+            dict(item)
+            for item in state.get("strategy_plans", [])
+            if isinstance(item, Mapping)
+        ]
         self.generator_usage = {
             str(name): float(value)
             for name, value in dict(state.get("generator_usage") or {}).items()
@@ -615,6 +639,170 @@ class OptimizationController:
         self.was_resumed = True
         return seed
 
+    def _plan_round_strategies(self, round_number: int) -> StrategyPlan:
+        """Choose, normalize, archive, and checkpoint this round's slots."""
+
+        for archived in self.strategy_plans:
+            if int(archived.get("round", -1)) == round_number:
+                return StrategyPlan.from_dict(archived)
+
+        count = self.task.budget.proposals_per_round
+        evidence = self._strategy_planning_evidence(
+            self.beam[0], round_number
+        )
+        if self.strategy_allocation_policy == "unconstrained":
+            plan = StrategyPlan(
+                round_number=round_number,
+                policy="unconstrained",
+                source="unconstrained",
+                requested_count=count,
+                assignments=[],
+                round_rationale=(
+                    "Candidate intent is left entirely to the source generator."
+                ),
+            )
+            return self._archive_strategy_plan(plan, evidence)
+        if self.strategy_allocation_policy == "fixed":
+            plan = self.strategy_portfolio.fixed_plan(
+                self.task,
+                round_number,
+                count,
+                evidence=evidence,
+            )
+            return self._archive_strategy_plan(plan, evidence)
+
+        planner = getattr(self.generator, "plan_strategies", None)
+        if not callable(planner):
+            self.planner_fallbacks += 1
+            plan = self.strategy_portfolio.fallback_plan(
+                self.task,
+                round_number,
+                count,
+                evidence,
+                "candidate generator does not implement strategy planning",
+            )
+            return self._archive_strategy_plan(plan, evidence)
+
+        self.planner_calls += 1
+        self.generator_calls += 1
+        started_at = time.perf_counter()
+        self.progress.emit(
+            "strategy_planning_started",
+            "Requesting an evidence-guided strategy allocation.",
+            round=round_number,
+            requested_slots=count,
+        )
+        try:
+            raw_plan = planner(
+                task=self.task,
+                parent=self.beam[0].candidate,
+                planning_context=evidence,
+                strategies=self.strategy_portfolio.strategy_catalog(self.task),
+                count=count,
+                round_number=round_number,
+            )
+        except Exception as error:
+            elapsed = time.perf_counter() - started_at
+            self._record_stage_timing("api_plan", elapsed, failed=True)
+            metadata = dict(
+                getattr(self.generator, "last_call_metadata", {}) or {}
+            )
+            self._record_api_attempts(metadata)
+            self._accumulate_generator_usage(metadata.get("usage"))
+            self.store.save_api_call(
+                "round-%03d-plan-failed" % round_number,
+                {
+                    "round": round_number,
+                    "requested_slots": count,
+                    "provider": metadata,
+                    "error": "%s: %s" % (type(error).__name__, error),
+                },
+                getattr(self.generator, "last_exchange", None),
+            )
+            self.store.append_event(
+                "strategy_planner_failed",
+                {
+                    "round": round_number,
+                    "error": "%s: %s" % (type(error).__name__, error),
+                    "provider": metadata,
+                    "action": "deterministic-fallback",
+                },
+            )
+            self.planner_fallbacks += 1
+            plan = self.strategy_portfolio.fallback_plan(
+                self.task,
+                round_number,
+                count,
+                evidence,
+                "%s: %s" % (type(error).__name__, error),
+            )
+            return self._archive_strategy_plan(plan, evidence)
+
+        elapsed = time.perf_counter() - started_at
+        self._record_stage_timing("api_plan", elapsed, failed=False)
+        metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
+        self._record_api_attempts(metadata)
+        self._accumulate_generator_usage(metadata.get("usage"))
+        self.store.save_api_call(
+            "round-%03d-plan" % round_number,
+            {
+                "round": round_number,
+                "requested_slots": count,
+                "provider": metadata,
+            },
+            getattr(self.generator, "last_exchange", None),
+        )
+        plan = self.strategy_portfolio.normalize_ai_plan(
+            self.task,
+            round_number,
+            count,
+            raw_plan,
+            evidence=evidence,
+        )
+        if plan.source == "deterministic-fallback":
+            self.planner_fallbacks += 1
+        self.progress.emit(
+            "strategy_planning_completed",
+            "Strategy allocation is ready for candidate generation.",
+            round=round_number,
+            source=plan.source,
+            allocation=plan.to_dict()["allocation"],
+            overrides=len(plan.overrides),
+            elapsed_seconds=round(elapsed, 3),
+        )
+        return self._archive_strategy_plan(plan, evidence)
+
+    def _archive_strategy_plan(
+        self,
+        plan: StrategyPlan,
+        planning_evidence: Mapping[str, Any],
+    ) -> StrategyPlan:
+        payload = plan.to_dict()
+        payload["planning_evidence"] = dict(planning_evidence)
+        self.strategy_plans = [
+            item
+            for item in self.strategy_plans
+            if int(item.get("round", -1)) != plan.round_number
+        ]
+        self.strategy_plans.append(payload)
+        self.strategy_plans.sort(key=lambda item: int(item.get("round", 0)))
+        self.store.save_json_artifact(
+            "strategy_plans.json", {"rounds": self.strategy_plans}
+        )
+        self.store.append_event(
+            "strategy_plan_normalized",
+            {
+                "round": plan.round_number,
+                "policy": plan.policy,
+                "source": plan.source,
+                "allocation": payload["allocation"],
+                "overrides": plan.overrides,
+                "fallback_reason": plan.fallback_reason,
+            },
+        )
+        self._persist_runtime_counters()
+        return plan
+
     def _generate_round(self, round_number: int) -> List[CandidateRecord]:
         existing = [
             item
@@ -622,16 +810,8 @@ class OptimizationController:
             if item.candidate.generation == round_number
             and item.candidate.lineage_kind == "proposal"
         ]
-        assignments = (
-            self.strategy_portfolio.plan(
-                self.task,
-                round_number,
-                self.task.budget.proposals_per_round,
-                evidence=self._strategy_planning_evidence(self.beam[0]),
-            )
-            if self.structural_search_policy != "off"
-            else []
-        )
+        plan = self._plan_round_strategies(round_number)
+        assignments = plan.assignments
         used_slots = {
             str(item.candidate.proposal_metadata.get("strategy_slot"))
             for item in existing
@@ -650,7 +830,9 @@ class OptimizationController:
                 "strategy_portfolio_planned",
                 {
                     "round": round_number,
-                    "policy": self.structural_search_policy,
+                    "allocation_policy": self.strategy_allocation_policy,
+                    "novelty_policy": self.structural_search_policy,
+                    "plan_source": plan.source,
                     "planning_candidate_id": self.beam[0].candidate.candidate_id,
                     "assignments": [item.to_dict() for item in assignments],
                     "remaining_slots": [item.slot for item in remaining_assignments],
@@ -785,6 +967,7 @@ class OptimizationController:
                 ),
                 "requested_proposals": self.task.budget.proposals_per_round,
                 "structural_search_policy": self.structural_search_policy,
+                "strategy_allocation_policy": self.strategy_allocation_policy,
             },
         )
         self.progress.emit(
@@ -838,6 +1021,7 @@ class OptimizationController:
                 getattr(self.generator, "last_call_metadata", {}) or {}
             )
             self._record_api_attempts(metadata)
+            self._accumulate_generator_usage(metadata.get("usage"))
             self.store.save_api_call(
                 "round-%03d-generate-failed" % round_number,
                 {
@@ -1059,6 +1243,7 @@ class OptimizationController:
                 getattr(self.generator, "last_call_metadata", {}) or {}
             )
             self._record_api_attempts(metadata)
+            self._accumulate_generator_usage(metadata.get("usage"))
             self.store.save_api_call(
                 "round-%03d-repair-failed" % round_number,
                 {
@@ -1649,13 +1834,37 @@ class OptimizationController:
             "shared_memory": self.evidence_memory.for_prompt(record),
         }
 
-    @staticmethod
-    def _strategy_planning_evidence(record: CandidateRecord) -> Dict[str, Any]:
-        """Return stable pre-round evidence used only to rank known strategies."""
+    def _strategy_planning_evidence(
+        self, record: CandidateRecord, round_number: int
+    ) -> Dict[str, Any]:
+        """Return bounded observed, predicted, and strategy-outcome evidence."""
 
+        prior_plans = []
+        for plan in self.strategy_plans[-3:]:
+            prior_plans.append(
+                {
+                    "round": plan.get("round"),
+                    "source": plan.get("source"),
+                    "allocation": plan.get("allocation", []),
+                    "overrides": plan.get("overrides", []),
+                    "fallback_reason": plan.get("fallback_reason"),
+                    "realized_outcomes": plan.get("realized_outcomes", {}),
+                }
+            )
         return {
+            "current_best": {
+                "candidate_id": record.candidate.candidate_id,
+                "generation": record.candidate.generation,
+                "measured_latency_ms": (
+                    record.measurement.latency_ms
+                    if record.measurement and record.measurement.correct
+                    else None
+                ),
+            },
             "model": (
                 {
+                    "predicted_latency_ms": record.model.predicted_latency_ms,
+                    "calibrated_latency_ms": record.model.calibrated_latency_ms,
                     "bottleneck": record.model.bottleneck,
                     "confidence": record.model.confidence,
                     "diagnostics": record.model.diagnostics,
@@ -1666,6 +1875,24 @@ class OptimizationController:
             "profile": (
                 {
                     "bottleneck": record.profile.bottleneck,
+                    "metrics": {
+                        name: value
+                        for name, value in record.profile.metrics.items()
+                        if name
+                        in {
+                            "achieved_occupancy",
+                            "achieved_occupancy_percent",
+                            "ddr_util",
+                            "dram_utilization",
+                            "l2_hit_rate",
+                            "l2_util",
+                            "registers_per_thread",
+                            "shared_memory_per_block",
+                            "smem_util",
+                            "tensor_util",
+                            "cuda_util",
+                        }
+                    },
                 }
                 if record.profile and record.profile.valid
                 else None
@@ -1682,7 +1909,136 @@ class OptimizationController:
                 if record.diagnosis
                 else None
             ),
+            "model_trust": self.trust.to_dict(),
+            "calibration": self.calibrator.to_dict(),
+            "strategy_outcomes": self._strategy_outcome_summary(
+                before_round=round_number
+            ),
+            "discovered_strategy_memory": self._discovered_strategy_memory(
+                round_number
+            ),
+            "prior_plans": prior_plans,
+            "search_state": {
+                "round": round_number,
+                "total_rounds": self.task.budget.rounds,
+                "candidate_slots": self.task.budget.proposals_per_round,
+                "structural_search_policy": self.structural_search_policy,
+                "measured_candidates": sum(
+                    item.is_measured_correct for item in self.records.values()
+                ),
+            },
         }
+
+    def _strategy_outcome_summary(
+        self,
+        *,
+        before_round: Optional[int] = None,
+        generation: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Attribute compiler and hardware outcomes to requested strategies."""
+
+        grouped: Dict[str, Dict[str, Any]] = {}
+        improvements: Dict[str, List[float]] = {}
+        for record in self.records.values():
+            candidate = record.candidate
+            if candidate.generation == 0:
+                continue
+            if before_round is not None and candidate.generation >= before_round:
+                continue
+            if generation is not None and candidate.generation != generation:
+                continue
+            strategy_id = str(
+                candidate.proposal_metadata.get("strategy_id") or "unassigned"
+            )
+            outcome = grouped.setdefault(
+                strategy_id,
+                {
+                    "generated": 0,
+                    "ast_checked": 0,
+                    "ast_accepted": 0,
+                    "model_valid": 0,
+                    "compiled_unique": 0,
+                    "measured_correct": 0,
+                    "measured_improvements": 0,
+                    "profiled": 0,
+                    "profile_bottlenecks": {},
+                    "best_candidate_id": None,
+                    "best_measured_latency_ms": None,
+                    "failure_categories": {},
+                },
+            )
+            outcome["generated"] += 1
+            strategy_validation = candidate.proposal_metadata.get(
+                "strategy_validation"
+            )
+            if strategy_validation is not None:
+                outcome["ast_checked"] += 1
+            if strategy_validation in {
+                "accepted",
+                "observed-mismatch",
+            }:
+                outcome["ast_accepted"] += 1
+            if record.model is not None and record.model.valid:
+                outcome["model_valid"] += 1
+                if record.compiled_equivalent_to is None:
+                    outcome["compiled_unique"] += 1
+            if record.failure is not None:
+                failures = outcome["failure_categories"]
+                failures[record.failure.category] = (
+                    failures.get(record.failure.category, 0) + 1
+                )
+            if record.profile is not None and record.profile.valid:
+                outcome["profiled"] += 1
+                bottleneck = str(record.profile.bottleneck or "unknown")
+                bottlenecks = outcome["profile_bottlenecks"]
+                bottlenecks[bottleneck] = bottlenecks.get(bottleneck, 0) + 1
+            if not record.is_measured_correct:
+                continue
+            outcome["measured_correct"] += 1
+            latency = float(record.measurement.latency_ms)
+            if (
+                outcome["best_measured_latency_ms"] is None
+                or latency < outcome["best_measured_latency_ms"]
+            ):
+                outcome["best_measured_latency_ms"] = latency
+                outcome["best_candidate_id"] = candidate.candidate_id
+            parent = self.records.get(candidate.parent_id or "")
+            if parent is None or not parent.is_measured_correct:
+                continue
+            parent_latency = float(parent.measurement.latency_ms)
+            if parent_latency <= 0:
+                continue
+            relative = (parent_latency - latency) / parent_latency
+            improvements.setdefault(strategy_id, []).append(relative)
+            if relative > 0:
+                outcome["measured_improvements"] += 1
+
+        for strategy_id, outcome in grouped.items():
+            values = improvements.get(strategy_id, [])
+            outcome["best_relative_improvement_vs_parent"] = (
+                max(values) if values else None
+            )
+            outcome["mean_relative_improvement_vs_parent"] = (
+                sum(values) / len(values) if values else None
+            )
+        return grouped
+
+    def _record_round_strategy_outcomes(self, round_number: int) -> None:
+        outcomes = self._strategy_outcome_summary(generation=round_number)
+        changed = False
+        for plan in self.strategy_plans:
+            if int(plan.get("round", -1)) == round_number:
+                plan["realized_outcomes"] = outcomes
+                changed = True
+                break
+        if changed:
+            self.store.save_json_artifact(
+                "strategy_plans.json", {"rounds": self.strategy_plans}
+            )
+            self.store.append_event(
+                "strategy_outcomes_recorded",
+                {"round": round_number, "outcomes": outcomes},
+            )
 
     def _discovered_strategy_memory(
         self, round_number: int
@@ -1863,6 +2219,9 @@ class OptimizationController:
             "preflight_calls": self.preflight_calls,
             "api_request_attempts": self.api_request_attempts,
             "generator_calls": self.generator_calls,
+            "planner_calls": self.planner_calls,
+            "planner_fallbacks": self.planner_fallbacks,
+            "strategy_plans": self.strategy_plans,
             "generator_usage": dict(self.generator_usage),
             "repair_calls": self.repair_calls,
             "repair_candidates": self.repair_candidates,
@@ -1887,6 +2246,9 @@ class OptimizationController:
                 "preflight_calls": self.preflight_calls,
                 "api_request_attempts": self.api_request_attempts,
                 "generator_calls": self.generator_calls,
+                "planner_calls": self.planner_calls,
+                "planner_fallbacks": self.planner_fallbacks,
+                "strategy_plans": self.strategy_plans,
                 "generator_usage": dict(self.generator_usage),
                 "repair_calls": self.repair_calls,
                 "repair_candidates": self.repair_candidates,
@@ -1951,7 +2313,7 @@ class OptimizationController:
     def _record_api_attempts(self, metadata: Mapping[str, Any]) -> None:
         attempts = metadata.get("attempts", 1)
         if isinstance(attempts, (int, float)) and not isinstance(attempts, bool):
-            self.api_request_attempts += max(1, int(attempts))
+            self.api_request_attempts += max(0, int(attempts))
 
     @staticmethod
     def _compiled_identity_hash(record: CandidateRecord) -> Optional[str]:
@@ -2008,6 +2370,7 @@ class OptimizationController:
             "fixed_promotions_per_round": self.fixed_promotions_per_round,
             "compiled_deduplication": self.compiled_deduplication,
             "structural_search_policy": self.structural_search_policy,
+            "strategy_allocation_policy": self.strategy_allocation_policy,
             "api_input_price_per_million": self.api_input_price_per_million,
             "api_output_price_per_million": self.api_output_price_per_million,
         }
@@ -2042,6 +2405,7 @@ class OptimizationController:
             preflight_calls=self.preflight_calls,
             provider_api_requests=self.api_request_attempts,
             generator_calls=self.generator_calls,
+            planner_calls=self.planner_calls,
             repair_calls=self.repair_calls,
             profile_calls=self.profile_calls,
             final_validation_calls=self.final_validation_calls,
@@ -2089,6 +2453,9 @@ class OptimizationController:
                 for item in self.records.values()
             ),
             structural_search_policy=self.structural_search_policy,
+            strategy_allocation_policy=self.strategy_allocation_policy,
+            planner_calls=self.planner_calls,
+            planner_fallbacks=self.planner_fallbacks,
             structural_candidates=sum(
                 bool(
                     dict(item.candidate.proposal_metadata.get("ast_novelty") or {}).get(

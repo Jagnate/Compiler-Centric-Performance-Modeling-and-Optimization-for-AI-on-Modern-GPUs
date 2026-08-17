@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
+import math
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -59,11 +60,94 @@ class StrategyAssignment:
     family_hint: str
     selection_reason: str
     evidence_terms: List[str]
+    planning_mode: str = "explore"
+    planner_objective: Optional[str] = None
+    planner_reported_strategy: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result["strategy_slot"] = result.pop("slot")
         return result
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "StrategyAssignment":
+        data = dict(value)
+        slot = data.pop("strategy_slot", None)
+        if slot is None:
+            slot = data.pop("slot", "")
+        else:
+            data.pop("slot", None)
+        data["slot"] = str(slot)
+        data["ordinal"] = int(data.get("ordinal", 0))
+        data["structural_required"] = bool(data.get("structural_required"))
+        data["evidence_terms"] = [
+            str(item) for item in data.get("evidence_terms", [])
+        ]
+        return cls(**data)
+
+
+@dataclass(frozen=True)
+class StrategyPlan:
+    """Auditable result of fixed, AI-planned, or fallback slot allocation."""
+
+    round_number: int
+    policy: str
+    source: str
+    requested_count: int
+    assignments: List[StrategyAssignment]
+    raw_plan: Dict[str, Any] = field(default_factory=dict)
+    overrides: List[str] = field(default_factory=list)
+    fallback_reason: Optional[str] = None
+    round_rationale: Optional[str] = None
+    confidence: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        counts: Dict[str, int] = {}
+        for assignment in self.assignments:
+            counts[assignment.strategy_id] = counts.get(assignment.strategy_id, 0) + 1
+        return {
+            "round": self.round_number,
+            "policy": self.policy,
+            "source": self.source,
+            "requested_count": self.requested_count,
+            "allocation": [
+                {"strategy_id": strategy_id, "count": count}
+                for strategy_id, count in counts.items()
+            ],
+            "assignments": [item.to_dict() for item in self.assignments],
+            "raw_plan": dict(self.raw_plan),
+            "overrides": list(self.overrides),
+            "fallback_reason": self.fallback_reason,
+            "round_rationale": self.round_rationale,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "StrategyPlan":
+        return cls(
+            round_number=int(value.get("round", value.get("round_number", 0))),
+            policy=str(value.get("policy", "unknown")),
+            source=str(value.get("source", "unknown")),
+            requested_count=int(value.get("requested_count", 0)),
+            assignments=[
+                StrategyAssignment.from_dict(item)
+                for item in value.get("assignments", [])
+                if isinstance(item, Mapping)
+            ],
+            raw_plan=dict(value.get("raw_plan") or {}),
+            overrides=[str(item) for item in value.get("overrides", [])],
+            fallback_reason=(
+                str(value["fallback_reason"])
+                if value.get("fallback_reason") is not None
+                else None
+            ),
+            round_rationale=(
+                str(value["round_rationale"])
+                if value.get("round_rationale") is not None
+                else None
+            ),
+            confidence=_optional_confidence(value.get("confidence")),
+        )
 
 
 class StructuralStrategyPortfolio:
@@ -78,6 +162,21 @@ class StructuralStrategyPortfolio:
     )
 
     _EVIDENCE_TERMS = {
+        "parameter-tuning": (
+            "tile",
+            "block",
+            "stage",
+            "thread",
+            "parameter",
+            "baseline",
+        ),
+        "open-structural-exploration": (
+            "unknown",
+            "new direction",
+            "novel",
+            "plateau",
+            "unexplored",
+        ),
         "memory-layout": (
             "bank conflict",
             "shared memory",
@@ -297,6 +396,362 @@ class StructuralStrategyPortfolio:
             )
         return assignments
 
+    def strategy_catalog(self, task: TaskSpec) -> List[Dict[str, Any]]:
+        """Return the complete strategy vocabulary exposed to the AI planner."""
+
+        family = _kernel_family(task)
+        return [
+            StructuralStrategy(
+                strategy_id=item[0],
+                title=item[1],
+                structural_required=item[2],
+                objective=item[3],
+                prohibited_shortcut=item[4],
+                family_hint=_family_hint(family, item[0]),
+            ).to_dict()
+            for item in self._STRATEGIES
+        ]
+
+    def fixed_plan(
+        self,
+        task: TaskSpec,
+        round_number: int,
+        count: int,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> StrategyPlan:
+        """Wrap the legacy deterministic portfolio for reproducible ablations."""
+
+        assignments = self.plan(task, round_number, count, evidence)
+        return StrategyPlan(
+            round_number=round_number,
+            policy="fixed",
+            source="fixed-portfolio",
+            requested_count=count,
+            assignments=assignments,
+            round_rationale="Legacy deterministic strategy coverage portfolio.",
+        )
+
+    def fallback_plan(
+        self,
+        task: TaskSpec,
+        round_number: int,
+        count: int,
+        evidence: Optional[Mapping[str, Any]],
+        reason: str,
+        raw_plan: Optional[Mapping[str, Any]] = None,
+    ) -> StrategyPlan:
+        """Build a deterministic, strategy-neutral plan after planner failure."""
+
+        assignments, overrides = self._normalize_items(
+            task=task,
+            round_number=round_number,
+            count=count,
+            raw_items=[],
+            evidence=evidence or {},
+        )
+        return StrategyPlan(
+            round_number=round_number,
+            policy="ai-planned",
+            source="deterministic-fallback",
+            requested_count=count,
+            assignments=assignments,
+            raw_plan=dict(raw_plan or {}),
+            overrides=overrides,
+            fallback_reason=reason,
+            round_rationale=(
+                "The hosted planner was unavailable or invalid, so the controller "
+                "used evidence-ranked balanced coverage without reserving any "
+                "particular strategy."
+            ),
+        )
+
+    def normalize_ai_plan(
+        self,
+        task: TaskSpec,
+        round_number: int,
+        count: int,
+        raw_plan: Mapping[str, Any],
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> StrategyPlan:
+        """Validate an AI allocation and enforce only strategy-neutral bounds."""
+
+        if not isinstance(raw_plan, Mapping):
+            return self.fallback_plan(
+                task,
+                round_number,
+                count,
+                evidence,
+                "planner response is not a JSON object",
+            )
+        raw_items = raw_plan.get("allocation")
+        if not isinstance(raw_items, list) or not raw_items:
+            return self.fallback_plan(
+                task,
+                round_number,
+                count,
+                evidence,
+                "planner response has no non-empty allocation list",
+                raw_plan,
+            )
+        usable_items = [
+            item
+            for item in raw_items
+            if isinstance(item, Mapping)
+            and str(item.get("strategy_id") or "").strip()
+            and str(item.get("reason") or "").strip()
+            and isinstance(item.get("count"), int)
+            and not isinstance(item.get("count"), bool)
+            and int(item.get("count")) > 0
+        ]
+        if not usable_items:
+            return self.fallback_plan(
+                task,
+                round_number,
+                count,
+                evidence,
+                "planner allocation contained no usable entries",
+                raw_plan,
+            )
+        assignments, overrides = self._normalize_items(
+            task=task,
+            round_number=round_number,
+            count=count,
+            raw_items=raw_items,
+            evidence=evidence or {},
+        )
+        return StrategyPlan(
+            round_number=round_number,
+            policy="ai-planned",
+            source="hosted-ai-planner",
+            requested_count=count,
+            assignments=assignments,
+            raw_plan=dict(raw_plan),
+            overrides=overrides,
+            round_rationale=_bounded_text(raw_plan.get("round_rationale"), 1000),
+            confidence=_optional_confidence(raw_plan.get("confidence")),
+        )
+
+    def _normalize_items(
+        self,
+        *,
+        task: TaskSpec,
+        round_number: int,
+        count: int,
+        raw_items: Sequence[Any],
+        evidence: Mapping[str, Any],
+    ) -> Tuple[List[StrategyAssignment], List[str]]:
+        if round_number <= 0:
+            raise ValueError("round_number must be positive")
+        if count < 0:
+            raise ValueError("count cannot be negative")
+        if count == 0:
+            return [], []
+
+        strategies = {
+            item["strategy_id"]: StructuralStrategy(**item)
+            for item in self.strategy_catalog(task)
+        }
+        cap = max(1, int(math.ceil(2.0 * count / 3.0)))
+        expanded: List[Dict[str, Any]] = []
+        overrides: List[str] = []
+        for index, raw in enumerate(raw_items):
+            if not isinstance(raw, Mapping):
+                overrides.append("ignored allocation item %d because it is not an object" % index)
+                continue
+            reported_id = _bounded_text(raw.get("strategy_id"), 160)
+            reason = _bounded_text(raw.get("reason"), 600)
+            if not reported_id or not reason:
+                overrides.append(
+                    "ignored allocation item %d because strategy_id or reason is missing"
+                    % index
+                )
+                continue
+            requested = raw.get("count", 0)
+            if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
+                overrides.append(
+                    "ignored allocation item %d because count is not a positive integer"
+                    % index
+                )
+                continue
+            strategy_id = reported_id
+            planner_reported_strategy = None
+            if strategy_id not in strategies:
+                planner_reported_strategy = strategy_id
+                strategy_id = "open-structural-exploration"
+                overrides.append(
+                    "mapped unknown planner strategy %r to open-structural-exploration"
+                    % reported_id
+                )
+            mode = str(raw.get("mode") or "explore").strip().lower()
+            if mode not in {"exploit", "explore"}:
+                overrides.append(
+                    "normalized invalid mode %r for strategy %s to explore"
+                    % (mode, reported_id)
+                )
+                mode = "explore"
+            evidence_value = raw.get("evidence") or []
+            if isinstance(evidence_value, str):
+                evidence_terms = [evidence_value[:200]]
+            elif isinstance(evidence_value, Sequence):
+                evidence_terms = [
+                    str(item)[:200] for item in evidence_value[:8] if str(item).strip()
+                ]
+            else:
+                evidence_terms = []
+            objective = _bounded_text(raw.get("objective"), 600)
+            for _ in range(requested):
+                expanded.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "reported_strategy": planner_reported_strategy,
+                        "reason": reason,
+                        "mode": mode,
+                        "evidence_terms": evidence_terms,
+                        "objective": objective,
+                    }
+                )
+
+        accepted: List[Dict[str, Any]] = []
+        strategy_counts: Counter[str] = Counter()
+        for item in expanded:
+            strategy_id = item["strategy_id"]
+            if len(accepted) >= count:
+                overrides.append("trimmed planner allocation to the requested candidate count")
+                break
+            if strategy_counts[strategy_id] >= cap:
+                overrides.append(
+                    "capped strategy %s at %d of %d slots"
+                    % (strategy_id, cap, count)
+                )
+                continue
+            accepted.append(item)
+            strategy_counts[strategy_id] += 1
+
+        fallback_order = self._strategy_neutral_order(
+            strategies, evidence, round_number, task.budget.random_seed
+        )
+        while len(accepted) < count:
+            strategy = next(
+                (
+                    item
+                    for item in fallback_order
+                    if strategy_counts[item.strategy_id] < cap
+                ),
+                fallback_order[len(accepted) % len(fallback_order)],
+            )
+            accepted.append(
+                self._fallback_item(strategy, evidence, "controller-count-fill")
+            )
+            strategy_counts[strategy.strategy_id] += 1
+            overrides.append(
+                "filled an unallocated slot with evidence-ranked strategy %s"
+                % strategy.strategy_id
+            )
+
+        minimum_directions = min(2, count)
+        if len(strategy_counts) < minimum_directions and accepted:
+            replacement = next(
+                (item for item in fallback_order if item.strategy_id not in strategy_counts),
+                None,
+            )
+            duplicate_index = next(
+                (
+                    index
+                    for index in range(len(accepted) - 1, -1, -1)
+                    if strategy_counts[accepted[index]["strategy_id"]] > 1
+                ),
+                None,
+            )
+            if replacement is not None and duplicate_index is not None:
+                previous = accepted[duplicate_index]["strategy_id"]
+                strategy_counts[previous] -= 1
+                accepted[duplicate_index] = self._fallback_item(
+                    replacement, evidence, "controller-diversity-bound"
+                )
+                strategy_counts[replacement.strategy_id] += 1
+                overrides.append(
+                    "replaced one %s slot with %s to preserve two search directions"
+                    % (previous, replacement.strategy_id)
+                )
+
+        assignments = []
+        for ordinal, item in enumerate(accepted[:count]):
+            strategy = strategies[item["strategy_id"]]
+            objective = item.get("objective") or strategy.objective
+            reported = item.get("reported_strategy")
+            if reported:
+                objective = (
+                    "%s Planner-proposed open direction: %s."
+                    % (objective, reported)
+                )
+            assignments.append(
+                StrategyAssignment(
+                    slot="r%03d-s%02d-%s"
+                    % (round_number, ordinal, strategy.strategy_id),
+                    ordinal=ordinal,
+                    strategy_id=strategy.strategy_id,
+                    title=strategy.title,
+                    structural_required=strategy.structural_required,
+                    objective=objective,
+                    prohibited_shortcut=strategy.prohibited_shortcut,
+                    family_hint=strategy.family_hint,
+                    selection_reason=item["reason"],
+                    evidence_terms=list(item["evidence_terms"]),
+                    planning_mode=item["mode"],
+                    planner_objective=item.get("objective"),
+                    planner_reported_strategy=reported,
+                )
+            )
+        return assignments, _unique_strings(overrides)
+
+    def _strategy_neutral_order(
+        self,
+        strategies: Mapping[str, StructuralStrategy],
+        evidence: Mapping[str, Any],
+        round_number: int,
+        random_seed: int,
+    ) -> List[StructuralStrategy]:
+        text = _evidence_text(evidence)
+        identifiers = list(strategies)
+        rotation = (round_number - 1 + random_seed) % len(identifiers)
+        outcomes = evidence.get("strategy_outcomes")
+        outcome_map = outcomes if isinstance(outcomes, Mapping) else {}
+        ranked = []
+        for index, strategy_id in enumerate(identifiers):
+            terms = self._EVIDENCE_TERMS.get(strategy_id, ())
+            evidence_score = sum(term in text for term in terms)
+            outcome = outcome_map.get(strategy_id)
+            improvement = 0.0
+            if isinstance(outcome, Mapping):
+                value = outcome.get("best_relative_improvement_vs_parent")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    improvement = float(value)
+            tie_break = (index - rotation) % len(identifiers)
+            ranked.append((strategy_id, improvement, evidence_score, tie_break))
+        ranked.sort(key=lambda item: (-item[1], -item[2], item[3], item[0]))
+        return [strategies[item[0]] for item in ranked]
+
+    def _fallback_item(
+        self,
+        strategy: StructuralStrategy,
+        evidence: Mapping[str, Any],
+        reason: str,
+    ) -> Dict[str, Any]:
+        text = _evidence_text(evidence)
+        terms = sorted(
+            term
+            for term in self._EVIDENCE_TERMS.get(strategy.strategy_id, ())
+            if term in text
+        )
+        return {
+            "strategy_id": strategy.strategy_id,
+            "reported_strategy": None,
+            "reason": reason,
+            "mode": "explore",
+            "evidence_terms": terms,
+            "objective": None,
+        }
+
     def _rank_known_strategies(
         self,
         strategies: Mapping[str, StructuralStrategy],
@@ -369,6 +824,11 @@ def bind_strategy_assignments(
                 "strategy_binding": binding,
                 "strategy_selection_reason": assignment.selection_reason,
                 "strategy_evidence_terms": list(assignment.evidence_terms),
+                "strategy_planning_mode": assignment.planning_mode,
+                "strategy_planner_objective": assignment.planner_objective,
+                "strategy_planner_reported_strategy": (
+                    assignment.planner_reported_strategy
+                ),
                 "discovered_strategy": discovered or None,
                 "related_existing_strategies": [item[:80] for item in related[:8]],
             }
@@ -864,3 +1324,26 @@ def _imported_names(tree: ast.AST) -> List[str]:
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _bounded_text(value: Any, limit: int) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:limit] if text else None
+
+
+def _optional_confidence(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(0.0, min(1.0, float(value)))
+
+
+def _unique_strings(values: Sequence[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

@@ -29,6 +29,90 @@ def make_task() -> TaskSpec:
 
 
 class ApiSourceGeneratorTests(unittest.TestCase):
+    def test_strategy_planner_uses_small_budget_and_returns_allocation(self) -> None:
+        captured = {}
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, timeout
+            captured.update(payload)
+            return {
+                "id": "planner-test",
+                "model": "resolved-test-model",
+                "usage": {"prompt_tokens": 80, "completion_tokens": 40},
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "allocation": [
+                                        {
+                                            "strategy_id": "data-movement",
+                                            "count": 4,
+                                            "mode": "exploit",
+                                            "reason": "Measured bandwidth pressure.",
+                                            "evidence": ["profile.ddr_util"],
+                                        },
+                                        {
+                                            "strategy_id": "pipeline-structure",
+                                            "count": 2,
+                                            "mode": "explore",
+                                            "reason": "Overlap remains uncertain.",
+                                            "evidence": ["model.diagnostics"],
+                                        },
+                                    ],
+                                    "round_rationale": "Exploit traffic reduction.",
+                                    "confidence": 0.75,
+                                }
+                            )
+                        },
+                    }
+                ],
+            }
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+                max_output_tokens=8000,
+                planner_max_output_tokens=1500,
+            ),
+            transport=transport,
+        )
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        strategies = [
+            {
+                "strategy_id": "data-movement",
+                "title": "Data movement",
+                "structural_required": True,
+            }
+        ]
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            plan = generator.plan_strategies(
+                task,
+                parent,
+                {"strategy_outcomes": {}},
+                strategies,
+                count=6,
+                round_number=1,
+            )
+
+        self.assertEqual(plan["allocation"][0]["count"], 4)
+        self.assertEqual(captured["max_completion_tokens"], 1500)
+        request = json.loads(captured["messages"][1]["content"])
+        self.assertEqual(request["candidate_count"], 6)
+        self.assertTrue(request["controller_constraints"]["parameter_tuning_is_optional"])
+        self.assertIn("source_code", request["current_best"])
+        self.assertEqual(generator.last_call_metadata["kind"], "plan")
+        planner_prompts = "\n".join(
+            message["content"] for message in captured["messages"]
+        )
+        self.assertIsNone(re.search(r"[\u4e00-\u9fff]", planner_prompts))
+
     def test_fake_transport_receives_source_and_parses_complete_replacement(self) -> None:
         captured = {}
 

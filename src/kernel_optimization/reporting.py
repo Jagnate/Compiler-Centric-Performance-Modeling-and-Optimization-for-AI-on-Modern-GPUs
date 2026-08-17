@@ -15,6 +15,7 @@ _REPORT_FILENAMES = {
     "trajectory_json": "trajectory.json",
     "trajectory_csv": "trajectory.csv",
     "candidate_graph": "candidate_graph.json",
+    "strategy_plans": "strategy_plans.json",
     "experiment_manifest": "experiment_manifest.json",
     "experiment_report": "experiment_report.md",
 }
@@ -30,6 +31,7 @@ def write_research_artifacts(
     records: Sequence[CandidateRecord],
     summary: SearchSummary,
     run_metadata: Mapping[str, Any],
+    strategy_plans: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, str]:
     ordered = sorted(
         records,
@@ -61,6 +63,10 @@ def write_research_artifacts(
         },
     )
     store.save_json_artifact(
+        _REPORT_FILENAMES["strategy_plans"],
+        {"rounds": [dict(item) for item in strategy_plans]},
+    )
+    store.save_json_artifact(
         _REPORT_FILENAMES["experiment_manifest"],
         {
             "task_id": task.task_id,
@@ -74,13 +80,14 @@ def write_research_artifacts(
                 "fixed_promotions_per_round": summary.fixed_promotions_per_round,
                 "compiled_deduplication": summary.compiled_deduplication,
                 "structural_search_policy": summary.structural_search_policy,
+                "strategy_allocation_policy": summary.strategy_allocation_policy,
             },
             "outcome": summary.to_dict(),
         },
     )
     store.save_text_artifact(
         _REPORT_FILENAMES["experiment_report"],
-        _experiment_markdown(task, ordered, summary),
+        _experiment_markdown(task, ordered, summary, strategy_plans),
     )
     return expected_report_paths(store.root)
 
@@ -113,6 +120,11 @@ def _trajectory_row(record: CandidateRecord) -> Dict[str, Any]:
         "strategy_validation": proposal.get("strategy_validation"),
         "strategy_selection_reason": proposal.get("strategy_selection_reason"),
         "strategy_evidence_terms": proposal.get("strategy_evidence_terms", []),
+        "strategy_planning_mode": proposal.get("strategy_planning_mode"),
+        "strategy_planner_objective": proposal.get("strategy_planner_objective"),
+        "strategy_planner_reported_strategy": proposal.get(
+            "strategy_planner_reported_strategy"
+        ),
         "discovered_strategy": proposal.get("discovered_strategy"),
         "related_existing_strategies": proposal.get(
             "related_existing_strategies", []
@@ -174,6 +186,7 @@ def _experiment_markdown(
     task: TaskSpec,
     records: Sequence[CandidateRecord],
     summary: SearchSummary,
+    strategy_plans: Sequence[Mapping[str, Any]],
 ) -> str:
     ledger = summary.cost_ledger
     api = dict(ledger.get("api") or {})
@@ -195,6 +208,10 @@ def _experiment_markdown(
         % ("enabled" if summary.compiled_deduplication else "disabled"),
         "| Structural search policy | `%s` |"
         % summary.structural_search_policy,
+        "| Strategy allocation policy | `%s` |"
+        % summary.strategy_allocation_policy,
+        "| AI planner calls | %d |" % summary.planner_calls,
+        "| Planner fallbacks | %d |" % summary.planner_fallbacks,
         "| Completed rounds | %d |" % summary.completed_rounds,
         "",
         "## Outcome",
@@ -227,6 +244,8 @@ def _experiment_markdown(
         "| --- | ---: |",
         "| Hosted API logical calls | %s |"
         % _format(api.get("logical_generator_calls")),
+        "| Strategy planner calls | %s |"
+        % _format(api.get("planner_calls")),
         "| Hosted API request attempts | %s |"
         % _format(api.get("provider_request_attempts")),
         "| Hosted API wall time | %s s |" % _format(api.get("wall_seconds")),
@@ -241,11 +260,43 @@ def _experiment_markdown(
         "| NCU calls | %s |" % _format(hardware.get("ncu_profile_calls")),
         "| Final validation calls | %d |" % summary.final_validation_calls,
         "",
+        "## Strategy Plans",
+        "",
+    ]
+    if strategy_plans:
+        lines.extend(
+            [
+                "| Round | Source | Allocation | Overrides | Fallback |",
+                "| ---: | --- | --- | ---: | --- |",
+            ]
+        )
+        for plan in strategy_plans:
+            allocation = ", ".join(
+                "%s x%s" % (item.get("strategy_id"), item.get("count"))
+                for item in plan.get("allocation", [])
+                if isinstance(item, Mapping)
+            )
+            lines.append(
+                "| %s | `%s` | %s | %d | %s |"
+                % (
+                    _format(plan.get("round")),
+                    plan.get("source", "unknown"),
+                    allocation or "unconstrained",
+                    len(plan.get("overrides", []) or []),
+                    str(plan.get("fallback_reason") or "none").replace("|", "\\|"),
+                )
+            )
+    else:
+        lines.append("No explicit strategy plans were recorded.")
+    lines.extend(
+        [
+        "",
         "## Round Trajectory",
         "",
         "| Round | Best measured candidate | Latency (ms) |",
         "| ---: | --- | ---: |",
-    ]
+        ]
+    )
     best = None
     max_generation = max((record.candidate.generation for record in records), default=0)
     for generation in range(max_generation + 1):

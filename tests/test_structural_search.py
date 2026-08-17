@@ -61,6 +61,67 @@ class StructuralSearchTests(unittest.TestCase):
     def test_cli_enforces_structural_search_by_default(self) -> None:
         args = build_parser().parse_args(["--source", "kernel.py", "--task", "task.json"])
         self.assertEqual(args.structural_search_policy, "enforce")
+        self.assertEqual(args.strategy_allocation_policy, "ai-planned")
+
+    def test_ai_plan_can_allocate_zero_parameter_slots(self) -> None:
+        task = _task("zero-parameter", proposals=6)
+        plan = StructuralStrategyPortfolio().normalize_ai_plan(
+            task,
+            round_number=1,
+            count=6,
+            raw_plan={
+                "allocation": [
+                    {
+                        "strategy_id": "data-movement",
+                        "count": 4,
+                        "mode": "exploit",
+                        "reason": "Observed memory traffic dominates.",
+                        "evidence": ["profile.ddr_util"],
+                    },
+                    {
+                        "strategy_id": "pipeline-structure",
+                        "count": 2,
+                        "mode": "explore",
+                        "reason": "Overlap is still uncertain.",
+                        "evidence": ["model.diagnostics"],
+                    },
+                ],
+                "round_rationale": "Focus on traffic and overlap.",
+                "confidence": 0.8,
+            },
+        )
+
+        identifiers = [item.strategy_id for item in plan.assignments]
+        self.assertEqual(len(identifiers), 6)
+        self.assertNotIn("parameter-tuning", identifiers)
+        self.assertEqual(identifiers.count("data-movement"), 4)
+        self.assertEqual(identifiers.count("pipeline-structure"), 2)
+        self.assertEqual(plan.source, "hosted-ai-planner")
+
+    def test_ai_plan_enforces_generic_diversity_and_share_bounds(self) -> None:
+        task = _task("generic-bounds", proposals=6)
+        plan = StructuralStrategyPortfolio().normalize_ai_plan(
+            task,
+            round_number=1,
+            count=6,
+            raw_plan={
+                "allocation": [
+                    {
+                        "strategy_id": "data-movement",
+                        "count": 12,
+                        "mode": "exploit",
+                        "reason": "The planner wants a focused round.",
+                        "evidence": ["profile.ddr_util"],
+                    }
+                ]
+            },
+        )
+
+        identifiers = [item.strategy_id for item in plan.assignments]
+        self.assertEqual(len(identifiers), 6)
+        self.assertGreaterEqual(len(set(identifiers)), 2)
+        self.assertLessEqual(identifiers.count("data-movement"), 4)
+        self.assertTrue(any("capped strategy" in item for item in plan.overrides))
 
     def test_portfolio_reserves_open_search_and_rotates_known_lanes(self) -> None:
         task = _task("matmul-portfolio", proposals=6)
@@ -322,6 +383,137 @@ class StructuralSearchTests(unittest.TestCase):
             rejected[0].failure.category, "open-strategy-metadata-missing"
         )
 
+    def test_ai_planner_outcomes_feed_the_next_round(self) -> None:
+        source = (
+            "def make_kernel(block_m: int = 64):\n"
+            "    values = [0] * block_m\n"
+            "    return values\n"
+        )
+        task = _task(
+            "ai-outcomes",
+            proposals=2,
+            entrypoint="make_kernel",
+            rounds=2,
+        )
+        generator = _AiPlanningGenerator(source)
+
+        with tempfile.TemporaryDirectory(prefix="ai-planning-") as directory:
+            output = Path(directory)
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=generator,
+                backend=_OpenMemoryBackend(),
+                store=ArtifactStore(output),
+                selection_policy="measure-all",
+                profile_policy="none",
+                structural_search_policy="off",
+                strategy_allocation_policy="ai-planned",
+            )
+            summary = controller.run()
+            plans = json.loads((output / "strategy_plans.json").read_text())
+
+        self.assertEqual(summary.planner_calls, 2)
+        self.assertEqual(summary.planner_fallbacks, 0)
+        self.assertEqual(len(generator.planning_requests), 2)
+        prior = generator.planning_requests[1]["strategy_outcomes"]
+        self.assertGreater(
+            prior["open-structural-exploration"][
+                "best_relative_improvement_vs_parent"
+            ],
+            0.0,
+        )
+        self.assertIn("realized_outcomes", plans["rounds"][0])
+        self.assertEqual(plans["rounds"][0]["source"], "hosted-ai-planner")
+
+    def test_planner_failure_uses_fallback_without_stopping_search(self) -> None:
+        source = (
+            "def make_kernel(block_m: int = 64):\n"
+            "    values = [0] * block_m\n"
+            "    return values\n"
+        )
+        task = _task("planner-fallback", proposals=2, entrypoint="make_kernel")
+        generator = _FailingPlanningGenerator(source)
+
+        with tempfile.TemporaryDirectory(prefix="planner-fallback-") as directory:
+            output = Path(directory)
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=generator,
+                backend=_SimpleBackend(),
+                store=ArtifactStore(output),
+                selection_policy="measure-all",
+                profile_policy="none",
+                structural_search_policy="off",
+                strategy_allocation_policy="ai-planned",
+            )
+            summary = controller.run()
+            plans = json.loads((output / "strategy_plans.json").read_text())
+
+        self.assertEqual(summary.planner_calls, 1)
+        self.assertEqual(summary.planner_fallbacks, 1)
+        self.assertEqual(plans["rounds"][0]["source"], "deterministic-fallback")
+        self.assertEqual(len(plans["rounds"][0]["assignments"]), 2)
+        self.assertEqual(
+            len(
+                {
+                    item["strategy_id"]
+                    for item in plans["rounds"][0]["assignments"]
+                }
+            ),
+            2,
+        )
+
+    def test_resume_reuses_archived_plan_without_another_planner_call(self) -> None:
+        source = (
+            "def make_kernel(block_m: int = 64):\n"
+            "    values = [0] * block_m\n"
+            "    return values\n"
+        )
+        task = _task("planner-resume", proposals=1, entrypoint="make_kernel")
+        planner_calls = []
+
+        with tempfile.TemporaryDirectory(prefix="planner-resume-") as directory:
+            output = Path(directory)
+            first = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=_ResumePlanningGenerator(
+                    source, planner_calls, fail_generation=True
+                ),
+                backend=_SimpleBackend(),
+                store=ArtifactStore(output),
+                profile_policy="none",
+                structural_search_policy="off",
+                strategy_allocation_policy="ai-planned",
+            )
+            with self.assertRaisesRegex(RuntimeError, "generation interrupted"):
+                first.run()
+
+            resumed = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=_ResumePlanningGenerator(
+                    source, planner_calls, fail_generation=False
+                ),
+                backend=_SimpleBackend(),
+                store=ArtifactStore(output),
+                profile_policy="none",
+                structural_search_policy="off",
+                strategy_allocation_policy="ai-planned",
+                resume=True,
+            )
+            summary = resumed.run()
+
+        self.assertEqual(planner_calls, [1])
+        self.assertTrue(summary.resumed)
+        self.assertEqual(summary.planner_calls, 1)
+
 
 class _ParameterOnlyGenerator:
     last_call_metadata = {}
@@ -437,6 +629,125 @@ class _UnnamedOpenGenerator(_OpenMemoryGenerator):
                 structural_source,
             ),
         ][:count]
+
+
+class _AiPlanningGenerator:
+    last_call_metadata = {"attempts": 1}
+    last_exchange = {}
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.planning_requests = []
+        self.generation_requests = []
+        self.variant = 0
+
+    def plan_strategies(
+        self, task, parent, planning_context, strategies, count, round_number
+    ):
+        del task, parent, strategies, count, round_number
+        self.planning_requests.append(dict(planning_context))
+        return {
+            "allocation": [
+                {
+                    "strategy_id": "parameter-tuning",
+                    "count": 1,
+                    "mode": "exploit",
+                    "reason": "Retain a local schedule trial.",
+                    "evidence": ["current_best"],
+                },
+                {
+                    "strategy_id": "open-structural-exploration",
+                    "count": 1,
+                    "mode": "explore",
+                    "reason": "Test a new ownership structure.",
+                    "evidence": ["strategy_outcomes"],
+                },
+            ],
+            "round_rationale": "Balance one local and one open trial.",
+            "confidence": 0.7,
+        }
+
+    def generate(self, task, parent, evidence, history, count):
+        del task, history
+        request = dict(evidence["generation_request"])
+        self.generation_requests.append(request)
+        proposals = []
+        for assignment in request["strategy_assignments"][:count]:
+            self.variant += 1
+            source = parent.source_code
+            metadata = {}
+            if assignment["strategy_id"] == "parameter-tuning":
+                source = source.replace("= 64", "= 128")
+            else:
+                if "for marker in range(1)" not in source:
+                    source = source.replace(
+                        "    return values\n",
+                        "    for marker in range(1):\n"
+                        "        values = values\n"
+                        "    return values\n",
+                    )
+                metadata = {
+                    "discovered_strategy": "single-trip-owner-loop",
+                    "related_existing_strategies": ["work-decomposition"],
+                }
+            source += "\nPLANNER_VARIANT_%d = %d\n" % (
+                self.variant,
+                self.variant,
+            )
+            proposals.append(
+                CandidateProposal(
+                    "Execute the assigned AI-planned direction.",
+                    source,
+                    metadata=metadata,
+                )
+            )
+        return proposals
+
+
+class _FailingPlanningGenerator(_ParameterOnlyGenerator):
+    def plan_strategies(self, *args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("planner unavailable")
+
+
+class _ResumePlanningGenerator:
+    last_call_metadata = {"attempts": 1}
+    last_exchange = {}
+
+    def __init__(self, source, planner_calls, fail_generation):
+        self.source = source
+        self.planner_calls = planner_calls
+        self.fail_generation = fail_generation
+
+    def plan_strategies(
+        self, task, parent, planning_context, strategies, count, round_number
+    ):
+        del task, parent, planning_context, strategies, count
+        self.planner_calls.append(round_number)
+        return {
+            "allocation": [
+                {
+                    "strategy_id": "parameter-tuning",
+                    "count": 1,
+                    "mode": "exploit",
+                    "reason": "Test one local schedule value.",
+                    "evidence": ["current_best"],
+                }
+            ],
+            "round_rationale": "Use the only available slot locally.",
+            "confidence": 0.5,
+        }
+
+    def generate(self, task, parent, evidence, history, count):
+        del task, parent, evidence, history, count
+        if self.fail_generation:
+            raise RuntimeError("generation interrupted")
+        return [
+            CandidateProposal(
+                "Tune the local block size.",
+                self.source.replace("= 64", "= 128"),
+            )
+        ]
 
 
 def _task(

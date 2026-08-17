@@ -7,11 +7,13 @@ GPU kernel optimization.
 
 The current system accepts a GPU kernel source file as its primary input. A
 hosted language-model API proposes complete replacement implementations in an
-open-ended code space. A deterministic strategy portfolio reserves one proposal
-for parameter tuning and one for open structural exploration, then ranks known
-memory, data-movement, execution, pipeline, and decomposition strategies from
-the current TileSight/NCU evidence. A parent-relative AST check verifies whether
-each claimed structural candidate actually changes executable structure.
+open-ended code space. Before generation, a compact AI planning request allocates
+the current round across parameter, memory, data-movement, execution, pipeline,
+decomposition, or newly discovered directions using TileSight, NCU, and prior
+strategy outcomes. The controller applies strategy-neutral count, diversity,
+and concentration bounds; no direction, including parameter tuning, is
+mandatory. A parent-relative AST check then verifies whether each claimed
+structural candidate actually changes executable structure.
 TileSight evaluates accepted candidates cheaply, while correctness checks, CUDA
 Event timing, and selective NCU profiling provide progressively more expensive
 hardware evidence.
@@ -26,7 +28,7 @@ Each evidence source has a distinct role:
 
 ```text
 Hosted LLM       proposes complete candidate kernel sources
-Strategy planner reserves open exploration and ranks known directions
+Strategy planner allocates directions from current evidence and outcomes
 Static validator rejects malformed or contract-breaking Python
 AST novelty      rejects parameter-only claims in structural lanes
 TileSight        predicts latency, resources, utilization, and bottlenecks
@@ -59,6 +61,9 @@ an immutable source candidate, identified by its complete source SHA-256 digest.
 ```text
 Measured source beam ------------------------------------------+
    |                                                           |
+   v                                                           |
+Hosted API plans the round's strategy allocation               |
+   |  controller normalizes count, diversity, and share        |
    v                                                           |
 Hosted API proposes complete replacement source files          |
    |                                                           |
@@ -95,10 +100,10 @@ answer.
 The open-ended source space is not enumerated. The hosted model acts as a
 proposal policy and samples a small number of promising transformations each
 round. The controller uses adaptive-fidelity evaluation to decide where scarce
-GPU and NCU calls should be spent. The portfolio constrains proposal intent,
-not implementation syntax or the set of legal transformations. The model still
-writes complete source, may combine strategy families, and can name a previously
-unrepresented transformation in the open-exploration slot.
+GPU and NCU calls should be spent. The normalized plan constrains proposal
+intent, not implementation syntax or the set of legal transformations. The
+model still writes complete source, may combine strategy families, and can name
+a previously unrepresented transformation through open structural exploration.
 
 ## Requirements
 
@@ -193,20 +198,40 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
 ```
 
 The default experiment uses `--selection-policy adaptive`,
-`--profile-policy milestone`, `--structural-search-policy enforce`, and
-compiled-code deduplication. To give promotion ablations the same CUDA
+`--profile-policy milestone`, `--strategy-allocation-policy ai-planned`,
+`--structural-search-policy enforce`, and compiled-code deduplication. To give
+promotion ablations the same CUDA
 measurement cap per round, add for example:
 
 ```bash
 --promotions-per-round 4
 ```
 
-Structural search has three reproducible modes:
+Strategy allocation and AST novelty are independent policies. Allocation has
+three reproducible modes:
+
+```bash
+--strategy-allocation-policy ai-planned    # default evidence-guided allocation
+--strategy-allocation-policy fixed         # legacy 1 parameter + 1 open + known lanes
+--strategy-allocation-policy unconstrained # one-stage free candidate generation
+```
+
+The AI planner receives the current complete kernel, target/workload, bounded
+TileSight and NCU evidence, model trust, prior allocations, discovered
+strategies, and per-strategy compile/correctness/latency outcomes. Its counts
+may assign zero slots to parameter tuning. The controller then enforces exactly
+the requested total, at least two directions when the round has multiple slots,
+and a two-thirds maximum share for any one direction. Unknown strategy names
+are retained as proposed directions and routed through open structural
+exploration. Invalid output or a planner/API failure produces an archived,
+deterministic evidence-ranked fallback and does not stop candidate generation.
+
+AST novelty has three modes:
 
 ```bash
 --structural-search-policy enforce  # reject false structural claims before modeling
 --structural-search-policy observe  # record AST classifications without rejecting
---structural-search-policy off      # reproduce the earlier unconstrained proposal loop
+--structural-search-policy off      # skip parent-relative AST novelty checks
 ```
 
 In `enforce` mode, changing only existing numeric defaults, thread counts, or
@@ -217,7 +242,8 @@ the assigned strategy, AST hashes, changed tuning values, and structural
 signals. This is a novelty gate, not a proof that the transformation is correct
 or fast; the existing correctness and hardware stages remain authoritative.
 
-With the usual six proposals per round, allocation is:
+The legacy fixed allocation remains available for ablations. With six proposals
+it uses:
 
 ```text
 1 parameter-tuning baseline
@@ -232,6 +258,13 @@ structural gate. Measured outcomes from discovered strategies are summarized in
 subsequent prompts, allowing later rounds to deepen successful ideas. Strategy
 assignments are coverage priors rather than a whitelist, so every candidate may
 combine compatible transformations.
+
+Planning uses a separate small output budget, 2,000 tokens by default, while
+source generation keeps the larger candidate budget:
+
+```bash
+--api-planner-max-output-tokens 2000 --api-max-output-tokens 12000
+```
 
 The CLI first sends a very small API preflight request. Authentication, model
 access, quota, and endpoint failures are therefore detected before TileLang
@@ -532,6 +565,11 @@ consume less than that cap, so reports retain actual call counts. Hosted model
 sampling can still produce different source pools, so publish repeated trials
 rather than treating one run as a statistically complete comparison.
 
+The suite uses AI-planned strategy allocation by default. Add
+`--strategy-allocation-policy fixed` or `--strategy-allocation-policy
+unconstrained` to run allocation ablations while keeping the promotion policy
+and hardware budget unchanged.
+
 For a no-NCU ablation, add `--profile-policy none`. To study event-triggered NCU,
 add `--profile-policy milestone`. Optional
 `--api-input-price-per-million` and `--api-output-price-per-million` values add
@@ -615,11 +653,13 @@ Every run writes:
   trajectory.json
   trajectory.csv
   candidate_graph.json
+  strategy_plans.json
   best_candidate.json
   best_kernel.py
   api_calls/
     0001_preflight.json
-    0002_round-001-generate.json
+    0002_round-001-plan.json
+    0003_round-001-generate.json
   checkpoints/
     00001_round_none_seed_completed.json
     ...
@@ -658,6 +698,11 @@ candidate, while `candidate_graph.json` preserves proposal and repair edges.
 `experiment_report.md` is the concise result intended for inspection, and the
 JSON/CSV artifacts support later statistical analysis.
 
+`strategy_plans.json` keeps the raw planner response, normalized slot-level
+assignments, controller overrides, fallback reason, planning evidence, and
+realized compiler/correctness/performance outcomes for each round. These records
+make `ai-planned`, `fixed`, and `unconstrained` allocation directly auditable.
+
 ## Offline Tests
 
 Tests use a fake API transport and test-only evaluator classes. They make no
@@ -694,6 +739,9 @@ Coverage includes:
 - compiled-code equivalence deduplication before hardware measurement;
 - API/evaluator/hardware cost accounting and trajectory reports;
 - reproducible Matmul and Flash Attention experiment-suite commands.
+- small-budget strategy-planner request parsing and English-only prompts;
+- zero-parameter AI allocations plus generic diversity/share normalization;
+- planner-failure fallback and next-round strategy outcome attribution.
 
 ## Security Boundary
 

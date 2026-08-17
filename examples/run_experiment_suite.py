@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("milestone", "every-round", "none"),
         default="every-round",
     )
+    parser.add_argument(
+        "--strategy-allocation-policy",
+        choices=("ai-planned", "fixed", "unconstrained"),
+        default="ai-planned",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--api-url")
@@ -58,6 +63,7 @@ def build_run_command(
     policy: str,
     promotions_per_round: int,
     profile_policy: str,
+    strategy_allocation_policy: str = "ai-planned",
     api_url: Optional[str] = None,
     api_model: Optional[str] = None,
     api_key_env: str = "KERNEL_OPT_API_KEY",
@@ -82,6 +88,8 @@ def build_run_command(
         str(promotions_per_round),
         "--profile-policy",
         profile_policy,
+        "--strategy-allocation-policy",
+        strategy_allocation_policy,
         "--api-key-env",
         api_key_env,
     ]
@@ -131,6 +139,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 policy=policy,
                 promotions_per_round=promotions,
                 profile_policy=args.profile_policy,
+                strategy_allocation_policy=args.strategy_allocation_policy,
                 api_url=args.api_url,
                 api_model=args.api_model,
                 api_key_env=args.api_key_env,
@@ -173,6 +182,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "task": str(task_path),
         "promotions_per_round": promotions,
         "profile_policy": args.profile_policy,
+        "strategy_allocation_policy": args.strategy_allocation_policy,
         "runs": rows,
         "comparison_note": (
             "adaptive, model-top, and random use the same per-round promotion budget; "
@@ -216,6 +226,7 @@ def _suite_markdown(payload: Dict[str, Any]) -> str:
         "Task: `%s`" % payload.get("task_id"),
         "",
         "Fixed promotions per round: %s" % payload["promotions_per_round"],
+        "Strategy allocation: `%s`" % payload["strategy_allocation_policy"],
         "",
         "| Policy | Final latency (ms) | Speedup | Measured | NCU | API calls | API time (s) | Evaluator time (s) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

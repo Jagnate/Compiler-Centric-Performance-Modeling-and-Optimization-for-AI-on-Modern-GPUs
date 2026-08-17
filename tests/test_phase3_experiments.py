@@ -176,6 +176,7 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             ["--source", "kernel.py", "--task", "task.json", "--output-root", "out"]
         )
         self.assertEqual(parsed.profile_policy, "every-round")
+        self.assertEqual(parsed.strategy_allocation_policy, "ai-planned")
         command = module.build_run_command(
             source=Path("kernel.py"),
             task=Path("task.json"),
@@ -185,6 +186,10 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             profile_policy="milestone",
         )
         self.assertIn("--selection-policy", command)
+        self.assertEqual(
+            command[command.index("--strategy-allocation-policy") + 1],
+            "ai-planned",
+        )
         self.assertEqual(command[command.index("--promotions-per-round") + 1], "4")
 
 

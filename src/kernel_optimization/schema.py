@@ -536,6 +536,9 @@ class SearchSummary:
     compiled_deduplication: bool = True
     compiled_equivalent_candidates: int = 0
     structural_search_policy: str = "off"
+    strategy_allocation_policy: str = "unconstrained"
+    planner_calls: int = 0
+    planner_fallbacks: int = 0
     structural_candidates: int = 0
     parameter_only_candidates: int = 0
     strategy_rejected_candidates: int = 0

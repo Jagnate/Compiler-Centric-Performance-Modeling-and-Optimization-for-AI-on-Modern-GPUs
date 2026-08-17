@@ -17,6 +17,17 @@ from .schema import (
 class CandidateGenerator(Protocol):
     """Produce complete source candidates for one measured parent."""
 
+    def plan_strategies(
+        self,
+        task: TaskSpec,
+        parent: Candidate,
+        planning_context: Dict[str, Any],
+        strategies: Sequence[Dict[str, Any]],
+        count: int,
+        round_number: int,
+    ) -> Dict[str, Any]:
+        ...
+
     def generate(
         self,
         task: TaskSpec,

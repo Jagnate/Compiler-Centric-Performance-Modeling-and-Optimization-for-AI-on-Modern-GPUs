@@ -19,6 +19,7 @@ from .structural_search import (
     SourceNoveltyAnalyzer,
     SourceNoveltyReport,
     StrategyAssignment,
+    StrategyPlan,
     StructuralStrategyPortfolio,
 )
 
@@ -39,8 +40,9 @@ __all__ = [
     "SourceNoveltyAnalyzer",
     "SourceNoveltyReport",
     "StrategyAssignment",
+    "StrategyPlan",
     "StructuralStrategyPortfolio",
     "TaskSpec",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

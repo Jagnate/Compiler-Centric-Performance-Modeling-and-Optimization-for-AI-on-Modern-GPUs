@@ -16,7 +16,13 @@ from ..prompt_compression import (
     enforce_prompt_budget,
     prompt_size_metadata,
 )
-from ..prompts import SYSTEM_PROMPT, build_optimization_prompt, build_repair_prompt
+from ..prompts import (
+    STRATEGY_PLANNER_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_optimization_prompt,
+    build_repair_prompt,
+    build_strategy_planning_prompt,
+)
 from ..schema import Candidate, CandidateProposal, TaskSpec
 
 
@@ -68,6 +74,7 @@ class ApiGeneratorConfig:
     timeout_seconds: float = 120.0
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = 12000
+    planner_max_output_tokens: int = 2000
     max_tokens_field: str = "max_completion_tokens"
     max_retries: int = 3
     retry_backoff_seconds: float = 2.0
@@ -85,6 +92,8 @@ class ApiGeneratorConfig:
             raise ValueError("temperature must be non-negative")
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive when provided")
+        if self.planner_max_output_tokens <= 0:
+            raise ValueError("planner_max_output_tokens must be positive")
         if self.max_input_tokens <= 0:
             raise ValueError("max_input_tokens must be positive")
         if self.max_tokens_field not in {"max_tokens", "max_completion_tokens"}:
@@ -153,6 +162,42 @@ class OpenAICompatibleGenerator:
         prompt = build_optimization_prompt(task, parent, evidence, history, count)
         return self._generate_from_prompt(prompt, count=count, kind="generate")
 
+    def plan_strategies(
+        self,
+        task: TaskSpec,
+        parent: Candidate,
+        planning_context: Dict[str, Any],
+        strategies: Sequence[Dict[str, Any]],
+        count: int,
+        round_number: int,
+    ) -> Dict[str, Any]:
+        """Ask the hosted model for a compact pre-generation slot allocation."""
+
+        prompt = build_strategy_planning_prompt(
+            task,
+            parent,
+            planning_context,
+            strategies,
+            count,
+            round_number,
+        )
+        data = self._request_json_prompt(
+            prompt,
+            system_prompt=STRATEGY_PLANNER_SYSTEM_PROMPT,
+            kind="plan",
+            max_output_tokens=min(
+                self.config.planner_max_output_tokens,
+                self.config.max_output_tokens
+                if self.config.max_output_tokens is not None
+                else self.config.planner_max_output_tokens,
+            ),
+        )
+        if not isinstance(data, dict):
+            raise ValueError("strategy planner response must be a JSON object")
+        if not isinstance(data.get("allocation"), list):
+            raise ValueError("strategy planner response must contain an allocation list")
+        return dict(data)
+
     def repair(
         self,
         task: TaskSpec,
@@ -174,10 +219,40 @@ class OpenAICompatibleGenerator:
     def _generate_from_prompt(
         self, prompt: str, *, count: int, kind: str
     ) -> List[CandidateProposal]:
+        data = self._request_json_prompt(
+            prompt,
+            system_prompt=SYSTEM_PROMPT,
+            kind=kind,
+            max_output_tokens=self.config.max_output_tokens,
+        )
+        raw_candidates = data.get("candidates") if isinstance(data, dict) else data
+        if not isinstance(raw_candidates, list):
+            raise ValueError("API response must contain a candidates list")
+        proposals = []
+        for raw in raw_candidates[:count]:
+            if not isinstance(raw, dict):
+                raise ValueError("each API candidate must be a JSON object")
+            value = dict(raw)
+            source_code = value.get("source_code")
+            if isinstance(source_code, str):
+                value["source_code"] = _strip_source_fence(source_code)
+            proposals.append(CandidateProposal.from_dict(value))
+        if not proposals:
+            raise ValueError("API response did not contain any candidate proposals")
+        return proposals
+
+    def _request_json_prompt(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str,
+        kind: str,
+        max_output_tokens: Optional[int],
+    ) -> Any:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -185,12 +260,12 @@ class OpenAICompatibleGenerator:
             payload["temperature"] = self.config.temperature
         if self.config.use_json_object:
             payload["response_format"] = {"type": "json_object"}
-        if self.config.max_output_tokens is not None:
-            payload[self.config.max_tokens_field] = self.config.max_output_tokens
+        if max_output_tokens is not None:
+            payload[self.config.max_tokens_field] = max_output_tokens
         size = prompt_size_metadata(
-            SYSTEM_PROMPT,
+            system_prompt,
             prompt,
-            self.config.max_output_tokens,
+            max_output_tokens,
         )
         self._observe_request(kind, size)
         try:
@@ -218,22 +293,7 @@ class OpenAICompatibleGenerator:
             raise
         response = self._request(payload, kind=kind, prompt_size=size)
         content = self._response_content(response)
-        data = json.loads(_strip_json_fence(content))
-        raw_candidates = data.get("candidates") if isinstance(data, dict) else data
-        if not isinstance(raw_candidates, list):
-            raise ValueError("API response must contain a candidates list")
-        proposals = []
-        for raw in raw_candidates[:count]:
-            if not isinstance(raw, dict):
-                raise ValueError("each API candidate must be a JSON object")
-            value = dict(raw)
-            source_code = value.get("source_code")
-            if isinstance(source_code, str):
-                value["source_code"] = _strip_source_fence(source_code)
-            proposals.append(CandidateProposal.from_dict(value))
-        if not proposals:
-            raise ValueError("API response did not contain any candidate proposals")
-        return proposals
+        return json.loads(_strip_json_fence(content))
 
     def _request(
         self,

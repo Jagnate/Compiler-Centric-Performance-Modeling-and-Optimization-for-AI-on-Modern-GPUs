@@ -34,6 +34,100 @@ additional top-level keys.
 """
 
 
+STRATEGY_PLANNER_SYSTEM_PROMPT = """You plan one round of GPU kernel search.
+
+Choose how many candidate slots to allocate to optimization directions before
+any source candidates are generated. Base the decision on the current kernel,
+observed hardware evidence, analytical predictions, prior strategy outcomes,
+and remaining search budget. No strategy is mandatory, including parameter
+tuning. Do not optimize for a particular benchmark name or assume that a fixed
+portfolio is universally best.
+
+Use known strategy IDs when they fit. You may propose a new short strategy ID;
+the controller will route it through open structural exploration. Balance
+exploitation of measured improvements with exploration when evidence is weak or
+the search has plateaued. Return only the requested JSON plan. Do not return
+source code, Markdown, or additional top-level keys.
+"""
+
+
+def build_strategy_planning_prompt(
+    task: TaskSpec,
+    parent: Candidate,
+    planning_context: Dict[str, Any],
+    strategies: Sequence[Dict[str, Any]],
+    count: int,
+    round_number: int,
+) -> str:
+    """Build a compact strategy-neutral allocation request for one round."""
+
+    request = {
+        "objective": (
+            "Allocate this round's candidate-generation slots to the most useful "
+            "optimization directions for the current kernel and evidence."
+        ),
+        "round": round_number,
+        "candidate_count": count,
+        "task": {
+            "task_id": task.task_id,
+            "description": task.description,
+            "reference_semantics": task.reference,
+            "entrypoint": task.entrypoint,
+            "target": task.target,
+            "workload": task.workload,
+            "constraints": task.constraints,
+            "remaining_rounds_including_this_one": (
+                task.budget.rounds - round_number + 1
+            ),
+        },
+        "current_best": {
+            "candidate_id": parent.candidate_id,
+            "generation": parent.generation,
+            "source_name": parent.source_name,
+            "source_sha256": parent.source_sha256,
+            "hypothesis": parent.hypothesis,
+            "source_code": parent.source_code,
+        },
+        "planning_evidence": planning_context,
+        "available_strategies": list(strategies),
+        "controller_constraints": {
+            "exact_total_slots": count,
+            "minimum_distinct_directions_when_possible": min(2, count),
+            "maximum_share_for_one_direction": (
+                "two thirds of slots, rounded up"
+            ),
+            "parameter_tuning_is_optional": True,
+            "unknown_strategy_behavior": (
+                "A new strategy ID is allowed and will be normalized to the open "
+                "structural lane while preserving the proposed direction."
+            ),
+        },
+        "rules": [
+            "Allocation counts must sum exactly to candidate_count.",
+            "Give every allocation item a concrete evidence-backed reason.",
+            "Use mode exploit for a direction supported by outcomes and explore for uncertainty reduction.",
+            "Allocate zero slots to any strategy, including parameter-tuning, when the evidence does not justify it.",
+            "Do not force broad coverage when focused exploitation is better, but retain at least two directions when candidate_count permits.",
+            "Do not invent measurements or treat analytical predictions as hardware observations.",
+        ],
+        "response_schema": {
+            "allocation": [
+                {
+                    "strategy_id": "known strategy ID or a new short ID",
+                    "count": "positive integer",
+                    "mode": "exploit|explore",
+                    "reason": "evidence-backed allocation rationale",
+                    "evidence": ["specific evidence field, outcome, or uncertainty"],
+                    "objective": "optional concrete direction for generated candidates",
+                }
+            ],
+            "round_rationale": "short explanation of the allocation as a whole",
+            "confidence": "number from 0 to 1",
+        },
+    }
+    return json.dumps(request, indent=2, sort_keys=True)
+
+
 def build_optimization_prompt(
     task: TaskSpec,
     parent: Candidate,

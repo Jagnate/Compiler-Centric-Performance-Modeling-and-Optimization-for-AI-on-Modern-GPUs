@@ -87,7 +87,9 @@ def write_research_artifacts(
     )
     store.save_text_artifact(
         _REPORT_FILENAMES["experiment_report"],
-        _experiment_markdown(task, ordered, summary, strategy_plans),
+        _experiment_markdown(
+            task, ordered, summary, run_metadata, strategy_plans
+        ),
     )
     return expected_report_paths(store.root)
 
@@ -186,12 +188,14 @@ def _experiment_markdown(
     task: TaskSpec,
     records: Sequence[CandidateRecord],
     summary: SearchSummary,
+    run_metadata: Mapping[str, Any],
     strategy_plans: Sequence[Mapping[str, Any]],
 ) -> str:
     ledger = summary.cost_ledger
     api = dict(ledger.get("api") or {})
     evaluator = dict(ledger.get("evaluator") or {})
     hardware = dict(ledger.get("hardware") or {})
+    generator_metadata = dict(run_metadata.get("generator") or {})
     lines = [
         "# Optimization Experiment Report",
         "",
@@ -210,6 +214,8 @@ def _experiment_markdown(
         % summary.structural_search_policy,
         "| Strategy allocation policy | `%s` |"
         % summary.strategy_allocation_policy,
+        "| Concurrent generation agents | %s |"
+        % _format(generator_metadata.get("agent_workers", 1)),
         "| AI planner calls | %d |" % summary.planner_calls,
         "| Planner fallbacks | %d |" % summary.planner_fallbacks,
         "| Completed rounds | %d |" % summary.completed_rounds,

@@ -12,7 +12,11 @@ from typing import Optional, Sequence
 from .archive import ArtifactStore
 from .controller import OptimizationController
 from .factory import create_backend
-from .generators import ApiGeneratorConfig, OpenAICompatibleGenerator
+from .generators import (
+    ApiGeneratorConfig,
+    OpenAICompatibleGenerator,
+    ParallelCandidateGenerator,
+)
 from .manifest import collect_environment_manifest
 from .progress import ProgressReporter
 from .schema import Candidate, TaskSpec
@@ -78,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-retries", type=int, default=3)
     parser.add_argument("--api-retry-backoff", type=float, default=2.0)
+    parser.add_argument(
+        "--agent-workers",
+        type=int,
+        default=1,
+        help=(
+            "Maximum concurrent hosted-API generation agents. GPU evaluation "
+            "remains serialized; default 1 preserves the existing behavior."
+        ),
+    )
     parser.add_argument(
         "--no-json-response-format",
         action="store_true",
@@ -148,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.agent_workers <= 0:
+        raise SystemExit("--agent-workers must be positive")
     if args.promotions_per_round is not None and args.promotions_per_round <= 0:
         raise SystemExit("--promotions-per-round must be positive")
     for name in ("api_input_price_per_million", "api_output_price_per_million"):
@@ -195,23 +210,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             user_characters=size.get("user_characters"),
         )
 
-    generator = OpenAICompatibleGenerator(
-        ApiGeneratorConfig(
-            api_url=api_url,
-            model=api_model,
-            api_key_environment_variable=args.api_key_env,
-            timeout_seconds=args.api_timeout,
-            temperature=args.api_temperature,
-            max_output_tokens=args.api_max_output_tokens,
-            planner_max_output_tokens=args.api_planner_max_output_tokens,
-            max_input_tokens=args.api_max_input_tokens,
-            max_tokens_field=args.api_max_tokens_field,
-            max_retries=args.api_retries,
-            retry_backoff_seconds=args.api_retry_backoff,
-            use_json_object=not args.no_json_response_format,
-        ),
-        request_observer=report_api_request,
+    api_config = ApiGeneratorConfig(
+        api_url=api_url,
+        model=api_model,
+        api_key_environment_variable=args.api_key_env,
+        timeout_seconds=args.api_timeout,
+        temperature=args.api_temperature,
+        max_output_tokens=args.api_max_output_tokens,
+        planner_max_output_tokens=args.api_planner_max_output_tokens,
+        max_input_tokens=args.api_max_input_tokens,
+        max_tokens_field=args.api_max_tokens_field,
+        max_retries=args.api_retries,
+        retry_backoff_seconds=args.api_retry_backoff,
+        use_json_object=not args.no_json_response_format,
     )
+
+    def create_generator():
+        return OpenAICompatibleGenerator(
+            api_config,
+            request_observer=report_api_request,
+        )
+
+    if args.agent_workers == 1:
+        generator = create_generator()
+    else:
+        generator = ParallelCandidateGenerator(
+            create_generator,
+            max_workers=args.agent_workers,
+        )
     output = Path(args.output).expanduser() if args.output else _default_output(task)
     output = output.resolve()
     if args.resume and not output.exists():
@@ -224,7 +250,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.8.0",
+        "framework_version": "0.9.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -237,6 +263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "max_tokens_field": args.api_max_tokens_field,
             "max_retries": args.api_retries,
             "api_key_environment_variable": args.api_key_env,
+            "agent_workers": args.agent_workers,
         },
         "experiment": {
             "selection_policy": args.selection_policy,
@@ -245,6 +272,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "compiled_deduplication": not args.no_compiled_dedup,
             "structural_search_policy": args.structural_search_policy,
             "strategy_allocation_policy": args.strategy_allocation_policy,
+            "agent_workers": args.agent_workers,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,
         },

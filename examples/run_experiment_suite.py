@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-model")
     parser.add_argument("--api-key-env", default="KERNEL_OPT_API_KEY")
     parser.add_argument("--api-temperature", type=float)
+    parser.add_argument("--agent-workers", type=int, default=1)
     parser.add_argument("--api-input-price-per-million", type=float)
     parser.add_argument("--api-output-price-per-million", type=float)
     return parser
@@ -68,6 +69,7 @@ def build_run_command(
     api_model: Optional[str] = None,
     api_key_env: str = "KERNEL_OPT_API_KEY",
     api_temperature: Optional[float] = None,
+    agent_workers: int = 1,
     input_price: Optional[float] = None,
     output_price: Optional[float] = None,
     resume: bool = False,
@@ -92,6 +94,8 @@ def build_run_command(
         strategy_allocation_policy,
         "--api-key-env",
         api_key_env,
+        "--agent-workers",
+        str(agent_workers),
     ]
     for flag, value in (
         ("--api-url", api_url),
@@ -122,6 +126,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if promotions <= 0:
         raise SystemExit("--promotions-per-round must be positive")
+    if args.agent_workers <= 0:
+        raise SystemExit("--agent-workers must be positive")
     policies = [item.strip() for item in args.policies.split(",") if item.strip()]
     if not policies or any(item not in VALID_POLICIES for item in policies):
         raise SystemExit("--policies must contain: %s" % ", ".join(VALID_POLICIES))
@@ -144,6 +150,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 api_model=args.api_model,
                 api_key_env=args.api_key_env,
                 api_temperature=args.api_temperature,
+                agent_workers=args.agent_workers,
                 input_price=args.api_input_price_per_million,
                 output_price=args.api_output_price_per_million,
                 resume=args.resume and output.exists(),
@@ -183,6 +190,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "promotions_per_round": promotions,
         "profile_policy": args.profile_policy,
         "strategy_allocation_policy": args.strategy_allocation_policy,
+        "agent_workers": args.agent_workers,
         "runs": rows,
         "comparison_note": (
             "adaptive, model-top, and random use the same per-round promotion budget; "

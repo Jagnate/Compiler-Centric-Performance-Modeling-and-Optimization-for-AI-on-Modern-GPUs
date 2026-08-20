@@ -197,6 +197,36 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --output results/flash_attention_api_run
 ```
 
+Candidate generation uses one hosted-model agent by default. Increase the
+bounded worker pool when the provider quota can sustain concurrent requests:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output results/matmul_two_agents \
+  --agent-workers 2
+```
+
+`--agent-workers` controls concurrent source-generation calls, not concurrent
+GPU measurements. For six planned slots, two workers receive balanced groups of
+three slots, use isolated API clients and prompt contexts, and run at the same
+time. Results are merged in deterministic slot order before validation. The
+round planner, repair queue, TileSight evaluation, correctness, CUDA Event
+timing, and NCU remain under the single controller; in particular, hardware
+evaluation is serialized on one GPU to avoid measurement interference.
+
+The default `--agent-workers 1` preserves the original single-request path. A
+worker failure is archived in the aggregate API record; successful sibling
+results can continue the round, while failure of every worker stops at the
+normal resumable checkpoint. Parallel calls repeat some source and evidence
+context and reserve provider capacity independently, so they consume more TPM
+than one request returning the same number of candidates. Start with two
+workers and reduce to one when approaching the provider's token-per-minute
+limit. `task.json`, `experiment_manifest.json`, and `experiment_report.md`
+record the configured worker count, while `api_calls/*.json` records active workers,
+per-worker strategy slots, usage, failures, and exchanges.
+
 The default experiment uses `--selection-policy adaptive`,
 `--profile-policy milestone`, `--strategy-allocation-policy ai-planned`,
 `--structural-search-policy enforce`, and compiled-code deduplication. To give

@@ -1052,6 +1052,15 @@ class OptimizationController:
         metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
         self._record_api_attempts(metadata)
         self._accumulate_generator_usage(metadata.get("usage"))
+        failed_workers = int(metadata.get("failed_workers", 0) or 0)
+        if failed_workers:
+            self.progress.emit(
+                "api_partial_failure",
+                "Some generation agents failed; continuing with completed results.",
+                round=round_number,
+                failed_workers=failed_workers,
+                successful_workers=int(metadata.get("successful_workers", 0) or 0),
+            )
         proposals = bind_strategy_assignments(proposals, strategy_assignments)
         self.store.save_api_call(
             "round-%03d-generate" % round_number,

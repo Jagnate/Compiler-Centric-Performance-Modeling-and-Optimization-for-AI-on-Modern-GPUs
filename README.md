@@ -119,7 +119,7 @@ GPU evaluator machine:
 - TileSight with the TIR interface;
 - CUDA and a supported GPU;
 - NCU for milestone profiling;
-- PyTorch for the included Matmul and Flash Attention reference checks.
+- PyTorch for the included workload reference checks.
 
 Install the controller in editable mode:
 
@@ -138,17 +138,32 @@ examples/tilelang_matmul_kernel.py             API-editable Matmul seed
 examples/tilelang_matmul_task.json             Matmul optimization contract
 examples/tilelang_flash_attention_kernel.py    API-editable Flash Attention seed
 examples/tilelang_flash_attention_task.json    Flash Attention contract
+examples/tilelang_rms_norm_kernel.py           API-editable weighted RMSNorm seed
+examples/tilelang_rms_norm_task.json           RMSNorm optimization contract
+examples/tilelang_conv2d_kernel.py             API-editable NHWC Conv2D seed
+examples/tilelang_conv2d_task.json             Conv2D optimization contract
 examples/tilesight_kernel_evaluator.py         shared TileSight/CUDA/NCU runtime
 examples/workloads/matmul.py                   immutable Matmul semantics
 examples/workloads/flash_attention.py          immutable attention semantics
+examples/workloads/rms_norm.py                 immutable weighted RMSNorm semantics
+examples/workloads/conv2d.py                   immutable NHWC/HWIO Conv2D semantics
 ```
 
-Both tasks target an RTX 3090. Matmul uses a 2048 x 2048 x 2048 FP16 primary
-workload. Flash Attention uses B=1, H=32, S=1024, D=64 FP16 BSHD input. Edit
-the architecture, TileLang target, and semantic case shapes together when
-running on another GPU or workload.
+All four example tasks target an RTX 3090. Matmul uses a 2048 x 2048 x 2048
+FP16 primary workload. Flash Attention uses B=1, H=32, S=1024, D=64 FP16 BSHD
+input. Weighted RMSNorm uses 8192 rows with hidden size 4096. Conv2D uses NHWC
+N=32, H=W=56, C=64 input and an HWIO 3 x 3 x 64 x 128 filter.
 
-Before spending hosted-API credits, validate either seed through the exact
+Input shapes are semantic task data rather than a fixed schedule search space.
+Change `workload.factory_arguments` in the selected task JSON to set the primary
+shape. Each `search_cases` or `final_cases` entry inherits that primary shape
+and may override only the dimensions it needs. Keep at least one public shape
+and one held-out final shape when testing generalization. Schedule defaults such
+as block tiles, stage count, and thread count stay in the Python seed so the
+hosted model can modify them as implementation choices. Edit the architecture
+and TileLang target together when running on another GPU.
+
+Before spending hosted-API credits, validate each seed through the exact
 generic evaluator used by search:
 
 ```bash
@@ -161,9 +176,19 @@ PYTHONPATH=src python3 examples/validate_seed_kernel.py \
   --source examples/tilelang_flash_attention_kernel.py \
   --task examples/tilelang_flash_attention_task.json \
   --output results/flash_attention_seed_validation
+
+PYTHONPATH=src python3 examples/validate_seed_kernel.py \
+  --source examples/tilelang_rms_norm_kernel.py \
+  --task examples/tilelang_rms_norm_task.json \
+  --output results/rms_norm_seed_validation
+
+PYTHONPATH=src python3 examples/validate_seed_kernel.py \
+  --source examples/tilelang_conv2d_kernel.py \
+  --task examples/tilelang_conv2d_task.json \
+  --output results/conv2d_seed_validation
 ```
 
-Add `--profile` to either command for one NCU collection. Without that flag the
+Add `--profile` to any command for one NCU collection. Without that flag the
 smoke run performs TileSight modeling, public multi-case correctness and CUDA
 Event timing, then a fresh held-out correctness and robust timing pass.
 
@@ -195,6 +220,20 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --source examples/tilelang_flash_attention_kernel.py \
   --task examples/tilelang_flash_attention_task.json \
   --output results/flash_attention_api_run
+```
+
+RMSNorm and Conv2D use the same command shape:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_rms_norm_kernel.py \
+  --task examples/tilelang_rms_norm_task.json \
+  --output results/rms_norm_api_run
+
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_conv2d_kernel.py \
+  --task examples/tilelang_conv2d_task.json \
+  --output results/conv2d_api_run
 ```
 
 Candidate generation uses one hosted-model agent by default. Increase the

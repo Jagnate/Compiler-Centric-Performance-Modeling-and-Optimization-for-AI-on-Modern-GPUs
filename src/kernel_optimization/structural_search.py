@@ -951,6 +951,10 @@ def _kernel_family(task: TaskSpec) -> str:
         return "flash-attention"
     if "matmul" in text or "gemm" in text:
         return "matmul"
+    if "rmsnorm" in text or "rms_norm" in text or "rms norm" in text:
+        return "rmsnorm"
+    if "conv2d" in text or "convolution" in text:
+        return "conv2d"
     return "generic"
 
 
@@ -1011,6 +1015,68 @@ def _family_hint(family: str, strategy_id: str) -> str:
             "work-decomposition": (
                 "Consider online-softmax organization, recomputation, fusion, or persistent "
                 "query tiles while preserving exact semantics."
+            ),
+        },
+        "rmsnorm": {
+            "parameter-tuning": (
+                "Explore compatible row tiles, hidden-dimension chunks, thread counts, "
+                "and vector widths."
+            ),
+            "open-structural-exploration": (
+                "Look beyond the named lanes for a concrete RMSNorm reduction, dataflow, "
+                "or fusion change supported by APIs already available in the source "
+                "environment."
+            ),
+            "memory-layout": (
+                "Consider fragment/shared-memory organization, padding, and intermediate "
+                "reduction storage while preserving the normalization contract."
+            ),
+            "data-movement": (
+                "Consider coalesced or vectorized X, weight, and output accesses and avoid "
+                "redundant rereads across reduction and normalization passes."
+            ),
+            "execution-mapping": (
+                "Consider how rows and hidden-dimension reduction chunks map across CTAs, "
+                "warps, and threads."
+            ),
+            "pipeline-structure": (
+                "Consider overlap between reduction chunks, weight loads, and output "
+                "production rather than only changing a tile parameter."
+            ),
+            "work-decomposition": (
+                "Consider one-pass versus two-pass reduction, split reductions, or fused "
+                "epilogues while preserving exact RMSNorm semantics."
+            ),
+        },
+        "conv2d": {
+            "parameter-tuning": (
+                "Explore compatible CTA M/N/K tiles, thread counts, and stage depths for "
+                "the convolution shape."
+            ),
+            "open-structural-exploration": (
+                "Look beyond the named lanes for a direct-convolution, implicit-GEMM, "
+                "dataflow, or decomposition change supported by APIs already available "
+                "in the source environment."
+            ),
+            "memory-layout": (
+                "Consider NHWC/HWIO access order, im2col/shared-memory organization, "
+                "padding, and swizzles while preserving the convolution contract."
+            ),
+            "data-movement": (
+                "Consider cooperative or vectorized activation/filter staging, im2col "
+                "traffic, reuse, and the output write path."
+            ),
+            "execution-mapping": (
+                "Consider CTA and warp ownership of output spatial positions and channels, "
+                "including tensor-core mapping."
+            ),
+            "pipeline-structure": (
+                "Consider overlap among im2col generation, filter staging, and GEMM "
+                "execution rather than merely changing num_stages."
+            ),
+            "work-decomposition": (
+                "Consider spatial/channel decomposition, direct versus implicit-GEMM "
+                "organization, fusion, or persistent output tiles without changing semantics."
             ),
         },
     }

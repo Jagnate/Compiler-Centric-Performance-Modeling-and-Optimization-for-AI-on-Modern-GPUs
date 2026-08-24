@@ -28,31 +28,38 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class GenericEvaluatorTests(unittest.TestCase):
-    def test_matmul_and_flash_tasks_share_one_evaluator_runtime(self) -> None:
-        matmul = TaskSpec.from_json_file(
-            REPOSITORY_ROOT / "examples" / "tilelang_matmul_task.json"
-        )
-        flash = TaskSpec.from_json_file(
-            REPOSITORY_ROOT / "examples" / "tilelang_flash_attention_task.json"
-        )
-        self.assertEqual(matmul.evaluator["command"], flash.evaluator["command"])
+    def test_all_workloads_share_one_evaluator_runtime(self) -> None:
+        tasks = {
+            name: TaskSpec.from_json_file(
+                REPOSITORY_ROOT / "examples" / f"tilelang_{name}_task.json"
+            )
+            for name in ("matmul", "flash_attention", "rms_norm", "conv2d")
+        }
+        commands = {tuple(task.evaluator["command"]) for task in tasks.values()}
+        plugins = {
+            task.evaluator["runtime"]["plugin"] for task in tasks.values()
+        }
+        self.assertEqual(len(commands), 1)
         self.assertEqual(
-            matmul.evaluator["command"],
+            list(commands.pop()),
             ["python3", "examples/tilesight_kernel_evaluator.py"],
         )
-        self.assertNotEqual(
-            matmul.evaluator["runtime"]["plugin"],
-            flash.evaluator["runtime"]["plugin"],
-        )
-        self.assertGreaterEqual(len(matmul.evaluator["runtime"]["final_cases"]), 1)
-        self.assertGreaterEqual(len(flash.evaluator["runtime"]["final_cases"]), 1)
-        for task in (matmul, flash):
-            arguments = set(task.workload["factory_arguments"])
-            self.assertTrue(
-                arguments.isdisjoint(
-                    {"block_m", "block_n", "block_k", "num_stages", "threads"}
-                )
+        self.assertEqual(len(plugins), len(tasks))
+        schedule_arguments = {
+            "block_m",
+            "block_n",
+            "block_k",
+            "block_rows",
+            "block_hidden",
+            "num_stages",
+            "threads",
+        }
+        for task in tasks.values():
+            self.assertGreaterEqual(
+                len(task.evaluator["runtime"]["final_cases"]), 1
             )
+            arguments = set(task.workload["factory_arguments"])
+            self.assertTrue(arguments.isdisjoint(schedule_arguments))
             self.assertTrue(task.evaluator["runtime"]["model_collect_ptxas"])
 
     def test_held_out_cases_are_not_in_generation_prompt(self) -> None:

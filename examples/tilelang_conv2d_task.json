@@ -1,0 +1,124 @@
+{
+  "task_id": "tilelang_conv2d_n32_h56_w56_c64_f128_k3_rtx3090",
+  "description": "Optimize a TileLang FP16 NHWC Conv2D kernel for an RTX 3090.",
+  "reference": "For NHWC data and HWIO filters, compute an FP16 Conv2D with configurable batch, spatial shape, channels, square kernel, stride, dilation, and padding using float32 accumulation.",
+  "entrypoint": "make_conv2d_program",
+  "language": "python",
+  "target": {
+    "architecture": "rtx3090",
+    "tilelang_target": "cuda -arch=sm_86",
+    "write_policy": "write-through"
+  },
+  "workload": {
+    "factory_arguments": {
+      "batch": 32,
+      "in_height": 56,
+      "in_width": 56,
+      "in_channels": 64,
+      "out_channels": 128,
+      "kernel_size": 3,
+      "stride": 1,
+      "dilation": 1,
+      "padding": 1
+    },
+    "output_indices": [2],
+    "atol": 0.02,
+    "rtol": 0.02,
+    "max_mismatched_ratio": 0.01,
+    "warmup_ms": 25.0,
+    "rep_ms": 100.0,
+    "benchmark_backend": "event",
+    "return_mode": "median"
+  },
+  "constraints": {
+    "preserve_entrypoint": true,
+    "max_source_bytes": 250000,
+    "required_fragments": [
+      "from tilelang import language as T",
+      "def make_conv2d_program"
+    ],
+    "forbidden_fragments": [
+      "subprocess",
+      "os.system",
+      "eval(",
+      "exec("
+    ]
+  },
+  "budget": {
+    "rounds": 4,
+    "proposals_per_round": 6,
+    "beam_width": 3,
+    "min_promotions_per_round": 2,
+    "max_promotions_per_round": 4,
+    "ncu_improvement_threshold": 0.05,
+    "ncu_max_staleness_rounds": 3,
+    "ncu_plateau_rounds": 2,
+    "max_repairs_per_round": 2,
+    "max_repair_depth": 2,
+    "calibration_min_samples": 2,
+    "final_validation_candidates": 3,
+    "random_seed": 17
+  },
+  "evaluator": {
+    "type": "command",
+    "command": ["python3", "examples/tilesight_kernel_evaluator.py"],
+    "working_directory": "..",
+    "timeout_seconds": 1800,
+    "environment": {
+      "PYTHONPATH": "../TileSight"
+    },
+    "runtime": {
+      "plugin": "examples/workloads/conv2d.py",
+      "architecture_profile": "ncu",
+      "require_target_match": true,
+      "model_collect_ptxas": true,
+      "measurement_repeats": 2,
+      "final_repeats": 5,
+      "search_cases": [
+        {
+          "case_id": "primary-n32-h56-w56-c64-f128-k3-s1"
+        },
+        {
+          "case_id": "public-n8-h28-w28-c64-f128-k3-s1",
+          "factory_arguments": {
+            "batch": 8,
+            "in_height": 28,
+            "in_width": 28
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-n16-h56-w56-c64-f128-k3-s2",
+          "factory_arguments": {
+            "batch": 16,
+            "in_height": 56,
+            "in_width": 56,
+            "stride": 2
+          }
+        },
+        {
+          "case_id": "heldout-n16-h28-w28-c128-f256-k1-s1",
+          "factory_arguments": {
+            "batch": 16,
+            "in_height": 28,
+            "in_width": 28,
+            "in_channels": 128,
+            "out_channels": 256,
+            "kernel_size": 1,
+            "stride": 1,
+            "dilation": 1,
+            "padding": 0
+          }
+        }
+      ],
+      "profile_directory": "results/ncu_profiles/conv2d",
+      "ncu_set": "full",
+      "ncu_cache_control": "all"
+    }
+  },
+  "metadata": {
+    "kernel_family": "conv2d",
+    "purpose": "End-to-end hosted-API source optimization example."
+  }
+}

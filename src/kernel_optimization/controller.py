@@ -59,6 +59,56 @@ _PHASE_ORDER = {
 }
 
 
+def resolve_evaluation_policies(
+    *,
+    evaluation_policy: str,
+    tir_evidence_policy: str,
+    selection_policy: str,
+    profile_policy: str,
+    compiled_deduplication: bool,
+) -> Dict[str, Any]:
+    """Resolve requested ablation controls into executable controller policies."""
+
+    if evaluation_policy not in {"tilesight", "cuda-event", "ncu"}:
+        raise ValueError(
+            "evaluation_policy must be tilesight, cuda-event, or ncu"
+        )
+    if tir_evidence_policy not in {"auto", "visible", "hidden"}:
+        raise ValueError(
+            "tir_evidence_policy must be auto, visible, or hidden"
+        )
+    effective_tir_evidence = (
+        "visible"
+        if tir_evidence_policy == "auto" and evaluation_policy == "tilesight"
+        else "hidden"
+        if tir_evidence_policy == "auto"
+        else tir_evidence_policy
+    )
+    if evaluation_policy != "tilesight" and effective_tir_evidence == "visible":
+        raise ValueError(
+            "tir_evidence_policy=visible requires evaluation_policy=tilesight"
+        )
+
+    model_enabled = evaluation_policy == "tilesight"
+    return {
+        "evaluation_policy": evaluation_policy,
+        "requested_tir_evidence_policy": tir_evidence_policy,
+        "tir_evidence_policy": effective_tir_evidence,
+        "requested_selection_policy": selection_policy,
+        "selection_policy": selection_policy if model_enabled else "measure-all",
+        "requested_profile_policy": profile_policy,
+        "profile_policy": (
+            profile_policy
+            if model_enabled
+            else "every-candidate"
+            if evaluation_policy == "ncu"
+            else "none"
+        ),
+        "requested_compiled_deduplication": bool(compiled_deduplication),
+        "compiled_deduplication": bool(compiled_deduplication) and model_enabled,
+    }
+
+
 class OptimizationController:
     """Generate source, model, promote, measure, profile, and archive candidates."""
 
@@ -86,6 +136,8 @@ class OptimizationController:
         structural_search_policy: str = "off",
         strategy_allocation_policy: str = "fixed",
         incumbent_snapshot_interval_seconds: float = 300.0,
+        evaluation_policy: str = "tilesight",
+        tir_evidence_policy: str = "auto",
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -100,10 +152,31 @@ class OptimizationController:
         self.preflight_calls = preflight_calls
         self.api_request_attempts = preflight_calls
         self.preflight_elapsed_seconds = float(preflight_elapsed_seconds)
-        self.selection_policy_name = selection_policy
-        self.profile_policy_name = profile_policy
+        policies = resolve_evaluation_policies(
+            evaluation_policy=evaluation_policy,
+            tir_evidence_policy=tir_evidence_policy,
+            selection_policy=selection_policy,
+            profile_policy=profile_policy,
+            compiled_deduplication=compiled_deduplication,
+        )
+        self.evaluation_policy = str(policies["evaluation_policy"])
+        self.requested_tir_evidence_policy = str(
+            policies["requested_tir_evidence_policy"]
+        )
+        self.tir_evidence_policy = str(policies["tir_evidence_policy"])
+        self.requested_selection_policy_name = str(
+            policies["requested_selection_policy"]
+        )
+        self.selection_policy_name = str(policies["selection_policy"])
+        self.requested_profile_policy_name = str(
+            policies["requested_profile_policy"]
+        )
+        self.profile_policy_name = str(policies["profile_policy"])
         self.fixed_promotions_per_round = fixed_promotions_per_round
-        self.compiled_deduplication = bool(compiled_deduplication)
+        self.requested_compiled_deduplication = bool(
+            policies["requested_compiled_deduplication"]
+        )
+        self.compiled_deduplication = bool(policies["compiled_deduplication"])
         self.api_input_price_per_million = api_input_price_per_million
         self.api_output_price_per_million = api_output_price_per_million
         if structural_search_policy not in {"enforce", "observe", "off"}:
@@ -138,9 +211,14 @@ class OptimizationController:
             if value is not None and value < 0:
                 raise ValueError("%s must be non-negative" % name)
         self.selection = create_selection_policy(
-            selection_policy, task.budget, fixed_promotions_per_round
+            self.selection_policy_name, task.budget, fixed_promotions_per_round
         )
-        self.milestones = create_profile_policy(profile_policy, task.budget)
+        milestone_policy = (
+            self.profile_policy_name
+            if self.evaluation_policy == "tilesight"
+            else "none"
+        )
+        self.milestones = create_profile_policy(milestone_policy, task.budget)
         self.trust = TrustTracker()
         self.calibrator = LatencyCalibrator(task.budget.calibration_min_samples)
         self.analyzer = BottleneckAnalyzer()
@@ -362,8 +440,12 @@ class OptimizationController:
         generated = self._records_for_ids(candidate_ids)
 
         if not self._phase_at_least(phase, "modeled"):
-            modeled = self._model_candidates(generated, round_number)
-            repaired = self._repair_model_failures(modeled, round_number)
+            if self.evaluation_policy == "tilesight":
+                modeled = self._model_candidates(generated, round_number)
+                repaired = self._repair_model_failures(modeled, round_number)
+            else:
+                modeled = self._skip_model_candidates(generated, round_number)
+                repaired = []
             modeled.extend(repaired)
             candidate_ids = _unique(
                 candidate_ids
@@ -379,17 +461,36 @@ class OptimizationController:
         else:
             modeled = generated
 
-        promotable = [
-            item
-            for item in modeled
-            if item.model
-            and item.model.valid
-            and item.compiled_equivalent_to is None
-        ]
+        if self.evaluation_policy == "tilesight":
+            promotable = [
+                item
+                for item in modeled
+                if item.model
+                and item.model.valid
+                and item.compiled_equivalent_to is None
+            ]
+        else:
+            promotable = [
+                item
+                for item in modeled
+                if item.failure is None and item.measurement is None
+            ]
         if not self._phase_at_least(phase, "selected"):
-            selected = self.selection.select(
-                self.task, promotable, self.beam, self.trust
-            )
+            if self.evaluation_policy == "tilesight":
+                selected = self.selection.select(
+                    self.task, promotable, self.beam, self.trust
+                )
+            else:
+                selected = list(promotable)
+                reason = "evaluation-policy:%s:measure-all" % self.evaluation_policy
+                for record in selected:
+                    if reason not in record.selection_reasons:
+                        record.selection_reasons.append(reason)
+                    record.decision_reason = (
+                        "TileSight is disabled; every static-valid candidate is "
+                        "scheduled for hardware evaluation."
+                    )
+                    self.store.save_candidate(record)
             selected_ids = [item.candidate.candidate_id for item in selected]
             selected_set = set(selected_ids)
             for record in promotable:
@@ -415,6 +516,7 @@ class OptimizationController:
                 round=round_number,
                 selected=len(selected_ids),
                 modeled=len(promotable),
+                evaluation_policy=self.evaluation_policy,
             )
         selected = self._records_for_ids(selected_ids)
 
@@ -424,6 +526,8 @@ class OptimizationController:
                 selected, round_number
             )
             measured.extend(repair_measured)
+            if self.evaluation_policy == "ncu":
+                self._profile_all_measured(measured, round_number)
             candidate_ids = _unique(
                 candidate_ids
                 + [item.candidate.candidate_id for item in repair_records]
@@ -462,12 +566,13 @@ class OptimizationController:
             best_before = self.records[str(best_before_id)]
 
         if not self._phase_at_least(phase, "round_completed"):
-            self._maybe_profile_round(
-                round_number,
-                best_before,
-                self.beam[0],
-                measured,
-            )
+            if self.evaluation_policy == "tilesight":
+                self._maybe_profile_round(
+                    round_number,
+                    best_before,
+                    self.beam[0],
+                    measured,
+                )
             self._record_round_strategy_outcomes(round_number)
             self._checkpoint(
                 phase="round_completed",
@@ -490,24 +595,33 @@ class OptimizationController:
         record = CandidateRecord(candidate=candidate)
         self.records[candidate.candidate_id] = record
         self.store.save_candidate(record)
-        try:
-            record.model = self._evaluate(
-                "model", candidate, lambda: self.backend.model(self.task, candidate)
+        if self.evaluation_policy == "tilesight":
+            try:
+                record.model = self._evaluate(
+                    "model", candidate, lambda: self.backend.model(self.task, candidate)
+                )
+            except Exception as error:
+                record.model = ModelEvaluation(
+                    valid=False,
+                    bottleneck="compile-or-model-failure",
+                    diagnostics=["%s: %s" % (type(error).__name__, error)],
+                )
+            if not record.model.valid:
+                record.failure = FailureClassifier.model(record.model)
+                self._diagnose_and_remember(record, None, round_number=0)
+                record.state = "seed-model-invalid"
+                self.store.save_candidate(record)
+                raise RuntimeError(
+                    "the input kernel is invalid according to the model backend"
+                )
+            record.model = self.calibrator.apply(self.task, record.model)
+            self._register_compiled_identity(record)
+        else:
+            record.state = "model-skipped"
+            record.decision_reason = (
+                "TileSight model evaluation is disabled by the evaluation policy."
             )
-        except Exception as error:
-            record.model = ModelEvaluation(
-                valid=False,
-                bottleneck="compile-or-model-failure",
-                diagnostics=["%s: %s" % (type(error).__name__, error)],
-            )
-        if not record.model.valid:
-            record.failure = FailureClassifier.model(record.model)
-            self._diagnose_and_remember(record, None, round_number=0)
-            record.state = "seed-model-invalid"
             self.store.save_candidate(record)
-            raise RuntimeError("the input kernel is invalid according to the model backend")
-        record.model = self.calibrator.apply(self.task, record.model)
-        self._register_compiled_identity(record)
         try:
             record.measurement = self._evaluate(
                 "measure", candidate, lambda: self.backend.measure(self.task, candidate)
@@ -524,7 +638,9 @@ class OptimizationController:
             self.store.save_candidate(record)
             raise RuntimeError("the input kernel failed correctness")
         self.calibrator.observe(self.task, record)
-        if self.milestones.profile_seed:
+        if self.evaluation_policy == "ncu":
+            record.profile = self._profile_candidate(candidate)
+        elif self.evaluation_policy == "tilesight" and self.milestones.profile_seed:
             record.profile = self._profile_candidate(candidate)
             if record.profile.valid:
                 self.milestones.mark_profiled(record, round_number=0)
@@ -540,6 +656,7 @@ class OptimizationController:
                 "source_sha256": candidate.source_sha256,
                 "latency_ms": record.measurement.latency_ms,
                 "profile_valid": record.profile.valid if record.profile else None,
+                "evaluation_policy": self.evaluation_policy,
             },
         )
         self.progress.emit(
@@ -555,7 +672,9 @@ class OptimizationController:
         self, expected_seed: Candidate, state: Mapping[str, Any]
     ) -> CandidateRecord:
         archived_experiment = state.get("experiment")
-        if archived_experiment and dict(archived_experiment) != self._experiment_config():
+        if archived_experiment and self._normalized_experiment_config(
+            archived_experiment
+        ) != self._normalized_experiment_config(self._experiment_config()):
             raise ValueError(
                 "resume experiment policies do not match the archived checkpoint"
             )
@@ -1259,7 +1378,7 @@ class OptimizationController:
         )
         failure_payload = {
             "failure": failure.to_dict(),
-            "diagnosis": failed.diagnosis.to_dict() if failed.diagnosis else None,
+            "diagnosis": self._diagnosis_for_prompt(failed),
         }
         try:
             proposal: CandidateProposal = repair_method(
@@ -1502,6 +1621,30 @@ class OptimizationController:
                 queue.append(repaired)
         return repaired_records
 
+    def _skip_model_candidates(
+        self, records: Sequence[CandidateRecord], round_number: int
+    ) -> List[CandidateRecord]:
+        """Mark candidates for direct hardware evaluation without TileSight."""
+
+        for record in records:
+            if record.failure is not None or record.measurement is not None:
+                continue
+            record.state = "model-skipped"
+            record.decision_reason = (
+                "TileSight model evaluation is disabled by evaluation policy %s."
+                % self.evaluation_policy
+            )
+            self.store.save_candidate(record)
+        self.store.append_event(
+            "round_model_skipped",
+            {
+                "round": round_number,
+                "evaluation_policy": self.evaluation_policy,
+                "candidates": len(records),
+            },
+        )
+        return list(records)
+
     def _measure_candidates(
         self, records: Sequence[CandidateRecord], round_number: int
     ) -> List[CandidateRecord]:
@@ -1546,6 +1689,48 @@ class OptimizationController:
         self._rebuild_trust()
         return measured
 
+    def _profile_all_measured(
+        self, records: Sequence[CandidateRecord], round_number: int
+    ) -> None:
+        """Collect NCU feedback for every correctness-passing candidate."""
+
+        unique = {
+            record.candidate.candidate_id: record
+            for record in records
+            if record.is_measured_correct
+        }
+        ordered = [unique[name] for name in sorted(unique)]
+        for index, record in enumerate(ordered, start=1):
+            if record.profile is None:
+                self.progress.emit(
+                    "profile_progress",
+                    "Collecting an NCU profile for every correct candidate.",
+                    round=round_number,
+                    candidate=index,
+                    total=len(ordered),
+                    candidate_id=record.candidate.candidate_id,
+                )
+                record.profile = self._profile_candidate(record.candidate)
+            reason = "ncu:evaluation-policy:every-candidate"
+            if reason not in record.selection_reasons:
+                record.selection_reasons.append(reason)
+            parent = self.records.get(record.candidate.parent_id or "")
+            self._diagnose_and_remember(record, parent, round_number)
+            self.store.save_candidate(record)
+            self.store.append_event(
+                (
+                    "candidate_profiled"
+                    if record.profile.valid
+                    else "candidate_profile_failed"
+                ),
+                {
+                    "round": round_number,
+                    "candidate_id": record.candidate.candidate_id,
+                    "reason": "evaluation-policy:every-candidate",
+                    "error": record.profile.error,
+                },
+            )
+
     def _repair_measurement_failures(
         self, records: Sequence[CandidateRecord], round_number: int
     ) -> tuple[List[CandidateRecord], List[CandidateRecord]]:
@@ -1560,7 +1745,10 @@ class OptimizationController:
             if repaired.failure is not None:
                 queue.append(repaired)
                 continue
-            self._model_candidates([repaired], round_number)
+            if self.evaluation_policy == "tilesight":
+                self._model_candidates([repaired], round_number)
+            else:
+                self._skip_model_candidates([repaired], round_number)
             repair_records.append(repaired)
             if repaired.failure is not None:
                 queue.append(repaired)
@@ -1857,15 +2045,92 @@ class OptimizationController:
                 if record.measurement
                 else None,
                 "profile": record.profile.to_dict() if record.profile else None,
-                "diagnosis": (
-                    record.diagnosis.to_dict() if record.diagnosis else None
-                ),
+                "diagnosis": self._diagnosis_for_prompt(record),
             },
-            "predicted": record.model.to_dict() if record.model else None,
-            "model_trust": self.trust.to_dict(),
-            "calibration": self.calibrator.to_dict(),
-            "shared_memory": self.evidence_memory.for_prompt(record),
+            "predicted": (
+                record.model.to_dict()
+                if self.tir_evidence_policy == "visible" and record.model
+                else None
+            ),
+            "model_trust": (
+                self.trust.to_dict()
+                if self.tir_evidence_policy == "visible"
+                else None
+            ),
+            "calibration": (
+                self.calibrator.to_dict()
+                if self.tir_evidence_policy == "visible"
+                else None
+            ),
+            "shared_memory": self._shared_evidence_for_prompt(record),
         }
+
+    def _diagnosis_for_prompt(
+        self, record: CandidateRecord
+    ) -> Optional[Dict[str, Any]]:
+        diagnosis = record.diagnosis
+        if diagnosis is None:
+            return None
+        if (
+            self.tir_evidence_policy == "hidden"
+            and "tilesight" in diagnosis.source.lower()
+        ):
+            return None
+        return diagnosis.to_dict()
+
+    def _shared_evidence_for_prompt(
+        self, record: CandidateRecord
+    ) -> List[Dict[str, Any]]:
+        lessons = self.evidence_memory.for_prompt(record)
+        if self.tir_evidence_policy == "visible":
+            return lessons
+
+        sanitized = []
+        for original in lessons:
+            lesson = dict(original)
+            supporting = dict(lesson.get("supporting_evidence") or {})
+            diagnosis = supporting.get("diagnosis")
+            if (
+                isinstance(diagnosis, Mapping)
+                and "tilesight" in str(diagnosis.get("source", "")).lower()
+            ):
+                supporting.pop("diagnosis", None)
+            if lesson.get("kind") == "measured-outcome":
+                supporting.pop("raw_predicted_latency_ms", None)
+                supporting.pop("calibrated_predicted_latency_ms", None)
+                supporting.pop("diagnosis", None)
+                lesson["bottleneck"] = "unknown"
+                lesson["recommended_actions"] = []
+            lesson["supporting_evidence"] = supporting
+            sanitized.append(lesson)
+        return sanitized
+
+    def _strategy_outcomes_for_prompt(
+        self, outcomes: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        if self.tir_evidence_policy == "visible":
+            return {str(name): dict(value) for name, value in outcomes.items()}
+        sanitized = {}
+        for name, value in outcomes.items():
+            item = dict(value) if isinstance(value, Mapping) else {}
+            item.pop("model_valid", None)
+            item.pop("compiled_unique", None)
+            sanitized[str(name)] = item
+        return sanitized
+
+    def _state_for_prompt(self, record: CandidateRecord) -> str:
+        if self.tir_evidence_policy == "visible":
+            return record.state
+        if record.state in {
+            "modeled",
+            "modeled-not-promoted",
+            "compiled-equivalent",
+            "model-skipped",
+        }:
+            return "not-measured"
+        if record.state in {"model-invalid", "seed-model-invalid"}:
+            return "compiler-invalid"
+        return record.state
 
     def _strategy_planning_evidence(
         self, record: CandidateRecord, round_number: int
@@ -1881,9 +2146,12 @@ class OptimizationController:
                     "allocation": plan.get("allocation", []),
                     "overrides": plan.get("overrides", []),
                     "fallback_reason": plan.get("fallback_reason"),
-                    "realized_outcomes": plan.get("realized_outcomes", {}),
+                    "realized_outcomes": self._strategy_outcomes_for_prompt(
+                        dict(plan.get("realized_outcomes") or {})
+                    ),
                 }
             )
+        diagnosis = self._diagnosis_for_prompt(record)
         return {
             "current_best": {
                 "candidate_id": record.candidate.candidate_id,
@@ -1902,7 +2170,7 @@ class OptimizationController:
                     "confidence": record.model.confidence,
                     "diagnostics": record.model.diagnostics,
                 }
-                if record.model
+                if self.tir_evidence_policy == "visible" and record.model
                 else None
             ),
             "profile": (
@@ -1932,20 +2200,28 @@ class OptimizationController:
             ),
             "diagnosis": (
                 {
-                    "category": record.diagnosis.category,
-                    "confidence": record.diagnosis.confidence,
-                    "summary": record.diagnosis.summary,
-                    "limiting_factors": record.diagnosis.limiting_factors,
-                    "recommendations": record.diagnosis.recommendations,
-                    "source": record.diagnosis.source,
+                    "category": diagnosis.get("category"),
+                    "confidence": diagnosis.get("confidence"),
+                    "summary": diagnosis.get("summary"),
+                    "limiting_factors": diagnosis.get("limiting_factors"),
+                    "recommendations": diagnosis.get("recommendations"),
+                    "source": diagnosis.get("source"),
                 }
-                if record.diagnosis
+                if diagnosis
                 else None
             ),
-            "model_trust": self.trust.to_dict(),
-            "calibration": self.calibrator.to_dict(),
-            "strategy_outcomes": self._strategy_outcome_summary(
-                before_round=round_number
+            "model_trust": (
+                self.trust.to_dict()
+                if self.tir_evidence_policy == "visible"
+                else None
+            ),
+            "calibration": (
+                self.calibrator.to_dict()
+                if self.tir_evidence_policy == "visible"
+                else None
+            ),
+            "strategy_outcomes": self._strategy_outcomes_for_prompt(
+                self._strategy_outcome_summary(before_round=round_number)
             ),
             "discovered_strategy_memory": self._discovered_strategy_memory(
                 round_number
@@ -1956,6 +2232,8 @@ class OptimizationController:
                 "total_rounds": self.task.budget.rounds,
                 "candidate_slots": self.task.budget.proposals_per_round,
                 "structural_search_policy": self.structural_search_policy,
+                "evaluation_policy": self.evaluation_policy,
+                "tir_evidence_policy": self.tir_evidence_policy,
                 "measured_candidates": sum(
                     item.is_measured_correct for item in self.records.values()
                 ),
@@ -2114,7 +2392,11 @@ class OptimizationController:
                     )
             elif record.failure is not None:
                 status = "rejected:%s" % record.failure.category
-            elif record.model is not None and record.model.valid:
+            elif (
+                self.tir_evidence_policy == "visible"
+                and record.model is not None
+                and record.model.valid
+            ):
                 status = "model-only"
             memory.append(
                 {
@@ -2183,14 +2465,18 @@ class OptimizationController:
                 "structural_change": dict(
                     item.candidate.proposal_metadata.get("ast_novelty") or {}
                 ).get("structural_change"),
-                "state": item.state,
+                "state": self._state_for_prompt(item),
                 "lineage_kind": item.candidate.lineage_kind,
                 "repair_depth": item.candidate.repair_depth,
                 "predicted_latency_ms": (
-                    item.model.predicted_latency_ms if item.model else None
+                    item.model.predicted_latency_ms
+                    if self.tir_evidence_policy == "visible" and item.model
+                    else None
                 ),
                 "calibrated_predicted_latency_ms": (
-                    item.model.calibrated_latency_ms if item.model else None
+                    item.model.calibrated_latency_ms
+                    if self.tir_evidence_policy == "visible" and item.model
+                    else None
                 ),
                 "measured_latency_ms": (
                     item.measurement.latency_ms if item.measurement else None
@@ -2198,12 +2484,12 @@ class OptimizationController:
                 "failure": item.failure.to_dict() if item.failure else None,
                 "diagnosis": (
                     {
-                        "category": item.diagnosis.category,
-                        "confidence": item.diagnosis.confidence,
-                        "summary": item.diagnosis.summary,
-                        "recommendations": item.diagnosis.recommendations,
+                        "category": diagnosis.get("category"),
+                        "confidence": diagnosis.get("confidence"),
+                        "summary": diagnosis.get("summary"),
+                        "recommendations": diagnosis.get("recommendations"),
                     }
-                    if item.diagnosis
+                    if (diagnosis := self._diagnosis_for_prompt(item))
                     else None
                 ),
                 "profile_bottleneck": (
@@ -2398,15 +2684,43 @@ class OptimizationController:
 
     def _experiment_config(self) -> Dict[str, Any]:
         return {
+            "evaluation_policy": self.evaluation_policy,
+            "requested_tir_evidence_policy": self.requested_tir_evidence_policy,
+            "tir_evidence_policy": self.tir_evidence_policy,
+            "requested_selection_policy": self.requested_selection_policy_name,
             "selection_policy": self.selection_policy_name,
+            "requested_profile_policy": self.requested_profile_policy_name,
             "profile_policy": self.profile_policy_name,
             "fixed_promotions_per_round": self.fixed_promotions_per_round,
+            "requested_compiled_deduplication": (
+                self.requested_compiled_deduplication
+            ),
             "compiled_deduplication": self.compiled_deduplication,
             "structural_search_policy": self.structural_search_policy,
             "strategy_allocation_policy": self.strategy_allocation_policy,
             "api_input_price_per_million": self.api_input_price_per_million,
             "api_output_price_per_million": self.api_output_price_per_million,
         }
+
+    @staticmethod
+    def _normalized_experiment_config(value: Mapping[str, Any]) -> Dict[str, Any]:
+        """Treat checkpoints created before ablation controls as default runs."""
+
+        normalized = dict(value)
+        normalized.setdefault("evaluation_policy", "tilesight")
+        normalized.setdefault("requested_tir_evidence_policy", "auto")
+        normalized.setdefault("tir_evidence_policy", "visible")
+        normalized.setdefault(
+            "requested_selection_policy", normalized.get("selection_policy")
+        )
+        normalized.setdefault(
+            "requested_profile_policy", normalized.get("profile_policy")
+        )
+        normalized.setdefault(
+            "requested_compiled_deduplication",
+            normalized.get("compiled_deduplication", True),
+        )
+        return normalized
 
     def _summary(
         self,
@@ -2477,9 +2791,17 @@ class OptimizationController:
             final_validation_calls=self.final_validation_calls,
             final_validation_passes=self.final_validation_passes,
             final_seed_latency_ms=(seed_latency if final_enabled else None),
+            evaluation_policy=self.evaluation_policy,
+            requested_tir_evidence_policy=self.requested_tir_evidence_policy,
+            tir_evidence_policy=self.tir_evidence_policy,
+            requested_selection_policy=self.requested_selection_policy_name,
             selection_policy=self.selection_policy_name,
+            requested_profile_policy=self.requested_profile_policy_name,
             profile_policy=self.profile_policy_name,
             fixed_promotions_per_round=self.fixed_promotions_per_round,
+            requested_compiled_deduplication=(
+                self.requested_compiled_deduplication
+            ),
             compiled_deduplication=self.compiled_deduplication,
             compiled_equivalent_candidates=sum(
                 item.compiled_equivalent_to is not None

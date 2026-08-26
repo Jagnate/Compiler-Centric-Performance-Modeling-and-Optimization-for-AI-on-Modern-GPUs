@@ -315,6 +315,78 @@ measurement cap per round, add for example:
 --promotions-per-round 4
 ```
 
+### Orthogonal evidence and evaluator ablations
+
+Three experiment-level controls separate AI guidance, candidate evaluation,
+and search-direction allocation. They belong on the CLI rather than in the
+task JSON because they change the experimental treatment, not kernel semantics:
+
+```bash
+--evaluation-policy tilesight|cuda-event|ncu
+--tir-evidence-policy auto|visible|hidden
+--strategy-allocation-policy ai-planned|fixed|unconstrained
+```
+
+`--evaluation-policy tilesight` preserves the adaptive-fidelity pipeline:
+TileSight models every static-valid candidate, the promotion policy chooses a
+bounded hardware subset, CUDA Event checks correctness and latency, and NCU is
+used according to `--profile-policy`.
+
+`--evaluation-policy cuda-event` never calls `backend.model`. Every
+static-valid candidate is compiled, checked, and timed with CUDA Event. The
+effective selection policy becomes `measure-all`, NCU becomes `none`, and
+compiled-identity deduplication is disabled because that identity is emitted by
+the TileSight model stage.
+
+`--evaluation-policy ncu` also skips TileSight and sends every static-valid
+candidate through correctness and CUDA Event timing. Every correctness-passing
+candidate is then profiled with NCU. Candidate ranking continues to use the
+clean CUDA Event latency; NCU supplies feedback rather than replacing the
+ranking measurement. This is the highest-cost evaluator baseline.
+
+`--tir-evidence-policy hidden` is a guidance ablation, not an evaluator
+ablation. With `evaluation-policy=tilesight`, TileSight can still rank
+candidates internally, but successful model predictions, TIR-derived
+diagnoses, calibration/trust values, and TIR-derived shared lessons are removed
+from AI planning, generation, repair history, and subsequent-round prompts.
+Measured CUDA Event outcomes, NCU evidence, and actionable compiler/runtime
+failures remain visible. `auto` resolves to `visible` with TileSight and
+`hidden` otherwise. Explicit `visible` is rejected when TileSight is disabled.
+
+The following treatments isolate one variable at a time:
+
+```bash
+# Main system
+--evaluation-policy tilesight --tir-evidence-policy visible \
+  --strategy-allocation-policy ai-planned
+
+# Same evaluator and search control, but no TIR/TileSight guidance to the AI
+--evaluation-policy tilesight --tir-evidence-policy hidden \
+  --strategy-allocation-policy ai-planned
+
+# No TileSight; all candidates use CUDA Event
+--evaluation-policy cuda-event --tir-evidence-policy auto \
+  --strategy-allocation-policy ai-planned
+
+# No TileSight; all correct candidates also use NCU
+--evaluation-policy ncu --tir-evidence-policy auto \
+  --strategy-allocation-policy ai-planned
+
+# AI chooses all search directions; retain the same AST validity gate
+--evaluation-policy tilesight --tir-evidence-policy visible \
+  --strategy-allocation-policy unconstrained
+```
+
+For a literal no-novelty-gate AI baseline, additionally set
+`--structural-search-policy off`. The recommended strategy ablation leaves it
+at `enforce`, so only direction allocation changes and all groups keep the same
+no-op/false-claim filter.
+
+Every checkpoint, summary, experiment manifest, Markdown report, and incumbent
+snapshot records requested and effective policies. This matters because the
+CUDA Event and NCU baselines intentionally override model-based selection,
+milestone profiling, and compiled-code deduplication.
+
 Strategy allocation and AST novelty are independent policies. Allocation has
 three reproducible modes:
 
@@ -677,6 +749,11 @@ The suite uses AI-planned strategy allocation by default. Add
 `--strategy-allocation-policy fixed` or `--strategy-allocation-policy
 unconstrained` to run allocation ablations while keeping the promotion policy
 and hardware budget unchanged.
+
+The suite also forwards `--evaluation-policy` and `--tir-evidence-policy`.
+When `evaluation-policy` is `cuda-event` or `ncu`, every requested promotion
+policy resolves to `measure-all`; use `--policies adaptive` for a single
+evaluator-baseline run instead of repeating equivalent selection treatments.
 
 For a no-NCU ablation, add `--profile-policy none`. To study event-triggered NCU,
 add `--profile-policy milestone`. Optional

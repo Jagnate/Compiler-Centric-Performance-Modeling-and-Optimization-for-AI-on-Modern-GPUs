@@ -530,9 +530,15 @@ class SearchSummary:
     final_validation_calls: int = 0
     final_validation_passes: int = 0
     final_seed_latency_ms: Optional[float] = None
+    evaluation_policy: str = "tilesight"
+    requested_tir_evidence_policy: str = "auto"
+    tir_evidence_policy: str = "visible"
+    requested_selection_policy: str = "adaptive"
     selection_policy: str = "adaptive"
+    requested_profile_policy: str = "milestone"
     profile_policy: str = "milestone"
     fixed_promotions_per_round: Optional[int] = None
+    requested_compiled_deduplication: bool = True
     compiled_deduplication: bool = True
     compiled_equivalent_candidates: int = 0
     structural_search_policy: str = "off"

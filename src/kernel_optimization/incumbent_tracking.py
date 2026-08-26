@@ -28,6 +28,9 @@ _CSV_FIELDS = (
     "phase",
     "completed_round",
     "active_round",
+    "evaluation_policy",
+    "tir_evidence_policy",
+    "strategy_allocation_policy",
     "candidate_id",
     "generation",
     "state",
@@ -218,6 +221,7 @@ class PeriodicIncumbentRecorder:
             "phase": phase or None,
             "completed_round": state.get("completed_round"),
             "active_round": state.get("active_round"),
+            "policies": dict(state.get("experiment") or {}),
             "selection_basis": selection_basis,
             "incumbent_latency_ms": incumbent_latency,
             "seed_comparable_latency_ms": seed_latency,
@@ -449,6 +453,8 @@ def _csv_row(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     diagnosis = dict(diagnosis) if isinstance(diagnosis, Mapping) else {}
     counts = snapshot.get("counts")
     counts = dict(counts) if isinstance(counts, Mapping) else {}
+    policies = snapshot.get("policies")
+    policies = dict(policies) if isinstance(policies, Mapping) else {}
     return {
         "sequence": snapshot.get("sequence"),
         "timestamp": snapshot.get("timestamp"),
@@ -458,6 +464,11 @@ def _csv_row(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "phase": snapshot.get("phase"),
         "completed_round": snapshot.get("completed_round"),
         "active_round": snapshot.get("active_round"),
+        "evaluation_policy": policies.get("evaluation_policy"),
+        "tir_evidence_policy": policies.get("tir_evidence_policy"),
+        "strategy_allocation_policy": policies.get(
+            "strategy_allocation_policy"
+        ),
         "candidate_id": incumbent.get("candidate_id"),
         "generation": incumbent.get("generation"),
         "state": incumbent.get("state"),

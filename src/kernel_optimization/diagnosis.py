@@ -129,7 +129,13 @@ class BottleneckAnalyzer:
         )
         model_metrics = record.model.metrics if record.model is not None else {}
         primary = profile_metrics or model_metrics
-        source = "ncu" if profile_metrics else "tilesight"
+        source = (
+            "ncu"
+            if profile_metrics
+            else "tilesight"
+            if record.model is not None
+            else "cuda-events"
+        )
         flat = _flatten_metrics(primary)
         utilizations = {
             name: _percentage(_first_metric(flat, aliases))
@@ -469,4 +475,3 @@ def _percentage(value: Optional[float]) -> Optional[float]:
     if 0.0 <= value <= 1.0:
         return value * 100.0
     return value
-

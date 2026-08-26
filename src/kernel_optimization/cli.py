@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .archive import ArtifactStore
-from .controller import OptimizationController
+from .controller import OptimizationController, resolve_evaluation_policies
 from .factory import create_backend
 from .generators import (
     ApiGeneratorConfig,
@@ -123,6 +123,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Candidate promotion strategy. Use a fixed budget for equal-cost ablations.",
     )
     parser.add_argument(
+        "--evaluation-policy",
+        choices=("tilesight", "cuda-event", "ncu"),
+        default="tilesight",
+        help=(
+            "Use TileSight promotion, measure every candidate with CUDA Event, "
+            "or measure and NCU-profile every correct candidate."
+        ),
+    )
+    parser.add_argument(
+        "--tir-evidence-policy",
+        choices=("auto", "visible", "hidden"),
+        default="auto",
+        help=(
+            "Control whether successful TIR/TileSight performance evidence is "
+            "included in AI prompts; auto hides it when TileSight is disabled."
+        ),
+    )
+    parser.add_argument(
         "--promotions-per-round",
         type=int,
         help="Fix CUDA measurement promotions per round across search strategies.",
@@ -192,6 +210,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(
             "API cost reporting requires both input and output token prices"
         )
+    try:
+        policies = resolve_evaluation_policies(
+            evaluation_policy=args.evaluation_policy,
+            tir_evidence_policy=args.tir_evidence_policy,
+            selection_policy=args.selection_policy,
+            profile_policy=args.profile_policy,
+            compiled_deduplication=not args.no_compiled_dedup,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     source_path = Path(args.source).expanduser().resolve()
     task_path = Path(args.task).expanduser().resolve()
     if not source_path.is_file():
@@ -267,7 +295,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.10.0",
+        "framework_version": "0.11.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -283,10 +311,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "agent_workers": args.agent_workers,
         },
         "experiment": {
-            "selection_policy": args.selection_policy,
+            "evaluation_policy": policies["evaluation_policy"],
+            "requested_tir_evidence_policy": policies[
+                "requested_tir_evidence_policy"
+            ],
+            "tir_evidence_policy": policies["tir_evidence_policy"],
+            "requested_selection_policy": policies[
+                "requested_selection_policy"
+            ],
+            "selection_policy": policies["selection_policy"],
             "fixed_promotions_per_round": args.promotions_per_round,
-            "profile_policy": args.profile_policy,
-            "compiled_deduplication": not args.no_compiled_dedup,
+            "requested_profile_policy": policies["requested_profile_policy"],
+            "profile_policy": policies["profile_policy"],
+            "requested_compiled_deduplication": policies[
+                "requested_compiled_deduplication"
+            ],
+            "compiled_deduplication": policies["compiled_deduplication"],
             "structural_search_policy": args.structural_search_policy,
             "strategy_allocation_policy": args.strategy_allocation_policy,
             "agent_workers": args.agent_workers,
@@ -378,6 +418,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         incumbent_snapshot_interval_seconds=(
             args.incumbent_snapshot_interval_seconds
         ),
+        evaluation_policy=args.evaluation_policy,
+        tir_evidence_policy=args.tir_evidence_policy,
     )
     summary = controller.run()
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))

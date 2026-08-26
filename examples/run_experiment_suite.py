@@ -41,6 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="every-round",
     )
     parser.add_argument(
+        "--evaluation-policy",
+        choices=("tilesight", "cuda-event", "ncu"),
+        default="tilesight",
+    )
+    parser.add_argument(
+        "--tir-evidence-policy",
+        choices=("auto", "visible", "hidden"),
+        default="auto",
+    )
+    parser.add_argument(
         "--strategy-allocation-policy",
         choices=("ai-planned", "fixed", "unconstrained"),
         default="ai-planned",
@@ -70,6 +80,8 @@ def build_run_command(
     policy: str,
     promotions_per_round: int,
     profile_policy: str,
+    evaluation_policy: str = "tilesight",
+    tir_evidence_policy: str = "auto",
     strategy_allocation_policy: str = "ai-planned",
     api_url: Optional[str] = None,
     api_model: Optional[str] = None,
@@ -97,6 +109,10 @@ def build_run_command(
         str(promotions_per_round),
         "--profile-policy",
         profile_policy,
+        "--evaluation-policy",
+        evaluation_policy,
+        "--tir-evidence-policy",
+        tir_evidence_policy,
         "--strategy-allocation-policy",
         strategy_allocation_policy,
         "--api-key-env",
@@ -149,6 +165,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--policies must contain: %s" % ", ".join(VALID_POLICIES))
     if len(set(policies)) != len(policies):
         raise SystemExit("--policies cannot contain duplicates")
+    if (
+        args.evaluation_policy != "tilesight"
+        and args.tir_evidence_policy == "visible"
+    ):
+        raise SystemExit(
+            "--tir-evidence-policy visible requires --evaluation-policy tilesight"
+        )
 
     commands = []
     for policy in policies:
@@ -161,6 +184,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 policy=policy,
                 promotions_per_round=promotions,
                 profile_policy=args.profile_policy,
+                evaluation_policy=args.evaluation_policy,
+                tir_evidence_policy=args.tir_evidence_policy,
                 strategy_allocation_policy=args.strategy_allocation_policy,
                 api_url=args.api_url,
                 api_model=args.api_model,
@@ -207,6 +232,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "source": str(source),
         "task": str(task_path),
         "promotions_per_round": promotions,
+        "evaluation_policy": args.evaluation_policy,
+        "tir_evidence_policy": args.tir_evidence_policy,
         "profile_policy": args.profile_policy,
         "strategy_allocation_policy": args.strategy_allocation_policy,
         "agent_workers": args.agent_workers,
@@ -215,8 +242,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         "runs": rows,
         "comparison_note": (
-            "adaptive, model-top, and random use the same per-round promotion budget; "
-            "measure-all intentionally uses more hardware and is not an equal-budget run."
+            (
+                "adaptive, model-top, and random use the same per-round promotion "
+                "budget; measure-all intentionally uses more hardware and is not "
+                "an equal-budget run."
+            )
+            if args.evaluation_policy == "tilesight"
+            else (
+                "TileSight is disabled, so every requested promotion policy "
+                "resolves to measure-all; use one policy per evaluator baseline."
+            )
         ),
     }
     (output_root / "suite_summary.json").write_text(
@@ -256,6 +291,8 @@ def _suite_markdown(payload: Dict[str, Any]) -> str:
         "Task: `%s`" % payload.get("task_id"),
         "",
         "Fixed promotions per round: %s" % payload["promotions_per_round"],
+        "Evaluation policy: `%s`" % payload["evaluation_policy"],
+        "TIR evidence policy: `%s`" % payload["tir_evidence_policy"],
         "Strategy allocation: `%s`" % payload["strategy_allocation_policy"],
         "",
         "| Policy | Final latency (ms) | Speedup | Measured | NCU | API calls | API time (s) | Evaluator time (s) |",

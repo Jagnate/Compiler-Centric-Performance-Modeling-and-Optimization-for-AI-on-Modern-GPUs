@@ -9,7 +9,10 @@ import tempfile
 import unittest
 
 from kernel_optimization.archive import ArtifactStore
-from kernel_optimization.controller import OptimizationController
+from kernel_optimization.controller import (
+    OptimizationController,
+    resolve_evaluation_policies,
+)
 from kernel_optimization.costs import build_cost_ledger
 from kernel_optimization.milestones import create_profile_policy
 from kernel_optimization.schema import (
@@ -30,6 +33,28 @@ SOURCE = "VALUE = %d\n\ndef kernel(x):\n    return x\n"
 
 
 class PhaseThreeExperimentTests(unittest.TestCase):
+    def test_evaluation_policy_resolution_is_orthogonal_and_explicit(self) -> None:
+        resolved = resolve_evaluation_policies(
+            evaluation_policy="ncu",
+            tir_evidence_policy="auto",
+            selection_policy="adaptive",
+            profile_policy="milestone",
+            compiled_deduplication=True,
+        )
+        self.assertEqual(resolved["tir_evidence_policy"], "hidden")
+        self.assertEqual(resolved["selection_policy"], "measure-all")
+        self.assertEqual(resolved["profile_policy"], "every-candidate")
+        self.assertFalse(resolved["compiled_deduplication"])
+        self.assertEqual(resolved["requested_selection_policy"], "adaptive")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            resolve_evaluation_policies(
+                evaluation_policy="cuda-event",
+                tir_evidence_policy="visible",
+                selection_policy="adaptive",
+                profile_policy="milestone",
+                compiled_deduplication=True,
+            )
+
     def test_equal_budget_policies_select_the_requested_count(self) -> None:
         task = _task()
         seed = Candidate.seed(task, SOURCE % 0, "kernel.py")
@@ -113,6 +138,9 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             self.assertEqual(summary.measured_candidates, 2)
             self.assertEqual(summary.compiled_equivalent_candidates, 1)
             self.assertEqual(summary.profile_calls, 0)
+            self.assertEqual(summary.evaluation_policy, "tilesight")
+            self.assertEqual(summary.requested_tir_evidence_policy, "auto")
+            self.assertEqual(summary.tir_evidence_policy, "visible")
             self.assertEqual(summary.selection_policy, "model-top")
             self.assertEqual(summary.profile_policy, "none")
             equivalent = [
@@ -148,6 +176,130 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             )
             self.assertEqual(summary.incumbent_snapshot_interval_seconds, 300.0)
 
+    def test_cuda_event_policy_skips_tilesight_and_measures_every_candidate(self) -> None:
+        backend = _AblationBackend()
+        with tempfile.TemporaryDirectory(prefix="phase3-cuda-event-") as directory:
+            controller = OptimizationController(
+                task=_task(),
+                source_code=SOURCE % 0,
+                source_name="kernel.py",
+                generator=_TwoCandidateGenerator(),
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+                selection_policy="model-top",
+                profile_policy="every-round",
+                evaluation_policy="cuda-event",
+                tir_evidence_policy="auto",
+                strategy_allocation_policy="unconstrained",
+            )
+            summary = controller.run()
+
+            self.assertEqual(backend.model_calls, 0)
+            self.assertEqual(backend.measure_calls, 3)
+            self.assertEqual(backend.profile_calls, 0)
+            self.assertEqual(summary.modeled_candidates, 0)
+            self.assertEqual(summary.measured_candidates, 3)
+            self.assertEqual(summary.evaluation_policy, "cuda-event")
+            self.assertEqual(summary.tir_evidence_policy, "hidden")
+            self.assertEqual(summary.requested_selection_policy, "model-top")
+            self.assertEqual(summary.selection_policy, "measure-all")
+            self.assertEqual(summary.requested_profile_policy, "every-round")
+            self.assertEqual(summary.profile_policy, "none")
+            self.assertTrue(summary.requested_compiled_deduplication)
+            self.assertFalse(summary.compiled_deduplication)
+            self.assertTrue(
+                all(
+                    record.diagnosis.source == "deterministic-cuda-events"
+                    for record in controller.records.values()
+                    if record.is_measured_correct
+                )
+            )
+            snapshots = [
+                json.loads(line)
+                for line in (Path(directory) / "incumbent_history.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                snapshots[-1]["policies"]["evaluation_policy"], "cuda-event"
+            )
+
+    def test_ncu_policy_profiles_every_correct_candidate_without_tilesight(self) -> None:
+        backend = _AblationBackend()
+        with tempfile.TemporaryDirectory(prefix="phase3-ncu-") as directory:
+            controller = OptimizationController(
+                task=_task(),
+                source_code=SOURCE % 0,
+                source_name="kernel.py",
+                generator=_TwoCandidateGenerator(),
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+                evaluation_policy="ncu",
+                tir_evidence_policy="auto",
+                strategy_allocation_policy="unconstrained",
+            )
+            summary = controller.run()
+
+            self.assertEqual(backend.model_calls, 0)
+            self.assertEqual(backend.measure_calls, 3)
+            self.assertEqual(backend.profile_calls, 3)
+            self.assertEqual(summary.profile_calls, 3)
+            self.assertEqual(summary.profile_policy, "every-candidate")
+            self.assertTrue(
+                all(
+                    record.profile is not None and record.profile.valid
+                    for record in controller.records.values()
+                    if record.is_measured_correct
+                )
+            )
+            self.assertTrue(
+                all(
+                    record.diagnosis.source == "deterministic-ncu"
+                    for record in controller.records.values()
+                    if record.is_measured_correct
+                )
+            )
+
+    def test_hidden_tir_evidence_is_not_exposed_to_generation_prompts(self) -> None:
+        backend = _AblationBackend()
+        generator = _CapturingGenerator()
+        with tempfile.TemporaryDirectory(prefix="phase3-hidden-tir-") as directory:
+            controller = OptimizationController(
+                task=_task(),
+                source_code=SOURCE % 0,
+                source_name="kernel.py",
+                generator=generator,
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+                selection_policy="measure-all",
+                profile_policy="none",
+                compiled_deduplication=False,
+                evaluation_policy="tilesight",
+                tir_evidence_policy="hidden",
+                strategy_allocation_policy="unconstrained",
+            )
+            summary = controller.run()
+
+            self.assertEqual(backend.model_calls, 3)
+            self.assertEqual(summary.modeled_candidates, 3)
+            evidence = generator.calls[0]["evidence"]
+            history = generator.calls[0]["history"]
+            self.assertIsNone(evidence["predicted"])
+            self.assertIsNone(evidence["model_trust"])
+            self.assertIsNone(evidence["calibration"])
+            self.assertIsNone(evidence["observed"]["diagnosis"])
+            self.assertTrue(evidence["shared_memory"])
+            lesson = evidence["shared_memory"][0]
+            self.assertEqual(lesson["bottleneck"], "unknown")
+            self.assertEqual(lesson["recommended_actions"], [])
+            self.assertNotIn(
+                "raw_predicted_latency_ms", lesson["supporting_evidence"]
+            )
+            self.assertIsNone(history[0]["predicted_latency_ms"])
+            self.assertIsNone(history[0]["diagnosis"])
+            prompt_payload = json.dumps(generator.calls[0], sort_keys=True)
+            self.assertNotIn("deterministic-tilesight", prompt_payload)
+
     def test_cost_ledger_separates_samples_from_wall_time(self) -> None:
         task = _task()
         candidate = Candidate.seed(task, SOURCE % 0, "kernel.py")
@@ -182,6 +334,8 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             ["--source", "kernel.py", "--task", "task.json", "--output-root", "out"]
         )
         self.assertEqual(parsed.profile_policy, "every-round")
+        self.assertEqual(parsed.evaluation_policy, "tilesight")
+        self.assertEqual(parsed.tir_evidence_policy, "auto")
         self.assertEqual(parsed.strategy_allocation_policy, "ai-planned")
         command = module.build_run_command(
             source=Path("kernel.py"),
@@ -202,6 +356,12 @@ class PhaseThreeExperimentTests(unittest.TestCase):
                 command.index("--incumbent-snapshot-interval-seconds") + 1
             ],
             "300.0",
+        )
+        self.assertEqual(
+            command[command.index("--evaluation-policy") + 1], "tilesight"
+        )
+        self.assertEqual(
+            command[command.index("--tir-evidence-policy") + 1], "auto"
         )
 
 
@@ -251,6 +411,53 @@ class _DedupBackend:
     def profile(self, task, candidate):
         del task, candidate
         return ProfileEvaluation(bottleneck="unused")
+
+
+class _AblationBackend:
+    def __init__(self):
+        self.model_calls = 0
+        self.measure_calls = 0
+        self.profile_calls = 0
+
+    def model(self, task, candidate):
+        del task
+        self.model_calls += 1
+        value = int(candidate.source_code.splitlines()[0].split("=")[1])
+        return ModelEvaluation(
+            valid=True,
+            predicted_latency_ms=3.0 - value,
+            bottleneck="tensor-core",
+            confidence="high",
+            metrics={"tensor_util": 0.75},
+        )
+
+    def measure(self, task, candidate):
+        del task
+        self.measure_calls += 1
+        value = int(candidate.source_code.splitlines()[0].split("=")[1])
+        latency = 3.0 - value
+        return Measurement(
+            correct=True,
+            latency_ms=latency,
+            samples_ms=[latency],
+        )
+
+    def profile(self, task, candidate):
+        del task, candidate
+        self.profile_calls += 1
+        return ProfileEvaluation(
+            bottleneck="tensor-core",
+            metrics={"tensor_util": 80.0, "achieved_occupancy": 0.6},
+        )
+
+
+class _CapturingGenerator(_TwoCandidateGenerator):
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, task, parent, evidence, history, count):
+        self.calls.append({"evidence": evidence, "history": history})
+        return super().generate(task, parent, evidence, history, count)
 
 
 def _task() -> TaskSpec:

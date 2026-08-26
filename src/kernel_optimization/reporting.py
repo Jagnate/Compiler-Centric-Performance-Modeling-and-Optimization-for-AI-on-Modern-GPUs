@@ -77,9 +77,17 @@ def write_research_artifacts(
             "budget": task.budget.__dict__,
             "run": dict(run_metadata),
             "policies": {
+                "evaluation": summary.evaluation_policy,
+                "requested_tir_evidence": summary.requested_tir_evidence_policy,
+                "tir_evidence": summary.tir_evidence_policy,
+                "requested_selection": summary.requested_selection_policy,
                 "selection": summary.selection_policy,
+                "requested_profile": summary.requested_profile_policy,
                 "profile": summary.profile_policy,
                 "fixed_promotions_per_round": summary.fixed_promotions_per_round,
+                "requested_compiled_deduplication": (
+                    summary.requested_compiled_deduplication
+                ),
                 "compiled_deduplication": summary.compiled_deduplication,
                 "structural_search_policy": summary.structural_search_policy,
                 "strategy_allocation_policy": summary.strategy_allocation_policy,
@@ -206,12 +214,23 @@ def _experiment_markdown(
         "| Field | Value |",
         "| --- | --- |",
         "| Task | `%s` |" % task.task_id,
-        "| Selection policy | `%s` |" % summary.selection_policy,
-        "| Profile policy | `%s` |" % summary.profile_policy,
+        "| Evaluation policy | `%s` |" % summary.evaluation_policy,
+        "| TIR evidence policy (requested -> effective) | `%s` -> `%s` |"
+        % (
+            summary.requested_tir_evidence_policy,
+            summary.tir_evidence_policy,
+        ),
+        "| Selection policy (requested -> effective) | `%s` -> `%s` |"
+        % (summary.requested_selection_policy, summary.selection_policy),
+        "| Profile policy (requested -> effective) | `%s` -> `%s` |"
+        % (summary.requested_profile_policy, summary.profile_policy),
         "| Fixed promotions per round | %s |"
         % _format(summary.fixed_promotions_per_round),
-        "| Compiled-code deduplication | %s |"
-        % ("enabled" if summary.compiled_deduplication else "disabled"),
+        "| Compiled-code deduplication (requested -> effective) | %s -> %s |"
+        % (
+            "enabled" if summary.requested_compiled_deduplication else "disabled",
+            "enabled" if summary.compiled_deduplication else "disabled",
+        ),
         "| Structural search policy | `%s` |"
         % summary.structural_search_policy,
         "| Strategy allocation policy | `%s` |"

@@ -128,10 +128,15 @@ class PhaseThreeExperimentTests(unittest.TestCase):
                 "candidate_graph.json",
                 "experiment_manifest.json",
                 "experiment_report.md",
+                "incumbent_history.jsonl",
+                "incumbent_history.csv",
             ):
                 self.assertTrue((output / filename).is_file(), filename)
             trajectory = json.loads((output / "trajectory.json").read_text())
             self.assertEqual(len(trajectory["candidates"]), 3)
+            report = (output / "experiment_report.md").read_text(encoding="utf-8")
+            self.assertIn("Incumbent snapshot interval", report)
+            self.assertIn("incumbent_history.csv", report)
             self.assertAlmostEqual(
                 summary.cost_ledger["api"]["estimated_cost_usd"], 11e-6
             )
@@ -141,6 +146,7 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             self.assertGreaterEqual(
                 summary.cost_ledger["api"]["wall_seconds"], 0.25
             )
+            self.assertEqual(summary.incumbent_snapshot_interval_seconds, 300.0)
 
     def test_cost_ledger_separates_samples_from_wall_time(self) -> None:
         task = _task()
@@ -191,6 +197,12 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             "ai-planned",
         )
         self.assertEqual(command[command.index("--promotions-per-round") + 1], "4")
+        self.assertEqual(
+            command[
+                command.index("--incumbent-snapshot-interval-seconds") + 1
+            ],
+            "300.0",
+        )
 
 
 class _TwoCandidateGenerator:

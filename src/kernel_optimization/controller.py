@@ -14,6 +14,7 @@ from .calibration import LatencyCalibrator
 from .costs import build_cost_ledger
 from .diagnosis import BottleneckAnalyzer, FailureClassifier
 from .evidence import GlobalEvidenceMemory
+from .incumbent_tracking import PeriodicIncumbentRecorder
 from .milestones import create_profile_policy
 from .progress import NullProgressReporter, ProgressReporter
 from .protocols import CandidateGenerator, PerformanceBackend
@@ -84,6 +85,7 @@ class OptimizationController:
         api_output_price_per_million: Optional[float] = None,
         structural_search_policy: str = "off",
         strategy_allocation_policy: str = "fixed",
+        incumbent_snapshot_interval_seconds: float = 300.0,
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -118,6 +120,15 @@ class OptimizationController:
                 "strategy_allocation_policy must be ai-planned, fixed, or unconstrained"
             )
         self.strategy_allocation_policy = strategy_allocation_policy
+        interval = float(incumbent_snapshot_interval_seconds)
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError(
+                "incumbent_snapshot_interval_seconds must be finite and non-negative"
+            )
+        self.incumbent_snapshot_interval_seconds = interval
+        self.incumbent_recorder = PeriodicIncumbentRecorder(
+            store, interval_seconds=interval
+        )
         self.strategy_portfolio = StructuralStrategyPortfolio()
         self.novelty_analyzer = SourceNoveltyAnalyzer()
         for name, value in (
@@ -176,6 +187,10 @@ class OptimizationController:
                 seed_candidate.source_name,
             )
             self.store.initialize(self.task, seed_candidate, self.run_metadata)
+            self.incumbent_recorder.start(
+                started_at=started_at,
+                resumed=self.resume,
+            )
 
             state = self.store.load_state() if self.resume else None
             if state is not None:
@@ -198,6 +213,7 @@ class OptimizationController:
                     completed_round=0,
                     active_round=None,
                 )
+                self.incumbent_recorder.record_if_changed("seed-completed")
 
             active_round = state.get("active_round") if state else None
             start_round = (
@@ -245,6 +261,9 @@ class OptimizationController:
                     completed_round=completed_rounds,
                     active_round=None,
                 )
+                self.incumbent_recorder.record_if_changed(
+                    "final-incumbent-updated"
+                )
             best_source_path = self.store.save_best(self.beam[0])
             summary = self._summary(
                 completed_rounds,
@@ -268,6 +287,7 @@ class OptimizationController:
                 completed_round=completed_rounds,
                 active_round=None,
             )
+            self.incumbent_recorder.record_now("run-completed")
             self.store.append_event("run_completed", summary.to_dict())
             self.progress.emit(
                 "run_completed",
@@ -293,7 +313,10 @@ class OptimizationController:
                 error_type=type(error).__name__,
                 error_message=str(error),
             )
+            self.incumbent_recorder.record_now("run-failed")
             raise
+        finally:
+            self.incumbent_recorder.stop()
 
     def _run_round(
         self, round_number: int, resume_state: Mapping[str, Any]
@@ -433,6 +456,7 @@ class OptimizationController:
                 selected_ids=selected_ids,
                 best_before_id=best_before_id,
             )
+            self.incumbent_recorder.record_if_changed("incumbent-updated")
             phase = "beam_updated"
         else:
             best_before = self.records[str(best_before_id)]
@@ -2505,6 +2529,9 @@ class OptimizationController:
                         or ""
                     ).strip()
                 }
+            ),
+            incumbent_snapshot_interval_seconds=(
+                self.incumbent_snapshot_interval_seconds
             ),
             cost_ledger=ledger,
             report_paths=expected_report_paths(self.store.root),

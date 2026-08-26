@@ -26,10 +26,14 @@ class ParallelCandidateGeneratorTests(unittest.TestCase):
                 "task.json",
                 "--agent-workers",
                 "2",
+                "--incumbent-snapshot-interval-seconds",
+                "120",
             ]
         )
         self.assertEqual(default.agent_workers, 1)
         self.assertEqual(configured.agent_workers, 2)
+        self.assertEqual(default.incumbent_snapshot_interval_seconds, 300.0)
+        self.assertEqual(configured.incumbent_snapshot_interval_seconds, 120.0)
 
     def test_parallel_workers_split_slots_and_merge_in_stable_order(self) -> None:
         task, parent = _task_and_parent()

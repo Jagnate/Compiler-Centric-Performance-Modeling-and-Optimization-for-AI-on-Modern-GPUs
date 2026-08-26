@@ -18,6 +18,8 @@ _REPORT_FILENAMES = {
     "strategy_plans": "strategy_plans.json",
     "experiment_manifest": "experiment_manifest.json",
     "experiment_report": "experiment_report.md",
+    "incumbent_history_jsonl": "incumbent_history.jsonl",
+    "incumbent_history_csv": "incumbent_history.csv",
 }
 
 
@@ -216,6 +218,8 @@ def _experiment_markdown(
         % summary.strategy_allocation_policy,
         "| Concurrent generation agents | %s |"
         % _format(generator_metadata.get("agent_workers", 1)),
+        "| Incumbent snapshot interval | %s s |"
+        % _format(summary.incumbent_snapshot_interval_seconds),
         "| AI planner calls | %d |" % summary.planner_calls,
         "| Planner fallbacks | %d |" % summary.planner_fallbacks,
         "| Completed rounds | %d |" % summary.completed_rounds,
@@ -372,7 +376,10 @@ def _experiment_markdown(
             "rank the search beam, and held-out final measurements choose the export.",
             "",
             "Detailed per-candidate evidence is available in `trajectory.csv`, "
-            "`trajectory.json`, and `candidate_graph.json`.",
+            "`trajectory.json`, and `candidate_graph.json`. Fixed wall-clock "
+            "incumbent observations are available in `incumbent_history.csv`; "
+            "the corresponding complete nested evidence is in "
+            "`incumbent_history.jsonl`.",
             "",
         ]
     )

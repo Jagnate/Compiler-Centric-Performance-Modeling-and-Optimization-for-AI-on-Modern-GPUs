@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 from typing import Optional, Sequence
@@ -107,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume an interrupted run from --output checkpoints.",
     )
     parser.add_argument(
+        "--incumbent-snapshot-interval-seconds",
+        type=float,
+        default=300.0,
+        help=(
+            "Wall-clock interval for best-verified-kernel snapshots; default "
+            "300 seconds, or 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--selection-policy",
         choices=("adaptive", "model-top", "random", "measure-all"),
         default="adaptive",
@@ -165,6 +175,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--agent-workers must be positive")
     if args.promotions_per_round is not None and args.promotions_per_round <= 0:
         raise SystemExit("--promotions-per-round must be positive")
+    if (
+        not math.isfinite(args.incumbent_snapshot_interval_seconds)
+        or args.incumbent_snapshot_interval_seconds < 0
+    ):
+        raise SystemExit(
+            "--incumbent-snapshot-interval-seconds must be finite and non-negative"
+        )
     for name in ("api_input_price_per_million", "api_output_price_per_million"):
         value = getattr(args, name)
         if value is not None and value < 0:
@@ -250,7 +267,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     store = ArtifactStore(output)
     run_metadata = {
-        "framework_version": "0.9.0",
+        "framework_version": "0.10.0",
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -275,6 +292,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "agent_workers": args.agent_workers,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,
+            "incumbent_snapshot_interval_seconds": (
+                args.incumbent_snapshot_interval_seconds
+            ),
         },
         "resume_requested": args.resume,
     }
@@ -355,11 +375,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         strategy_allocation_policy=args.strategy_allocation_policy,
         api_input_price_per_million=args.api_input_price_per_million,
         api_output_price_per_million=args.api_output_price_per_million,
+        incumbent_snapshot_interval_seconds=(
+            args.incumbent_snapshot_interval_seconds
+        ),
     )
     summary = controller.run()
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
     print("Best kernel: %s" % summary.best_source_path)
     print("Summary: %s" % (output / "summary.json"))
+    if args.incumbent_snapshot_interval_seconds > 0:
+        print("Incumbent history: %s" % (output / "incumbent_history.csv"))
     return 0
 
 

@@ -544,6 +544,7 @@ class SearchSummary:
     strategy_rejected_candidates: int = 0
     open_exploration_candidates: int = 0
     discovered_strategy_count: int = 0
+    incumbent_snapshot_interval_seconds: float = 300.0
     cost_ledger: JsonDict = field(default_factory=dict)
     report_paths: JsonDict = field(default_factory=dict)
 

@@ -1,6 +1,7 @@
 """Adaptive-fidelity GPU kernel optimization framework."""
 
 from .controller import OptimizationController
+from .incumbent_tracking import PeriodicIncumbentRecorder
 from .schema import (
     BudgetConfig,
     BottleneckDiagnosis,
@@ -33,6 +34,7 @@ __all__ = [
     "Measurement",
     "ModelEvaluation",
     "OptimizationController",
+    "PeriodicIncumbentRecorder",
     "ProfileEvaluation",
     "SearchSummary",
     "SourceValidationError",
@@ -45,4 +47,4 @@ __all__ = [
     "TaskSpec",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"

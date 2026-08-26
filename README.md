@@ -105,6 +105,45 @@ intent, not implementation syntax or the set of legal transformations. The
 model still writes complete source, may combine strategy families, and can name
 a previously unrepresented transformation through open structural exploration.
 
+## Wall-Clock Incumbent History
+
+Every optimization run records the best correctness-verified, CUDA-Event-measured
+kernel available at fixed wall-clock intervals. The default interval is 300 seconds:
+
+```text
+results/<run>/incumbent_history.jsonl   complete nested evidence per snapshot
+results/<run>/incumbent_history.csv     flat metrics for time-to-quality plots
+```
+
+The recorder runs in a background thread, so a long hosted-API, compiler, CUDA, or
+NCU call does not postpone the five-minute sampling decision. It reads only atomic
+candidate records already written by the controller and never ranks an unmeasured
+TileSight prediction as the incumbent. Each JSONL record includes the candidate and
+source identity, measured and final latency, full TileSight model metrics, CUDA
+measurement metrics, available NCU profile metrics, diagnosis, speedup over the
+seed, search phase, round, beam, and cumulative call/candidate counters. Candidate
+source remains in its immutable `candidates/<id>/` directory and is referenced by
+path rather than duplicated every five minutes.
+
+Rows with `reason=interval` are the fixed-time observations intended for equal-time
+comparisons. Additional event rows mark run start, seed completion, incumbent
+changes, final re-ranking, completion, failure, and resume. On resume, sequence
+numbers and active elapsed time continue from the existing history; time while the
+process is stopped is not counted.
+
+Change the interval explicitly when needed:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --output results/matmul_timed_run \
+  --incumbent-snapshot-interval-seconds 300
+```
+
+Use `--incumbent-snapshot-interval-seconds 0` only when periodic artifacts must be
+disabled. Keep the same nonzero interval across compared methods.
+
 ## Requirements
 
 Controller machine:

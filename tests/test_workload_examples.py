@@ -81,13 +81,13 @@ class WorkloadContractTests(unittest.TestCase):
                 self.assertTrue(workload_arguments <= parameters)
                 self.assertTrue(workload_arguments.isdisjoint(SCHEDULE_ARGUMENTS))
 
-    def test_seed_schedule_defaults_are_deliberately_conservative(self) -> None:
+    def test_seed_schedule_defaults_are_deliberately_under_tuned(self) -> None:
         expected = {
             "matmul": {
-                "block_m": 64,
-                "block_n": 64,
+                "block_m": 128,
+                "block_n": 128,
                 "block_k": 32,
-                "num_stages": 1,
+                "num_stages": 3,
                 "threads": 128,
             },
             "flash_attention": {

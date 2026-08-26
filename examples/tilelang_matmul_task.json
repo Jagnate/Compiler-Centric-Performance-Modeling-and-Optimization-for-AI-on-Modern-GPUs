@@ -95,6 +95,6 @@
   "metadata": {
     "kernel_family": "matmul",
     "purpose": "End-to-end hosted-API source optimization example.",
-    "seed_policy": "The input is a correctness-first under-tuned schedule. Preserve semantics while improving its implementation."
+    "seed_policy": "The input is a correctness-first under-tuned 128x128 three-stage schedule that is deliberately resource-heavy on RTX 3090. Preserve semantics while reducing resource pressure or improving its implementation."
   }
 }

@@ -199,6 +199,11 @@ schedule and data-movement opportunities. They are not intentionally invalid:
 an optimization run should improve implementation quality rather than spend its
 budget repairing the starting source.
 
+The Matmul seed specifically uses a validated 128 x 128 x 32, three-stage
+schedule. On the target RTX 3090 this is intentionally resource-heavy, while
+remaining correct and executable, and leaves occupancy and tile-shape
+opportunities for the optimizer.
+
 Input shapes are semantic task data rather than a fixed schedule search space.
 Change `workload.factory_arguments` in the selected task JSON to set the primary
 shape. Each `search_cases` or `final_cases` entry inherits that primary shape

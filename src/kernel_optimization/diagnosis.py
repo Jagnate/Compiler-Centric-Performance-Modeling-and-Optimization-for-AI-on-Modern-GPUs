@@ -39,6 +39,35 @@ _UTILIZATION_ALIASES = {
     "sfu": ("sfu_util", "sm__pipe_sfu"),
 }
 
+_INFRASTRUCTURE_PATTERNS = (
+    (
+        "infrastructure-storage",
+        (
+            "disk quota exceeded",
+            "no space left on device",
+            "errno 122",
+            "errno 28",
+            "edquot",
+            "enospc",
+        ),
+    ),
+    (
+        "infrastructure-profiler-permission",
+        (
+            "err_nvgpuctrperm",
+            "permission to access nvidia gpu performance counters",
+        ),
+    ),
+    (
+        "infrastructure-device",
+        (
+            "no cuda-capable device",
+            "cuda device is unavailable",
+            "cuda driver version is insufficient",
+        ),
+    ),
+)
+
 
 class FailureClassifier:
     """Map raw static/compiler/runtime failures to stable repair categories."""
@@ -69,6 +98,13 @@ class FailureClassifier:
     def model(model: ModelEvaluation) -> FailureEvidence:
         diagnostics = list(model.diagnostics)
         message = diagnostics[0] if diagnostics else "Compiler or model rejected candidate."
+        infrastructure = _infrastructure_failure(
+            stage="model",
+            message=" ".join(diagnostics) or message,
+            details={"bottleneck": model.bottleneck},
+        )
+        if infrastructure is not None:
+            return infrastructure
         lowered = " ".join(diagnostics).lower()
         if "layout infer" in lowered or "layout" in lowered and "conflict" in lowered:
             category = "layout-inference"
@@ -91,6 +127,13 @@ class FailureClassifier:
     @staticmethod
     def measurement(measurement: Measurement) -> FailureEvidence:
         message = measurement.error or "Correctness or runtime validation failed."
+        infrastructure = _infrastructure_failure(
+            stage="measure",
+            message=message,
+            details=dict(measurement.metrics),
+        )
+        if infrastructure is not None:
+            return infrastructure
         lowered = message.lower()
         if any(word in lowered for word in ("mismatch", "incorrect", "correctness", "tolerance")):
             category = "correctness"
@@ -108,6 +151,22 @@ class FailureClassifier:
             message=message,
             diagnostics=[message],
             details=dict(measurement.metrics),
+        )
+
+    @staticmethod
+    def profile(profile_error: str) -> FailureEvidence:
+        message = profile_error or "Hardware profiling failed."
+        infrastructure = _infrastructure_failure(
+            stage="profile",
+            message=message,
+        )
+        if infrastructure is not None:
+            return infrastructure
+        return FailureEvidence(
+            stage="profile",
+            category="profile-runtime",
+            message=message,
+            diagnostics=[message],
         )
 
 
@@ -178,15 +237,46 @@ class BottleneckAnalyzer:
                 "local_store_bytes",
             ),
         )
-        bank_conflict = _first_metric(
+        bank_conflict_amplification = _first_metric(
             flat,
             (
-                "shared_bank_conflict",
-                "bank_conflict",
                 "shared_transactions_per_request",
+                "shared_transaction_amplification",
+                "bank_conflict_amplification",
+                "bank_conflict_ratio",
+            ),
+        )
+        bank_conflict_count = _first_metric(
+            flat,
+            (
+                "bank_conflict_count",
+                "shared_bank_conflict_count",
                 "l1tex__data_bank_conflicts",
             ),
         )
+        shared_wavefronts = _first_metric(
+            flat,
+            (
+                "shared_wavefront_count",
+                "l1tex__data_pipe_lsu_wavefronts_mem_shared",
+            ),
+        )
+        bank_conflict_fraction = None
+        bank_conflict_source = None
+        if bank_conflict_amplification is not None:
+            bank_conflict_source = "reported-transaction-amplification"
+        elif (
+            bank_conflict_count is not None
+            and shared_wavefronts is not None
+            and shared_wavefronts > 0
+        ):
+            bank_conflict_fraction = max(
+                min(bank_conflict_count / shared_wavefronts, 1.0), 0.0
+            )
+            ideal_wavefronts = shared_wavefronts - bank_conflict_count
+            if ideal_wavefronts > 0:
+                bank_conflict_amplification = shared_wavefronts / ideal_wavefronts
+                bank_conflict_source = "derived-from-conflicts-and-wavefronts"
         waves_per_sm = _first_metric(
             flat, ("waves_per_sm", "wave_count", "launch_waves_per_sm")
         )
@@ -197,7 +287,11 @@ class BottleneckAnalyzer:
             "registers_per_thread": registers,
             "shared_memory_per_block_bytes": shared_bytes,
             "spill_bytes": spill_bytes,
-            "bank_conflict_indicator": bank_conflict,
+            "bank_conflict_indicator": bank_conflict_amplification,
+            "bank_conflict_indicator_source": bank_conflict_source,
+            "bank_conflict_count": bank_conflict_count,
+            "shared_wavefront_count": shared_wavefronts,
+            "bank_conflict_fraction": bank_conflict_fraction,
             "waves_per_sm": waves_per_sm,
         }
         relative_error = self._relative_error(record)
@@ -210,7 +304,7 @@ class BottleneckAnalyzer:
             registers,
             shared_bytes,
             spill_bytes,
-            bank_conflict,
+            bank_conflict_amplification,
             waves_per_sm,
             record,
         )
@@ -283,7 +377,7 @@ class BottleneckAnalyzer:
         registers: Optional[float],
         shared_bytes: Optional[float],
         spill_bytes: float,
-        bank_conflict: Optional[float],
+        bank_conflict_amplification: Optional[float],
         waves_per_sm: Optional[float],
         record: CandidateRecord,
     ) -> Tuple[str, List[str]]:
@@ -291,7 +385,10 @@ class BottleneckAnalyzer:
         if spill_bytes > 0:
             factors.append("nonzero local-memory spill traffic")
             return "register-spill", factors
-        if bank_conflict is not None and bank_conflict > 1.25:
+        if (
+            bank_conflict_amplification is not None
+            and bank_conflict_amplification > 1.25
+        ):
             factors.append("shared-memory transaction amplification or bank conflicts")
             return "shared-memory-bank-conflict", factors
         if waves_per_sm is not None and waves_per_sm < 1.0:
@@ -475,3 +572,43 @@ def _percentage(value: Optional[float]) -> Optional[float]:
     if 0.0 <= value <= 1.0:
         return value * 100.0
     return value
+
+
+def _infrastructure_failure(
+    *,
+    stage: str,
+    message: str,
+    details: Optional[Mapping[str, Any]] = None,
+) -> Optional[FailureEvidence]:
+    lowered = str(message).lower()
+    for category, patterns in _INFRASTRUCTURE_PATTERNS:
+        if not any(pattern in lowered for pattern in patterns):
+            continue
+        payload = dict(details or {})
+        payload.update(
+            {
+                "infrastructure_failure": True,
+                "original_stage": stage,
+            }
+        )
+        return FailureEvidence(
+            stage=stage,
+            category=category,
+            message=str(message),
+            diagnostics=[str(message)],
+            details=payload,
+            retryable=False,
+        )
+    return None
+
+
+def is_infrastructure_failure(failure: Optional[FailureEvidence]) -> bool:
+    """Return whether a failure reflects the host rather than candidate source."""
+
+    return bool(
+        failure is not None
+        and (
+            failure.category.startswith("infrastructure-")
+            or failure.details.get("infrastructure_failure") is True
+        )
+    )

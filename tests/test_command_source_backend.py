@@ -60,6 +60,27 @@ class CommandSourceBackendTests(unittest.TestCase):
         self.assertEqual(backend.working_directory, REPOSITORY_ROOT)
         self.assertEqual(backend.environment["PYTHONPATH"], "../TileSight")
 
+    def test_factory_isolates_tilelang_cache_inside_run_output(self) -> None:
+        task_path = REPOSITORY_ROOT / "examples" / "tilelang_matmul_task.json"
+        task = TaskSpec.from_json_file(task_path)
+
+        with tempfile.TemporaryDirectory(prefix="kernel-cache-output-") as directory:
+            artifacts = Path(directory) / "evaluator_attempts"
+            backend = create_backend(
+                task,
+                task_path.parent,
+                artifact_directory=artifacts,
+            )
+
+            expected = Path(directory) / ".tilelang_cache"
+            self.assertEqual(
+                Path(backend.environment["TILELANG_CACHE_DIR"]), expected
+            )
+            self.assertEqual(
+                Path(backend.environment["TILELANG_TMP_DIR"]), expected / "tmp"
+            )
+            self.assertTrue((expected / "tmp").is_dir())
+
     def test_sensitive_environment_is_removed_and_attempt_is_archived(self) -> None:
         task = TaskSpec(
             task_id="command-environment-test",

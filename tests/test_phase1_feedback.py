@@ -143,6 +143,113 @@ class DiagnosisTests(unittest.TestCase):
         self.assertEqual(failure.category, "layout-inference")
         self.assertIn("Layout infer conflict", failure.message)
 
+    def test_raw_bank_conflict_count_is_normalized_before_classification(self) -> None:
+        task = make_task(max_repairs_per_round=0)
+        candidate = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        record = CandidateRecord(
+            candidate=candidate,
+            model=ModelEvaluation(valid=True, predicted_latency_ms=1.0),
+            measurement=Measurement(correct=True, latency_ms=1.0),
+            profile=ProfileEvaluation(
+                bottleneck="dram-bandwidth",
+                metrics={
+                    "ddr_util": 0.92,
+                    "l2_util": 0.35,
+                    "smem_util": 0.10,
+                    "raw_metrics": {
+                        "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum": 4737,
+                        "l1tex__data_pipe_lsu_wavefronts_mem_shared.sum": 480126,
+                    },
+                },
+            ),
+        )
+
+        diagnosis = BottleneckAnalyzer().diagnose(record)
+
+        self.assertEqual(diagnosis.category, "memory-dram")
+        self.assertAlmostEqual(
+            diagnosis.metrics["bank_conflict_indicator"],
+            480126.0 / (480126.0 - 4737.0),
+        )
+        self.assertAlmostEqual(
+            diagnosis.metrics["bank_conflict_fraction"], 4737.0 / 480126.0
+        )
+
+    def test_reported_transaction_amplification_can_identify_conflicts(self) -> None:
+        task = make_task(max_repairs_per_round=0)
+        candidate = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        record = CandidateRecord(
+            candidate=candidate,
+            model=ModelEvaluation(valid=True, predicted_latency_ms=1.0),
+            measurement=Measurement(correct=True, latency_ms=1.0),
+            profile=ProfileEvaluation(
+                bottleneck="shared-memory",
+                metrics={
+                    "shared_transactions_per_request": 1.5,
+                    "smem_util": 0.40,
+                },
+            ),
+        )
+
+        diagnosis = BottleneckAnalyzer().diagnose(record)
+
+        self.assertEqual(diagnosis.category, "shared-memory-bank-conflict")
+
+    def test_disk_quota_failure_is_not_repairable_correctness(self) -> None:
+        failure = FailureClassifier.measurement(
+            Measurement(
+                correct=False,
+                error="RuntimeError: [Errno 122] Disk quota exceeded: cache.cubin",
+            )
+        )
+
+        self.assertEqual(failure.category, "infrastructure-storage")
+        self.assertFalse(failure.retryable)
+        self.assertTrue(failure.details["infrastructure_failure"])
+
+    def test_profiler_permission_failure_is_infrastructure(self) -> None:
+        failure = FailureClassifier.profile(
+            "ERR_NVGPUCTRPERM: permission to access NVIDIA GPU performance counters"
+        )
+
+        self.assertEqual(failure.category, "infrastructure-profiler-permission")
+        self.assertEqual(failure.stage, "profile")
+        self.assertFalse(failure.retryable)
+
+
+class InfrastructureCircuitBreakerTests(unittest.TestCase):
+    def test_repeated_storage_failures_stop_without_llm_repair(self) -> None:
+        task = make_task(
+            proposals_per_round=2,
+            min_promotions_per_round=2,
+            max_promotions_per_round=2,
+            max_repairs_per_round=2,
+        )
+        generator = _InfrastructureGenerator()
+        backend = _InfrastructureBackend()
+
+        with tempfile.TemporaryDirectory(prefix="kernel-infrastructure-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code="VALUE = 0\n\ndef kernel(x):\n    return x\n",
+                source_name="kernel.py",
+                generator=generator,
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "consecutive infrastructure-storage"):
+                controller.run()
+
+        self.assertEqual(generator.repair_calls, 0)
+        failures = [
+            record
+            for record in controller.records.values()
+            if record.state == "infrastructure-failed"
+        ]
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(all(not record.failure.retryable for record in failures))
+
 
 class CalibrationAndMemoryTests(unittest.TestCase):
     def test_regime_calibration_keeps_raw_and_adds_robust_prediction(self) -> None:
@@ -284,6 +391,48 @@ class ApiRepairPromptTests(unittest.TestCase):
         self.assertIn("def removed", captured["failed_candidate"]["source_code"])
         prompts = json.dumps(captured)
         self.assertFalse(any("\u4e00" <= char <= "\u9fff" for char in prompts))
+
+
+class _InfrastructureGenerator:
+    last_call_metadata = {}
+    last_exchange = {}
+
+    def __init__(self) -> None:
+        self.repair_calls = 0
+
+    def generate(self, task, parent, evidence, history, count):
+        del task, parent, evidence, history
+        return [
+            CandidateProposal(
+                hypothesis="Exercise infrastructure failure %d." % value,
+                source_code="VALUE = %d\n\ndef kernel(x):\n    return x\n" % value,
+            )
+            for value in range(1, count + 1)
+        ]
+
+    def repair(self, *args, **kwargs):
+        del args, kwargs
+        self.repair_calls += 1
+        raise AssertionError("infrastructure failures must not request source repair")
+
+
+class _InfrastructureBackend:
+    def model(self, task: TaskSpec, candidate: Candidate) -> ModelEvaluation:
+        del task, candidate
+        return ModelEvaluation(valid=True, predicted_latency_ms=1.0)
+
+    def measure(self, task: TaskSpec, candidate: Candidate) -> Measurement:
+        del task
+        if "VALUE = 0" in candidate.source_code:
+            return Measurement(correct=True, latency_ms=1.0, samples_ms=[1.0])
+        return Measurement(
+            correct=False,
+            error="RuntimeError: [Errno 122] Disk quota exceeded: cache.cubin",
+        )
+
+    def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
+        del task, candidate
+        return ProfileEvaluation(bottleneck="test", metrics={"cuda_util": 0.5})
 
 
 class _RepairingGenerator:

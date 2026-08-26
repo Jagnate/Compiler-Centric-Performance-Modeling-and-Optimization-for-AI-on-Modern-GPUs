@@ -16,12 +16,12 @@ def make_conv2d_program(
     dilation: int = 1,
     padding: int = 1,
     block_m: int = 64,
-    block_n: int = 128,
+    block_n: int = 64,
     block_k: int = 32,
-    num_stages: int = 3,
-    threads: int = 256,
+    num_stages: int = 1,
+    threads: int = 128,
 ):
-    """Construct an implicit-GEMM FP16 Conv2D PrimFunc in NHWC/HWIO layout."""
+    """Construct a conservative implicit-GEMM FP16 Conv2D baseline."""
 
     semantic_values = (
         batch,

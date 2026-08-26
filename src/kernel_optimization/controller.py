@@ -12,7 +12,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypeV
 from .archive import ArtifactStore
 from .calibration import LatencyCalibrator
 from .costs import build_cost_ledger
-from .diagnosis import BottleneckAnalyzer, FailureClassifier
+from .diagnosis import (
+    BottleneckAnalyzer,
+    FailureClassifier,
+    is_infrastructure_failure,
+)
 from .evidence import GlobalEvidenceMemory
 from .incumbent_tracking import PeriodicIncumbentRecorder
 from .milestones import create_profile_policy
@@ -43,6 +47,8 @@ from .trust import TrustTracker
 
 
 T = TypeVar("T")
+
+_INFRASTRUCTURE_FAILURE_LIMIT = 2
 
 _PHASE_ORDER = {
     "": -1,
@@ -250,6 +256,8 @@ class OptimizationController:
         self._search_best_id: Optional[str] = None
         self.was_resumed = False
         self.compiled_hash_owners: Dict[str, str] = {}
+        self._infrastructure_failure_category: Optional[str] = None
+        self._consecutive_infrastructure_failures = 0
 
     def run(self) -> SearchSummary:
         started_at = time.perf_counter()
@@ -609,8 +617,17 @@ class OptimizationController:
             if not record.model.valid:
                 record.failure = FailureClassifier.model(record.model)
                 self._diagnose_and_remember(record, None, round_number=0)
-                record.state = "seed-model-invalid"
+                record.state = (
+                    "seed-infrastructure-failed"
+                    if is_infrastructure_failure(record.failure)
+                    else "seed-model-invalid"
+                )
                 self.store.save_candidate(record)
+                if is_infrastructure_failure(record.failure):
+                    raise RuntimeError(
+                        "the input kernel could not be modeled because the evaluator "
+                        "environment failed: %s" % record.failure.message
+                    )
                 raise RuntimeError(
                     "the input kernel is invalid according to the model backend"
                 )
@@ -634,16 +651,28 @@ class OptimizationController:
         if not record.measurement.correct:
             record.failure = FailureClassifier.measurement(record.measurement)
             self._diagnose_and_remember(record, None, round_number=0)
-            record.state = "seed-correctness-failed"
+            record.state = (
+                "seed-infrastructure-failed"
+                if is_infrastructure_failure(record.failure)
+                else "seed-correctness-failed"
+            )
             self.store.save_candidate(record)
+            if is_infrastructure_failure(record.failure):
+                raise RuntimeError(
+                    "the input kernel could not be measured because the evaluator "
+                    "environment failed: %s" % record.failure.message
+                )
             raise RuntimeError("the input kernel failed correctness")
+        self._clear_infrastructure_failures()
         self.calibrator.observe(self.task, record)
         if self.evaluation_policy == "ncu":
             record.profile = self._profile_candidate(candidate)
+            self._handle_profile_infrastructure(record, round_number=0)
         elif self.evaluation_policy == "tilesight" and self.milestones.profile_seed:
             record.profile = self._profile_candidate(candidate)
             if record.profile.valid:
                 self.milestones.mark_profiled(record, round_number=0)
+            self._handle_profile_infrastructure(record, round_number=0)
         record.state = "measured-beam"
         record.selection_reasons.append("initial-source")
         record.decision_reason = "Verified and measured input kernel."
@@ -766,7 +795,10 @@ class OptimizationController:
                     item.candidate.candidate_id,
                 ),
             ):
-                if record.diagnosis is not None:
+                if (
+                    record.diagnosis is not None
+                    and not is_infrastructure_failure(record.failure)
+                ):
                     parent = self.records.get(record.candidate.parent_id or "")
                     self.evidence_memory.ingest(
                         record, parent, record.candidate.generation
@@ -1571,6 +1603,7 @@ class OptimizationController:
                     diagnostics=["%s: %s" % (type(error).__name__, error)],
                 )
             if record.model.valid:
+                self._clear_infrastructure_failures()
                 record.model = self.calibrator.apply(self.task, record.model)
                 record.failure = None
                 parent = self.records.get(record.candidate.parent_id or "")
@@ -1594,11 +1627,20 @@ class OptimizationController:
                 else:
                     record.state = "modeled"
             else:
-                record.state = "model-invalid"
-                record.decision_reason = "Rejected by compiler or performance model."
                 record.failure = FailureClassifier.model(record.model)
+                infrastructure = is_infrastructure_failure(record.failure)
+                record.state = (
+                    "infrastructure-failed" if infrastructure else "model-invalid"
+                )
+                record.decision_reason = (
+                    "Evaluator infrastructure failed while modeling the candidate."
+                    if infrastructure
+                    else "Rejected by compiler or performance model."
+                )
                 parent = self.records.get(record.candidate.parent_id or "")
                 self._diagnose_and_remember(record, parent, round_number)
+                if infrastructure:
+                    self._record_infrastructure_failure(record, round_number)
             self.store.save_candidate(record)
         return list(records)
 
@@ -1673,19 +1715,30 @@ class OptimizationController:
                         error="%s: %s" % (type(error).__name__, error),
                     )
             if record.measurement.correct:
+                self._clear_infrastructure_failures()
                 record.state = "measured"
                 record.decision_reason = "Correctness passed and latency was measured."
                 record.failure = None
                 self.calibrator.observe(self.task, record)
                 measured.append(record)
             else:
-                record.state = "correctness-failed"
-                record.decision_reason = (
-                    record.measurement.error or "Correctness failed."
-                )
                 record.failure = FailureClassifier.measurement(record.measurement)
+                infrastructure = is_infrastructure_failure(record.failure)
+                record.state = (
+                    "infrastructure-failed"
+                    if infrastructure
+                    else "correctness-failed"
+                )
+                record.decision_reason = (
+                    "Evaluator infrastructure failed during measurement: %s"
+                    % record.failure.message
+                    if infrastructure
+                    else record.measurement.error or "Correctness failed."
+                )
             parent = self.records.get(record.candidate.parent_id or "")
             self._diagnose_and_remember(record, parent, round_number)
+            if is_infrastructure_failure(record.failure):
+                self._record_infrastructure_failure(record, round_number)
         self._rebuild_trust()
         return measured
 
@@ -1730,6 +1783,7 @@ class OptimizationController:
                     "error": record.profile.error,
                 },
             )
+            self._handle_profile_infrastructure(record, round_number)
 
     def _repair_measurement_failures(
         self, records: Sequence[CandidateRecord], round_number: int
@@ -1837,6 +1891,7 @@ class OptimizationController:
                 "error": record.profile.error,
             },
         )
+        self._handle_profile_infrastructure(record, round_number)
 
     def _profile_candidate(self, candidate: Candidate) -> ProfileEvaluation:
         try:
@@ -1854,6 +1909,36 @@ class OptimizationController:
             )
         self.profile_calls += 1
         return profile
+
+    def _handle_profile_infrastructure(
+        self,
+        record: CandidateRecord,
+        round_number: int,
+    ) -> None:
+        profile = record.profile
+        if profile is None:
+            return
+        if profile.valid:
+            self._clear_infrastructure_failures()
+            return
+        failure = FailureClassifier.profile(profile.error or "")
+        if not is_infrastructure_failure(failure):
+            return
+        self.store.append_event(
+            "infrastructure_failure_archived",
+            {
+                "round": round_number,
+                "candidate_id": record.candidate.candidate_id,
+                "category": failure.category,
+                "stage": failure.stage,
+                "message": failure.message,
+            },
+        )
+        self._record_infrastructure_evidence(
+            failure,
+            record.candidate.candidate_id,
+            round_number,
+        )
 
     def _finalize_candidates(
         self, seed: CandidateRecord, completed_rounds: int
@@ -1909,15 +1994,26 @@ class OptimizationController:
                     )
                 self.final_validation_calls += 1
                 if record.final_measurement.correct:
+                    self._clear_infrastructure_failures()
                     self.final_validation_passes += 1
                     record.selection_reasons.append("fresh-final-validation")
                     record.state = "final-validated"
                 else:
-                    record.state = "final-validation-failed"
+                    final_failure = FailureClassifier.measurement(
+                        record.final_measurement
+                    )
+                    infrastructure = is_infrastructure_failure(final_failure)
+                    record.state = (
+                        "final-infrastructure-failed"
+                        if infrastructure
+                        else "final-validation-failed"
+                    )
                     record.decision_reason = (
                         record.final_measurement.error
                         or "Held-out final validation failed."
                     )
+                    if infrastructure:
+                        record.failure = final_failure
                 self.store.save_candidate(record)
                 self.store.append_event(
                     "candidate_finalized",
@@ -1929,6 +2025,14 @@ class OptimizationController:
                         "error": record.final_measurement.error,
                     },
                 )
+                if is_infrastructure_failure(record.failure):
+                    if record.candidate.candidate_id == seed.candidate.candidate_id:
+                        raise RuntimeError(
+                            "the seed kernel could not complete final validation "
+                            "because the evaluator environment failed: %s"
+                            % record.failure.message
+                        )
+                    self._record_infrastructure_failure(record, completed_rounds)
 
         finalized_records = [
             item for item in self.records.values() if item.final_measurement is not None
@@ -2024,6 +2128,18 @@ class OptimizationController:
     ) -> None:
         record.diagnosis = self.analyzer.diagnose(record, parent)
         self.store.save_candidate(record)
+        if is_infrastructure_failure(record.failure):
+            self.store.append_event(
+                "infrastructure_failure_archived",
+                {
+                    "round": round_number,
+                    "candidate_id": record.candidate.candidate_id,
+                    "category": record.failure.category,
+                    "stage": record.failure.stage,
+                    "message": record.failure.message,
+                },
+            )
+            return
         lesson = self.evidence_memory.ingest(record, parent, round_number)
         self.store.save_evidence_memory(self.evidence_memory.snapshot())
         if lesson is not None:
@@ -2037,6 +2153,66 @@ class OptimizationController:
                     "bottleneck": lesson.bottleneck,
                 },
             )
+
+    def _record_infrastructure_failure(
+        self,
+        record: CandidateRecord,
+        round_number: int,
+    ) -> None:
+        failure = record.failure
+        if not is_infrastructure_failure(failure):
+            return
+        self._record_infrastructure_evidence(
+            failure,
+            record.candidate.candidate_id,
+            round_number,
+        )
+
+    def _record_infrastructure_evidence(
+        self,
+        failure: FailureEvidence,
+        candidate_id: str,
+        round_number: int,
+    ) -> None:
+        if failure.category == self._infrastructure_failure_category:
+            self._consecutive_infrastructure_failures += 1
+        else:
+            self._infrastructure_failure_category = failure.category
+            self._consecutive_infrastructure_failures = 1
+        self.store.append_event(
+            "infrastructure_failure_observed",
+            {
+                "round": round_number,
+                "candidate_id": candidate_id,
+                "category": failure.category,
+                "consecutive_count": self._consecutive_infrastructure_failures,
+                "limit": _INFRASTRUCTURE_FAILURE_LIMIT,
+            },
+        )
+        if self._consecutive_infrastructure_failures < _INFRASTRUCTURE_FAILURE_LIMIT:
+            return
+        self.store.append_event(
+            "infrastructure_circuit_breaker_opened",
+            {
+                "round": round_number,
+                "category": failure.category,
+                "consecutive_count": self._consecutive_infrastructure_failures,
+                "message": failure.message,
+            },
+        )
+        raise RuntimeError(
+            "stopping after %d consecutive %s failures; fix the evaluator "
+            "environment and start a new output directory: %s"
+            % (
+                self._consecutive_infrastructure_failures,
+                failure.category,
+                failure.message,
+            )
+        )
+
+    def _clear_infrastructure_failures(self) -> None:
+        self._infrastructure_failure_category = None
+        self._consecutive_infrastructure_failures = 0
 
     def _evidence(self, record: CandidateRecord) -> Dict[str, Any]:
         return {
@@ -2220,6 +2396,28 @@ class OptimizationController:
                 if self.tir_evidence_policy == "visible"
                 else None
             ),
+            "analytical_model_coverage": (
+                {
+                    "directly_represented": [
+                        "global, L2, and shared-memory traffic volume",
+                        "tensor, CUDA-core, and SFU operation volume",
+                        "register/shared-memory occupancy limits",
+                        "CTA wave and launch underfill",
+                    ],
+                    "not_directly_represented": [
+                        "shared-memory bank conflicts",
+                        "instruction scheduling and dependency stalls",
+                        "compiler code-generation quality",
+                    ],
+                    "routing_rule": (
+                        "Do not devote most slots to an unmodeled effect. Use a "
+                        "small diverse probe and rely on CUDA-event or NCU evidence "
+                        "before exploiting that direction."
+                    ),
+                }
+                if self.tir_evidence_policy == "visible"
+                else None
+            ),
             "strategy_outcomes": self._strategy_outcomes_for_prompt(
                 self._strategy_outcome_summary(before_round=round_number)
             ),
@@ -2293,7 +2491,10 @@ class OptimizationController:
                 outcome["model_valid"] += 1
                 if record.compiled_equivalent_to is None:
                     outcome["compiled_unique"] += 1
-            if record.failure is not None:
+            if (
+                record.failure is not None
+                and not is_infrastructure_failure(record.failure)
+            ):
                 failures = outcome["failure_categories"]
                 failures[record.failure.category] = (
                     failures.get(record.failure.category, 0) + 1

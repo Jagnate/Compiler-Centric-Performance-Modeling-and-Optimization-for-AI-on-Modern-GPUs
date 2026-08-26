@@ -124,6 +124,20 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
             add(uncertain, "low-confidence-audit")
 
         remaining = [item for item in valid if item.candidate.candidate_id not in selected_ids]
+        insensitive = self._model_insensitive_candidates(valid, remaining)
+        if insensitive:
+            references = [item.candidate.source_code for item in measured_beam]
+            references.extend(item.candidate.source_code for item in selected)
+            audit = max(
+                insensitive,
+                key=lambda item: (
+                    self._distance_from_set(item.candidate.source_code, references),
+                    item.candidate.candidate_id,
+                ),
+            )
+            add(audit, "model-insensitive-audit")
+
+        remaining = [item for item in valid if item.candidate.candidate_id not in selected_ids]
         if remaining:
             references = [item.candidate.source_code for item in measured_beam]
             references.extend(item.candidate.source_code for item in selected)
@@ -144,6 +158,37 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
             index = self.random.randrange(len(remaining))
             add(remaining.pop(index), "random-audit")
         return selected
+
+    @staticmethod
+    def _model_insensitive_candidates(
+        valid: Sequence[CandidateRecord],
+        remaining: Sequence[CandidateRecord],
+    ) -> List[CandidateRecord]:
+        """Find candidates in a strategy lane that the model cannot rank apart."""
+
+        groups = {}
+        for record in valid:
+            strategy = str(
+                record.candidate.proposal_metadata.get("strategy_id")
+                or "unassigned"
+            )
+            groups.setdefault(strategy, []).append(record)
+        insensitive_ids = set()
+        for records in groups.values():
+            if len(records) < 2:
+                continue
+            latencies = [float(item.model.ranking_latency_ms) for item in records]
+            scale = max(min(latencies), 1e-12)
+            relative_spread = (max(latencies) - min(latencies)) / scale
+            if relative_spread <= 0.005:
+                insensitive_ids.update(
+                    item.candidate.candidate_id for item in records
+                )
+        return [
+            item
+            for item in remaining
+            if item.candidate.candidate_id in insensitive_ids
+        ]
 
     @staticmethod
     def _distance_from_set(source_code: str, references: Sequence[str]) -> float:

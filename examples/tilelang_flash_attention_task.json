@@ -114,6 +114,7 @@
   },
   "metadata": {
     "kernel_family": "flash-attention",
-    "purpose": "End-to-end hosted-API source optimization example."
+    "purpose": "End-to-end hosted-API source optimization example.",
+    "seed_policy": "The fused online-softmax algorithm is fixed, but the input schedule and data movement are deliberately under-tuned."
   }
 }

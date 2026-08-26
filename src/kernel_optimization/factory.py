@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +31,28 @@ def create_backend(
             if not working_directory.is_absolute():
                 working_directory = base_directory / working_directory
         timeout = float(configuration.pop("timeout_seconds", 300.0))
-        environment = configuration.pop("environment", None)
+        environment = {
+            str(name): str(value)
+            for name, value in dict(
+                configuration.pop("environment", None) or {}
+            ).items()
+        }
+        if artifact_directory is not None:
+            default_cache = artifact_directory.parent / ".tilelang_cache"
+            cache_directory = Path(
+                environment.get("TILELANG_CACHE_DIR")
+                or os.environ.get("TILELANG_CACHE_DIR")
+                or default_cache
+            ).expanduser()
+            temporary_directory = Path(
+                environment.get("TILELANG_TMP_DIR")
+                or os.environ.get("TILELANG_TMP_DIR")
+                or cache_directory / "tmp"
+            ).expanduser()
+            cache_directory.mkdir(parents=True, exist_ok=True)
+            temporary_directory.mkdir(parents=True, exist_ok=True)
+            environment.setdefault("TILELANG_CACHE_DIR", str(cache_directory))
+            environment.setdefault("TILELANG_TMP_DIR", str(temporary_directory))
         runtime = configuration.pop("runtime", None)
         if runtime is not None and not isinstance(runtime, dict):
             raise ValueError("command evaluator runtime must be a JSON object")

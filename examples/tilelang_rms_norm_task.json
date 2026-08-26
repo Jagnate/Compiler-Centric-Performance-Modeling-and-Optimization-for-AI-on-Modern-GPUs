@@ -103,6 +103,7 @@
   },
   "metadata": {
     "kernel_family": "rmsnorm",
-    "purpose": "End-to-end hosted-API source optimization example."
+    "purpose": "End-to-end hosted-API source optimization example.",
+    "seed_policy": "The input is a correctness-first under-tuned two-pass reduction with conservative chunk and thread defaults."
   }
 }

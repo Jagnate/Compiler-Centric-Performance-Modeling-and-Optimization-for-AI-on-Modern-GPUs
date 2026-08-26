@@ -10,10 +10,10 @@ def make_rms_norm_program(
     hidden_size: int = 4096,
     epsilon: float = 1e-6,
     block_rows: int = 1,
-    block_hidden: int = 256,
-    threads: int = 128,
+    block_hidden: int = 128,
+    threads: int = 64,
 ):
-    """Construct a two-pass FP16 weighted RMSNorm PrimFunc."""
+    """Construct a correctness-first two-pass weighted RMSNorm baseline."""
 
     if rows <= 0 or hidden_size <= 0:
         raise ValueError("rows and hidden_size must be positive")

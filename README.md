@@ -193,6 +193,12 @@ FP16 primary workload. Flash Attention uses B=1, H=32, S=1024, D=64 FP16 BSHD
 input. Weighted RMSNorm uses 8192 rows with hidden size 4096. Conv2D uses NHWC
 N=32, H=W=56, C=64 input and an HWIO 3 x 3 x 64 x 128 filter.
 
+The editable seeds are deliberately under-tuned, correctness-first baselines.
+They retain a stable Tensor Core or reduction algorithm while exposing ordinary
+schedule and data-movement opportunities. They are not intentionally invalid:
+an optimization run should improve implementation quality rather than spend its
+budget repairing the starting source.
+
 Input shapes are semantic task data rather than a fixed schedule search space.
 Change `workload.factory_arguments` in the selected task JSON to set the primary
 shape. Each `search_cases` or `final_cases` entry inherits that primary shape
@@ -230,6 +236,13 @@ PYTHONPATH=src python3 examples/validate_seed_kernel.py \
 Add `--profile` to any command for one NCU collection. Without that flag the
 smoke run performs TileSight modeling, public multi-case correctness and CUDA
 Event timing, then a fresh held-out correctness and robust timing pass.
+
+Each run automatically places TileLang's persistent and temporary compiler
+cache under `<output>/.tilelang_cache`. Explicit `TILELANG_CACHE_DIR` and
+`TILELANG_TMP_DIR` environment values still take precedence. Storage quota,
+profiler-permission, and unavailable-device failures are archived as
+infrastructure failures, never sent to source repair, and open a circuit breaker
+after two consecutive occurrences.
 
 ## Hosted API Configuration
 
@@ -787,7 +800,10 @@ and reports a category, confidence, supporting evidence, limiting factors, and
 actionable recommendations. It recognizes resource-limited occupancy,
 register spills, shared-memory bank conflicts, launch underfill, DRAM/L2/shared
 memory pressure, Tensor/CUDA/SFU compute pressure, and generally low
-utilization. A raw maximum-utilization label is still retained in the backend
+utilization. Raw bank-conflict event counts are converted to transaction
+amplification with their shared-wavefront denominator before thresholding; they
+are never compared directly with a ratio threshold. A raw maximum-utilization
+label is still retained in the backend
 response, but the API receives the structured interpretation.
 
 Every correctness outcome, failure, and successful NCU milestone creates a

@@ -9,13 +9,13 @@ def make_matmul_program(
     m: int = 2048,
     n: int = 2048,
     k: int = 2048,
-    block_m: int = 128,
-    block_n: int = 128,
+    block_m: int = 64,
+    block_n: int = 64,
     block_k: int = 32,
-    num_stages: int = 3,
+    num_stages: int = 1,
     threads: int = 128,
 ):
-    """Construct the initial pipelined FP16 matmul PrimFunc."""
+    """Construct a correctness-first, deliberately under-tuned FP16 matmul."""
 
     @T.prim_func
     def matmul(

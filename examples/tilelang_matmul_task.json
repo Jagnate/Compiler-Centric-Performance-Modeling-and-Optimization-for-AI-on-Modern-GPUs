@@ -94,6 +94,7 @@
   },
   "metadata": {
     "kernel_family": "matmul",
-    "purpose": "End-to-end hosted-API source optimization example."
+    "purpose": "End-to-end hosted-API source optimization example.",
+    "seed_policy": "The input is a correctness-first under-tuned schedule. Preserve semantics while improving its implementation."
   }
 }

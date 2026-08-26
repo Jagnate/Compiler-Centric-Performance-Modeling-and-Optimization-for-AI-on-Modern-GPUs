@@ -89,6 +89,63 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertIn("low-confidence-audit", reasons)
         self.assertIn("source-diversity", reasons)
 
+    def test_selection_audits_a_strategy_lane_with_flat_model_scores(self) -> None:
+        budget = BudgetConfig(
+            min_promotions_per_round=3,
+            max_promotions_per_round=3,
+            random_seed=9,
+        )
+        task = TaskSpec(
+            task_id="model-insensitive-selection-test",
+            description="Audit candidates that the model cannot rank apart.",
+            reference="Return the input.",
+            entrypoint="kernel",
+            budget=budget,
+        )
+        seed = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        beam = [
+            CandidateRecord(
+                candidate=seed,
+                model=ModelEvaluation(valid=True, predicted_latency_ms=2.0),
+                measurement=Measurement(correct=True, latency_ms=2.0),
+            )
+        ]
+        modeled = []
+        for index in range(5):
+            candidate = Candidate.from_proposal(
+                task,
+                seed,
+                CandidateProposal(
+                    hypothesis="Flat model candidate %d." % index,
+                    source_code=(
+                        "def kernel(x):\n"
+                        "    value_%d = x\n"
+                        "    return value_%d\n" % (index, index)
+                    ),
+                    metadata={"strategy_id": "memory-layout"},
+                ),
+                generation=1,
+            )
+            modeled.append(
+                CandidateRecord(
+                    candidate=candidate,
+                    model=ModelEvaluation(
+                        valid=True,
+                        predicted_latency_ms=1.0 + index * 0.0005,
+                        confidence="high",
+                    ),
+                )
+            )
+
+        selected = AdaptiveSelectionPolicy(budget).select(
+            task, modeled, beam, TrustTracker()
+        )
+
+        reasons = {
+            reason for record in selected for reason in record.selection_reasons
+        }
+        self.assertIn("model-insensitive-audit", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

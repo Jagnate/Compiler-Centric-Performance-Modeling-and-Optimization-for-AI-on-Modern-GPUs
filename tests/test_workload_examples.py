@@ -49,6 +49,23 @@ def _factory_parameters(source: str, entrypoint: str) -> set[str]:
     raise AssertionError(f"entrypoint {entrypoint!r} is missing")
 
 
+def _factory_defaults(source: str, entrypoint: str) -> dict[str, object]:
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != entrypoint:
+            continue
+        positional = list(node.args.args)
+        defaults = list(node.args.defaults)
+        names = [item.arg for item in positional[len(positional) - len(defaults) :]]
+        return {
+            name: ast.literal_eval(value)
+            for name, value in zip(names, defaults)
+        }
+    raise AssertionError(f"entrypoint {entrypoint!r} is missing")
+
+
 class WorkloadContractTests(unittest.TestCase):
     def test_all_task_shapes_match_seed_factory_signatures(self) -> None:
         for name in ("matmul", "flash_attention", "rms_norm", "conv2d"):
@@ -63,6 +80,59 @@ class WorkloadContractTests(unittest.TestCase):
                 workload_arguments = set(task.workload["factory_arguments"])
                 self.assertTrue(workload_arguments <= parameters)
                 self.assertTrue(workload_arguments.isdisjoint(SCHEDULE_ARGUMENTS))
+
+    def test_seed_schedule_defaults_are_deliberately_conservative(self) -> None:
+        expected = {
+            "matmul": {
+                "block_m": 64,
+                "block_n": 64,
+                "block_k": 32,
+                "num_stages": 1,
+                "threads": 128,
+            },
+            "flash_attention": {
+                "block_m": 64,
+                "block_n": 64,
+                "num_stages": 1,
+                "threads": 128,
+            },
+            "rms_norm": {
+                "block_rows": 1,
+                "block_hidden": 128,
+                "threads": 64,
+            },
+            "conv2d": {
+                "block_m": 64,
+                "block_n": 64,
+                "block_k": 32,
+                "num_stages": 1,
+                "threads": 128,
+            },
+        }
+        for name, schedule in expected.items():
+            with self.subTest(workload=name):
+                task = _load_task(name)
+                source = (
+                    REPOSITORY_ROOT
+                    / "examples"
+                    / f"tilelang_{name}_kernel.py"
+                ).read_text(encoding="utf-8")
+                defaults = _factory_defaults(source, task.entrypoint)
+                self.assertEqual(
+                    {key: defaults[key] for key in schedule}, schedule
+                )
+                self.assertIn("under-tuned", task.metadata["seed_policy"])
+
+    def test_flash_attention_seed_exposes_invariant_q_hoisting(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "examples" / "tilelang_flash_attention_kernel.py"
+        ).read_text(encoding="utf-8")
+
+        pipeline = source.index("for ko in T.Pipelined")
+        q_copy = source.index("q[bz, bx * block_m", pipeline)
+        k_copy = source.index("k[bz, ko * block_n", pipeline)
+        self.assertLess(pipeline, q_copy)
+        self.assertLess(q_copy, k_copy)
 
     def test_new_workloads_exercise_multiple_input_shapes(self) -> None:
         expected_changes = {

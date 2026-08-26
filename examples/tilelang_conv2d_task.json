@@ -119,6 +119,7 @@
   },
   "metadata": {
     "kernel_family": "conv2d",
-    "purpose": "End-to-end hosted-API source optimization example."
+    "purpose": "End-to-end hosted-API source optimization example.",
+    "seed_policy": "The input keeps a stable implicit-GEMM algorithm with deliberately under-tuned tile, pipeline, and thread defaults."
   }
 }

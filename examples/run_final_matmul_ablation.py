@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the four final Matmul evaluation treatments sequentially."""
+"""Run four final ablation treatments, using Matmul defaults."""
 
 from __future__ import annotations
 
@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory that receives one subdirectory per treatment.",
     )
     parser.add_argument(
+        "--report-title",
+        default="Final Matmul Ablation",
+        help="Heading used by the aggregate Markdown report.",
+    )
+    parser.add_argument(
         "--agent-workers",
         type=int,
         default=int(os.environ.get("KERNEL_OPT_AGENT_WORKERS", "1")),
@@ -193,9 +198,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_root = args.output_root.expanduser().resolve()
 
     if not source.is_file():
-        raise SystemExit("Matmul source does not exist: %s" % source)
+        raise SystemExit("Kernel source does not exist: %s" % source)
     if not task.is_file():
-        raise SystemExit("Matmul task does not exist: %s" % task)
+        raise SystemExit("Kernel task does not exist: %s" % task)
     if args.agent_workers <= 0:
         raise SystemExit("--agent-workers must be positive")
     if args.incumbent_snapshot_interval_seconds < 0:
@@ -279,17 +284,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "failed",
                 )
             )
-            _write_reports(output_root, source, task, rows)
+            _write_reports(
+                output_root, source, task, rows, args.report_title
+            )
             raise SystemExit(
                 "%s failed with exit code %d; rerun this script to resume it."
                 % (treatment.title, completed.returncode)
             )
         rows.append(_summary_row(treatment, _read_json(summary_path), "completed"))
-        _write_reports(output_root, source, task, rows)
+        _write_reports(output_root, source, task, rows, args.report_title)
 
     if args.dry_run:
         return 0
-    _write_reports(output_root, source, task, rows)
+    _write_reports(output_root, source, task, rows, args.report_title)
     print("\nAll selected treatments completed.", flush=True)
     print("Summary: %s" % (output_root / "ablation_summary.md"), flush=True)
     return 0
@@ -323,12 +330,14 @@ def _write_reports(
     source: Path,
     task: Path,
     rows: Sequence[Mapping[str, Any]],
+    report_title: str = "Final Matmul Ablation",
 ) -> None:
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": str(source),
         "task": str(task),
         "output_root": str(output_root),
+        "report_title": report_title,
         "treatments": list(rows),
     }
     (output_root / "ablation_summary.json").write_text(
@@ -336,7 +345,7 @@ def _write_reports(
         encoding="utf-8",
     )
     lines = [
-        "# Final Matmul Ablation",
+        "# %s" % report_title,
         "",
         "Source: `%s`" % source,
         "",

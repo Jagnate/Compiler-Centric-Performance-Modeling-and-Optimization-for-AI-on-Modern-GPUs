@@ -422,6 +422,26 @@ The following treatments isolate one variable at a time:
   --strategy-allocation-policy unconstrained
 ```
 
+Run all four treatments sequentially for Fused Add + RMSNorm with one command:
+
+```bash
+PYTHONPATH=src python3 examples/run_final_fused_add_rms_norm_ablation.py \
+  --agent-workers 1
+```
+
+The default output root is
+`results/final_eval/fused_ablation`, with one numbered subdirectory per
+treatment plus aggregate `ablation_summary.json` and `ablation_summary.md`
+reports. Re-running the command reuses completed treatments and resumes an
+interrupted treatment. Use `--dry-run` to inspect all commands, or select a
+subset by repeating `--only`, for example:
+
+```bash
+PYTHONPATH=src python3 examples/run_final_fused_add_rms_norm_ablation.py \
+  --only 01_full_system \
+  --only 03_ncu_only
+```
+
 For a literal no-novelty-gate AI baseline, additionally set
 `--structural-search-policy off`. The recommended strategy ablation leaves it
 at `enforce`, so only direction allocation changes and all groups keep the same

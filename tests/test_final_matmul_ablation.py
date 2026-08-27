@@ -55,6 +55,10 @@ class FinalMatmulAblationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--agent-workers") + 1], "2")
         self.assertIn("--resume", command)
 
+    def test_matmul_report_title_remains_the_default(self) -> None:
+        parsed = ablation.build_parser().parse_args([])
+        self.assertEqual(parsed.report_title, "Final Matmul Ablation")
+
 
 if __name__ == "__main__":
     unittest.main()

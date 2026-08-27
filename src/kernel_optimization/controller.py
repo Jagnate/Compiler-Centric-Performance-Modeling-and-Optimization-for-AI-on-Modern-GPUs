@@ -1416,6 +1416,21 @@ class OptimizationController:
         metadata = dict(getattr(self.generator, "last_call_metadata", {}) or {})
         self._record_api_attempts(metadata)
         self._accumulate_generator_usage(metadata.get("usage"))
+        parsing = dict(metadata.get("candidate_parsing") or {})
+        rejected_candidates = int(parsing.get("rejected_candidates", 0) or 0)
+        if rejected_candidates:
+            self.progress.emit(
+                "api_candidates_rejected",
+                "Rejected malformed API candidates and kept usable complete sources.",
+                round=round_number,
+                accepted_candidates=int(
+                    parsing.get("accepted_candidates", 0) or 0
+                ),
+                rejected_candidates=rejected_candidates,
+                response_validation_attempts=int(
+                    metadata.get("response_validation_attempts", 1) or 1
+                ),
+            )
         failed_workers = int(metadata.get("failed_workers", 0) or 0)
         if failed_workers:
             self.progress.emit(

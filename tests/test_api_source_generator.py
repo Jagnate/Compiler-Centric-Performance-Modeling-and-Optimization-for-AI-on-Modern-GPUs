@@ -190,6 +190,191 @@ class ApiSourceGeneratorTests(unittest.TestCase):
         )
         self.assertIsNone(re.search(r"[\u4e00-\u9fff]", prompts))
 
+    def test_partially_malformed_response_keeps_alias_source_candidate(self) -> None:
+        calls = []
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, timeout
+            calls.append(payload)
+            return {
+                "id": "partial-response",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "candidates": [
+                                        {
+                                            "hypothesis": "Description only.",
+                                            "metadata": {"strategy": "invalid"},
+                                        },
+                                        {
+                                            "rationale": "Use a smaller tile.",
+                                            "code": (
+                                                "```python\ndef make_kernel():\n"
+                                                "    return 2\n```"
+                                            ),
+                                            "strategy_id": "parameter-tuning",
+                                        },
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ],
+            }
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+            ),
+            transport=transport,
+        )
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            proposals = generator.generate(task, parent, {}, [], count=2)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].hypothesis, "Use a smaller tile.")
+        self.assertEqual(
+            proposals[0].source_code, "def make_kernel():\n    return 2\n"
+        )
+        self.assertEqual(
+            proposals[0].metadata["strategy_id"], "parameter-tuning"
+        )
+        parsing = generator.last_call_metadata["candidate_parsing"]
+        self.assertEqual(parsing["accepted_candidates"], 1)
+        self.assertEqual(parsing["rejected_candidates"], 1)
+        self.assertEqual(
+            parsing["normalizations"][0]["source_field"], "candidate.code"
+        )
+
+    def test_missing_sources_trigger_one_accounted_schema_recovery(self) -> None:
+        payloads = []
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, timeout
+            payloads.append(payload)
+            if len(payloads) == 1:
+                candidates = [
+                    {
+                        "hypothesis": "Metadata-only response.",
+                        "expected_effect": {"latency": "decrease"},
+                    }
+                ]
+                response_id = "missing-source"
+            else:
+                candidates = [
+                    {
+                        "hypothesis": "Recovered full source.",
+                        "source_code": "def make_kernel():\n    return 3\n",
+                    }
+                ]
+                response_id = "schema-recovered"
+            return {
+                "id": response_id,
+                "usage": {"prompt_tokens": 40, "completion_tokens": 20},
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"candidates": candidates})
+                        }
+                    }
+                ],
+            }
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+            ),
+            transport=transport,
+        )
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            proposals = generator.generate(task, parent, {}, [], count=6)
+
+        self.assertEqual(len(payloads), 2)
+        recovery_request = json.loads(payloads[1]["messages"][1]["content"])
+        self.assertEqual(recovery_request["candidate_count"], 1)
+        self.assertIn("response_recovery", recovery_request)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].source_code.splitlines()[-1], "    return 3")
+        metadata = generator.last_call_metadata
+        self.assertEqual(metadata["attempts"], 2)
+        self.assertEqual(metadata["response_validation_attempts"], 2)
+        self.assertEqual(metadata["response_ids"], ["missing-source", "schema-recovered"])
+        self.assertEqual(metadata["usage"]["prompt_tokens"], 80)
+        self.assertEqual(metadata["usage"]["completion_tokens"], 40)
+        self.assertEqual(
+            metadata["candidate_parsing_attempts"][0]["rejected_candidates"], 1
+        )
+        self.assertEqual(
+            metadata["candidate_parsing_attempts"][1]["accepted_candidates"], 1
+        )
+
+    def test_two_metadata_only_responses_fail_with_parse_diagnostics(self) -> None:
+        calls = []
+
+        def transport(url, headers, payload, timeout):
+            del url, headers, timeout
+            calls.append(payload)
+            return {
+                "id": "still-missing-%d" % len(calls),
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "candidates": [
+                                        {"hypothesis": "Still no source."}
+                                    ]
+                                }
+                            )
+                        }
+                    }
+                ],
+            }
+
+        generator = OpenAICompatibleGenerator(
+            ApiGeneratorConfig(
+                api_url="https://provider.example/v1/chat/completions",
+                model="test-model",
+                api_key_environment_variable="TEST_KERNEL_API_KEY",
+            ),
+            transport=transport,
+        )
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        with mock.patch.dict(os.environ, {"TEST_KERNEL_API_KEY": "test-secret"}):
+            with self.assertRaisesRegex(ValueError, "schema-recovery"):
+                generator.generate(task, parent, {}, [], count=6)
+
+        self.assertEqual(len(calls), 2)
+        metadata = generator.last_call_metadata
+        self.assertEqual(metadata["response_validation_attempts"], 2)
+        self.assertEqual(metadata["usage"]["prompt_tokens"], 20)
+        self.assertEqual(
+            metadata["candidate_parsing"]["rejections"][0]["index"], 0
+        )
+        self.assertEqual(
+            len(generator.last_exchange["response_validation_attempts"]), 2
+        )
+
     def test_missing_api_key_fails_before_transport(self) -> None:
         generator = OpenAICompatibleGenerator(
             ApiGeneratorConfig(

@@ -157,9 +157,24 @@ class CandidateProposal:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "CandidateProposal":
         data = dict(value)
-        data["expected_effect"] = dict(data.get("expected_effect") or {})
-        data["metadata"] = dict(data.get("metadata") or {})
-        return cls(**data)
+        hypothesis = data.get("hypothesis")
+        source_code = data.get("source_code")
+        if not isinstance(hypothesis, str) or not hypothesis.strip():
+            raise ValueError("candidate proposal requires a non-empty hypothesis")
+        if not isinstance(source_code, str) or not source_code.strip():
+            raise ValueError("candidate proposal requires non-empty source_code")
+        expected_effect = data.get("expected_effect") or {}
+        metadata = data.get("metadata") or {}
+        if not isinstance(expected_effect, dict):
+            raise ValueError("candidate expected_effect must be a JSON object")
+        if not isinstance(metadata, dict):
+            raise ValueError("candidate metadata must be a JSON object")
+        return cls(
+            hypothesis=hypothesis,
+            source_code=source_code,
+            expected_effect=dict(expected_effect),
+            metadata=dict(metadata),
+        )
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

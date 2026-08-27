@@ -23,6 +23,12 @@ def make_task() -> TaskSpec:
 
 
 class SourceCandidateTests(unittest.TestCase):
+    def test_proposal_parser_reports_missing_source_code_clearly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty source_code"):
+            CandidateProposal.from_dict(
+                {"hypothesis": "Describe an optimization without implementing it."}
+            )
+
     def test_candidate_identity_depends_on_complete_source_not_parent(self) -> None:
         task = make_task()
         seed = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")

@@ -28,9 +28,13 @@ the classified failure before attempting additional tuning.
 The candidate source is untrusted and will be parsed, compiled, checked against
 the reference, checked for parent-relative AST novelty, and benchmarked
 independently. A structural strategy must contain a concrete structural source
-change; a description alone is not evidence. Return only valid JSON matching the
-requested schema. Do not include Markdown, comments outside JSON, patches, or
-additional top-level keys.
+change; a description alone is not evidence. Every candidate object must contain
+a non-empty source_code with the complete Python file. Never omit source_code or
+replace it with a patch, placeholder, summary, or unchanged marker. If response
+space is insufficient, return fewer fully materialized candidates rather than
+metadata-only candidates. Return only valid JSON matching the requested schema.
+Do not include Markdown, comments outside JSON, patches, or additional top-level
+keys.
 """
 
 
@@ -213,6 +217,9 @@ def build_optimization_prompt(
         "discovered_strategy_memory": discovered_strategy_memory,
         "rules": [
             "Return the complete replacement content of the kernel source file.",
+            "Every candidate must contain a non-empty source_code with the complete Python file.",
+            "Never replace source_code with a patch, placeholder, summary, omission, or unchanged marker.",
+            "If response space is insufficient, return fewer complete candidates instead of metadata-only candidates.",
             "Preserve mathematical semantics, entrypoint, and external interface.",
             "Do not modify or reproduce the evaluator or reference implementation.",
             "Do not add file, network, shell, subprocess, or environment access.",
@@ -315,6 +322,7 @@ def build_repair_prompt(
         "context_provenance": context.provenance,
         "rules": [
             "Return exactly one complete Python source file, not a patch.",
+            "The candidate must contain non-empty source_code; never omit it or use a placeholder.",
             "Fix the classified failure before applying unrelated optimizations.",
             "Preserve mathematical semantics, entrypoint, and external interface.",
             "Do not modify or reproduce the evaluator or reference implementation.",

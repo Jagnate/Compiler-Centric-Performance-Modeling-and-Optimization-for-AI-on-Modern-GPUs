@@ -225,21 +225,96 @@ class OpenAICompatibleGenerator:
             kind=kind,
             max_output_tokens=self.config.max_output_tokens,
         )
-        raw_candidates = data.get("candidates") if isinstance(data, dict) else data
-        if not isinstance(raw_candidates, list):
-            raise ValueError("API response must contain a candidates list")
-        proposals = []
-        for raw in raw_candidates[:count]:
-            if not isinstance(raw, dict):
-                raise ValueError("each API candidate must be a JSON object")
-            value = dict(raw)
-            source_code = value.get("source_code")
-            if isinstance(source_code, str):
-                value["source_code"] = _strip_source_fence(source_code)
-            proposals.append(CandidateProposal.from_dict(value))
-        if not proposals:
-            raise ValueError("API response did not contain any candidate proposals")
-        return proposals
+        proposals, parsing = _parse_candidate_response(data, count=count)
+        self._record_candidate_parsing(parsing)
+        if proposals:
+            return proposals
+
+        first_metadata = dict(self.last_call_metadata)
+        first_exchange = dict(self.last_exchange)
+        recovery_prompt = _candidate_schema_recovery_prompt(prompt)
+        try:
+            recovery_data = self._request_json_prompt(
+                recovery_prompt,
+                system_prompt=SYSTEM_PROMPT,
+                kind=kind + "-schema-recovery",
+                max_output_tokens=self.config.max_output_tokens,
+            )
+            recovered, recovery_parsing = _parse_candidate_response(
+                recovery_data, count=1
+            )
+            second_metadata = dict(self.last_call_metadata)
+            second_exchange = dict(self.last_exchange)
+        except Exception:
+            self._merge_schema_attempts(
+                kind,
+                (first_metadata, dict(self.last_call_metadata)),
+                (first_exchange, dict(self.last_exchange)),
+                (parsing,),
+            )
+            raise
+
+        self._merge_schema_attempts(
+            kind,
+            (first_metadata, second_metadata),
+            (first_exchange, second_exchange),
+            (parsing, recovery_parsing),
+        )
+        if recovered:
+            return recovered
+        raise ValueError(
+            "API candidate response remained unusable after one schema-recovery "
+            "request: no candidate supplied a non-empty complete source file"
+        )
+
+    def _record_candidate_parsing(self, parsing: Mapping[str, Any]) -> None:
+        metadata = dict(self.last_call_metadata)
+        metadata["candidate_parsing"] = dict(parsing)
+        self.last_call_metadata = metadata
+        exchange = dict(self.last_exchange)
+        exchange["candidate_parsing"] = dict(parsing)
+        self.last_exchange = exchange
+
+    def _merge_schema_attempts(
+        self,
+        kind: str,
+        metadata_items: Sequence[Mapping[str, Any]],
+        exchange_items: Sequence[Mapping[str, Any]],
+        parsing_items: Sequence[Mapping[str, Any]],
+    ) -> None:
+        merged = dict(metadata_items[-1]) if metadata_items else {}
+        merged["kind"] = kind
+        merged["attempts"] = sum(
+            int(item.get("attempts", 0) or 0) for item in metadata_items
+        )
+        merged["elapsed_seconds"] = sum(
+            float(item.get("elapsed_seconds", 0.0) or 0.0)
+            for item in metadata_items
+        )
+        merged["usage"] = _sum_usage(
+            dict(item.get("usage") or {}) for item in metadata_items
+        )
+        merged["response_validation_attempts"] = len(metadata_items)
+        merged["response_ids"] = [
+            item.get("response_id")
+            for item in metadata_items
+            if item.get("response_id") is not None
+        ]
+        merged["candidate_parsing_attempts"] = [
+            dict(item) for item in parsing_items
+        ]
+        if parsing_items:
+            merged["candidate_parsing"] = dict(parsing_items[-1])
+        self.last_call_metadata = merged
+        self.last_exchange = {
+            "kind": kind,
+            "response_validation_attempts": [
+                dict(item) for item in exchange_items
+            ],
+            "candidate_parsing_attempts": [
+                dict(item) for item in parsing_items
+            ],
+        }
 
     def _request_json_prompt(
         self,
@@ -384,6 +459,248 @@ class OpenAICompatibleGenerator:
         if not isinstance(content, str) or not content.strip():
             raise ValueError("API response content must be a non-empty string")
         return content
+
+
+_SOURCE_FIELDS = (
+    "source_code",
+    "source",
+    "code",
+    "kernel_source",
+    "complete_source",
+    "implementation",
+)
+_HYPOTHESIS_FIELDS = ("hypothesis", "rationale", "description", "optimization")
+_EXPECTED_EFFECT_FIELDS = ("expected_effect", "expected_impact", "effect")
+_METADATA_FIELDS = (
+    "strategy",
+    "strategy_slot",
+    "strategy_id",
+    "discovered_strategy",
+    "related_existing_strategies",
+    "changed_regions",
+    "evidence_ids",
+    "applied_recommendations",
+    "structural_required",
+)
+
+
+def _parse_candidate_response(
+    data: Any, *, count: int
+) -> tuple[List[CandidateProposal], Dict[str, Any]]:
+    try:
+        raw_candidates, container = _candidate_payloads(data)
+    except ValueError as error:
+        return [], {
+            "container": "invalid",
+            "requested_candidates": count,
+            "returned_candidates": 0,
+            "accepted_candidates": 0,
+            "rejected_candidates": 1,
+            "rejections": [
+                {
+                    "index": None,
+                    "value_type": type(data).__name__,
+                    "keys": sorted(str(key) for key in data)
+                    if isinstance(data, dict)
+                    else [],
+                    "error": str(error),
+                }
+            ],
+            "normalizations": [],
+        }
+    proposals: List[CandidateProposal] = []
+    rejections: List[Dict[str, Any]] = []
+    normalizations: List[Dict[str, Any]] = []
+    for index, raw in enumerate(raw_candidates):
+        if len(proposals) >= count:
+            break
+        try:
+            proposal, normalization = _parse_candidate_payload(raw)
+        except (TypeError, ValueError) as error:
+            rejections.append(
+                {
+                    "index": index,
+                    "value_type": type(raw).__name__,
+                    "keys": sorted(str(key) for key in raw) if isinstance(raw, dict) else [],
+                    "error": str(error),
+                }
+            )
+            continue
+        proposals.append(proposal)
+        if normalization:
+            normalization["index"] = index
+            normalizations.append(normalization)
+    return proposals, {
+        "container": container,
+        "requested_candidates": count,
+        "returned_candidates": len(raw_candidates),
+        "accepted_candidates": len(proposals),
+        "rejected_candidates": len(rejections),
+        "rejections": rejections,
+        "normalizations": normalizations,
+    }
+
+
+def _candidate_payloads(data: Any) -> tuple[List[Any], str]:
+    if isinstance(data, list):
+        return list(data), "top-level-list"
+    if not isinstance(data, dict):
+        raise ValueError("API response must be a JSON object or candidate list")
+    for key in ("candidates", "proposals", "results"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return list(value), key
+        if isinstance(value, dict):
+            return [value], key + "-object"
+    candidate = data.get("candidate")
+    if isinstance(candidate, dict):
+        return [candidate], "candidate-object"
+    if any(key in data for key in _SOURCE_FIELDS + _HYPOTHESIS_FIELDS):
+        return [data], "top-level-candidate"
+    raise ValueError(
+        "API response must contain candidates, proposals, results, or candidate"
+    )
+
+
+def _parse_candidate_payload(
+    raw: Any,
+) -> tuple[CandidateProposal, Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        raise ValueError("candidate must be a JSON object")
+    contexts: List[tuple[str, Mapping[str, Any]]] = [("candidate", raw)]
+    for wrapper in ("candidate", "proposal", "implementation"):
+        nested = raw.get(wrapper)
+        if isinstance(nested, dict):
+            contexts.append((wrapper, nested))
+
+    source_code = None
+    source_field = None
+    for context_name, context in contexts:
+        for field in _SOURCE_FIELDS:
+            candidate_source = _source_text(context.get(field))
+            if candidate_source is not None:
+                source_code = _strip_source_fence(candidate_source)
+                source_field = "%s.%s" % (context_name, field)
+                break
+        if source_code is not None:
+            break
+    if source_code is None or not source_code.strip():
+        raise ValueError(
+            "missing non-empty source_code; accepted source fields are %s"
+            % ", ".join(_SOURCE_FIELDS)
+        )
+
+    hypothesis = _first_text(contexts, _HYPOTHESIS_FIELDS)
+    if hypothesis is None:
+        hypothesis = "Hosted API source proposal."
+
+    expected_effect: Dict[str, Any] = {}
+    for _context_name, context in contexts:
+        for field in _EXPECTED_EFFECT_FIELDS:
+            value = context.get(field)
+            if isinstance(value, dict):
+                expected_effect = dict(value)
+                break
+            if isinstance(value, str) and value.strip():
+                expected_effect = {"reason": value.strip()}
+                break
+        if expected_effect:
+            break
+
+    metadata: Dict[str, Any] = {}
+    for _context_name, context in reversed(contexts):
+        value = context.get("metadata")
+        if isinstance(value, dict):
+            metadata.update(value)
+    for _context_name, context in contexts:
+        for field in _METADATA_FIELDS:
+            if field in context and field not in metadata:
+                metadata[field] = context[field]
+    normalization: Dict[str, Any] = {}
+    if source_field != "candidate.source_code":
+        normalization["source_field"] = source_field
+        metadata["response_source_field"] = source_field
+    if not any(
+        isinstance(context.get("hypothesis"), str)
+        and context.get("hypothesis").strip()
+        for _name, context in contexts
+    ):
+        normalization["hypothesis_fallback"] = hypothesis
+
+    return (
+        CandidateProposal(
+            hypothesis=hypothesis,
+            source_code=source_code,
+            expected_effect=expected_effect,
+            metadata=metadata,
+        ),
+        normalization,
+    )
+
+
+def _source_text(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, dict):
+        for field in ("content", "source_code", "source", "code", "text"):
+            nested = value.get(field)
+            if isinstance(nested, str) and nested.strip():
+                return nested
+    return None
+
+
+def _first_text(
+    contexts: Sequence[tuple[str, Mapping[str, Any]]], fields: Sequence[str]
+) -> Optional[str]:
+    for _context_name, context in contexts:
+        for field in fields:
+            value = context.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _candidate_schema_recovery_prompt(prompt: str) -> str:
+    try:
+        request = json.loads(prompt)
+    except (TypeError, json.JSONDecodeError):
+        return prompt + (
+            "\nReturn one candidate containing a non-empty source_code with the "
+            "complete Python source. Do not return a patch, placeholder, or "
+            "metadata-only candidate."
+        )
+    request["candidate_count"] = 1
+    assignments = request.get("strategy_assignments")
+    if isinstance(assignments, list):
+        request["strategy_assignments"] = assignments[:1]
+    rules = list(request.get("rules") or [])
+    rules.insert(
+        0,
+        "Return exactly one candidate with a non-empty source_code containing the complete Python file.",
+    )
+    rules.insert(
+        1,
+        "Never omit source_code or replace it with a patch, placeholder, summary, or unchanged marker.",
+    )
+    request["rules"] = rules
+    request["response_recovery"] = {
+        "reason": "The previous response contained no usable complete source file.",
+        "required_action": (
+            "Return one fully materialized candidate in the documented schema."
+        ),
+    }
+    return json.dumps(request, indent=2, sort_keys=True)
+
+
+def _sum_usage(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    totals: Dict[str, Any] = {}
+    for item in items:
+        for key, value in item.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[key] = totals.get(key, 0) + value
+            elif key not in totals:
+                totals[key] = value
+    return totals
 
 
 def _strip_json_fence(text: str) -> str:

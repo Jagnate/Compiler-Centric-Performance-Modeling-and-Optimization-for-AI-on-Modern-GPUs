@@ -8,9 +8,11 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 from typing import Optional, Sequence
 
 from .archive import ArtifactStore
+from .baseline_styles import BASELINE_STYLE_NAMES, resolve_baseline_style
 from .controller import OptimizationController, resolve_evaluation_policies
 from .factory import create_backend
 from .generators import (
@@ -41,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         help="Fresh artifact directory. Defaults to results/<task>_<UTC timestamp>.",
+    )
+    parser.add_argument(
+        "--baseline-style",
+        choices=BASELINE_STYLE_NAMES,
+        default="native",
+        help=(
+            "Run the native controller or an auditable style emulation of a "
+            "related system. This does not reproduce that system's implementation."
+        ),
     )
     parser.add_argument(
         "--api-url",
@@ -117,6 +128,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-search-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Soft wall-clock limit for controller search, including seed "
+            "evaluation; 0 disables the limit. In-flight API/compiler/GPU calls "
+            "finish before the controller stops."
+        ),
+    )
+    parser.add_argument(
         "--selection-policy",
         choices=("adaptive", "model-top", "random", "measure-all"),
         default="adaptive",
@@ -188,7 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw_argv)
     if args.agent_workers <= 0:
         raise SystemExit("--agent-workers must be positive")
     if args.promotions_per_round is not None and args.promotions_per_round <= 0:
@@ -200,6 +222,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(
             "--incumbent-snapshot-interval-seconds must be finite and non-negative"
         )
+    if not math.isfinite(args.max_search_seconds) or args.max_search_seconds < 0:
+        raise SystemExit("--max-search-seconds must be finite and non-negative")
     for name in ("api_input_price_per_million", "api_output_price_per_million"):
         value = getattr(args, name)
         if value is not None and value < 0:
@@ -210,6 +234,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(
             "API cost reporting requires both input and output token prices"
         )
+    source_path = Path(args.source).expanduser().resolve()
+    task_path = Path(args.task).expanduser().resolve()
+    if not source_path.is_file():
+        raise SystemExit("Kernel source file does not exist: %s" % source_path)
+    if not task_path.is_file():
+        raise SystemExit("Task file does not exist: %s" % task_path)
+    task = TaskSpec.from_json_file(task_path)
+    style = resolve_baseline_style(
+        name=args.baseline_style,
+        task=task,
+        agent_workers=args.agent_workers,
+        evaluation_policy=args.evaluation_policy,
+        tir_evidence_policy=args.tir_evidence_policy,
+        selection_policy=args.selection_policy,
+        profile_policy=args.profile_policy,
+        compiled_deduplication=not args.no_compiled_dedup,
+        structural_search_policy=args.structural_search_policy,
+        strategy_allocation_policy=args.strategy_allocation_policy,
+        explicit_fields=_explicit_baseline_fields(raw_argv),
+    )
+    task = style.task
+    args.agent_workers = style.agent_workers
+    args.evaluation_policy = style.evaluation_policy
+    args.tir_evidence_policy = style.tir_evidence_policy
+    args.selection_policy = style.selection_policy
+    args.profile_policy = style.profile_policy
+    args.no_compiled_dedup = not style.compiled_deduplication
+    args.structural_search_policy = style.structural_search_policy
+    args.strategy_allocation_policy = style.strategy_allocation_policy
     try:
         policies = resolve_evaluation_policies(
             evaluation_policy=args.evaluation_policy,
@@ -220,14 +273,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    source_path = Path(args.source).expanduser().resolve()
-    task_path = Path(args.task).expanduser().resolve()
-    if not source_path.is_file():
-        raise SystemExit("Kernel source file does not exist: %s" % source_path)
-    if not task_path.is_file():
-        raise SystemExit("Task file does not exist: %s" % task_path)
-
-    task = TaskSpec.from_json_file(task_path)
     source_code = source_path.read_text(encoding="utf-8")
     seed = Candidate.seed(task, source_code, source_path.name)
     SourceValidator().validate(task, source_code, source_path.name)
@@ -283,7 +328,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             create_generator,
             max_workers=args.agent_workers,
         )
-    output = Path(args.output).expanduser() if args.output else _default_output(task)
+    output = (
+        Path(args.output).expanduser()
+        if args.output
+        else _default_output(task, args.baseline_style)
+    )
     output = output.resolve()
     if args.resume and not output.exists():
         raise SystemExit("Cannot resume because the output directory does not exist: %s" % output)
@@ -294,8 +343,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     store = ArtifactStore(output)
+    style_metadata = style.to_dict()
+    style_metadata["controller_policies"] = dict(policies)
     run_metadata = {
-        "framework_version": "0.11.0",
+        "framework_version": "0.12.0",
+        "baseline_style": style_metadata,
         "generator": {
             "type": "hosted-api",
             "api_url": api_url,
@@ -311,6 +363,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "agent_workers": args.agent_workers,
         },
         "experiment": {
+            "baseline_style": style.preset.name,
+            "baseline_style_mode": (
+                "style-emulation" if style.emulated else "native"
+            ),
+            "baseline_style_canonical": style.canonical,
             "evaluation_policy": policies["evaluation_policy"],
             "requested_tir_evidence_policy": policies[
                 "requested_tir_evidence_policy"
@@ -334,6 +391,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "api_output_price_per_million": args.api_output_price_per_million,
             "incumbent_snapshot_interval_seconds": (
                 args.incumbent_snapshot_interval_seconds
+            ),
+            "max_search_seconds": args.max_search_seconds,
+            "candidate_graph_upper_bound": (
+                1
+                + task.budget.rounds
+                * (
+                    task.budget.proposals_per_round
+                    + task.budget.max_repairs_per_round
+                )
             ),
         },
         "resume_requested": args.resume,
@@ -418,6 +484,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         incumbent_snapshot_interval_seconds=(
             args.incumbent_snapshot_interval_seconds
         ),
+        max_search_seconds=args.max_search_seconds,
         evaluation_policy=args.evaluation_policy,
         tir_evidence_policy=args.tir_evidence_policy,
     )
@@ -430,9 +497,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def _default_output(task: TaskSpec) -> Path:
+def _default_output(task: TaskSpec, baseline_style: str = "native") -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path("results") / (task.task_id + "_" + timestamp)
+    style_suffix = "" if baseline_style == "native" else "_" + baseline_style
+    return Path("results") / (task.task_id + style_suffix + "_" + timestamp)
+
+
+_BASELINE_OPTION_FIELDS = {
+    "--agent-workers": "agent_workers",
+    "--selection-policy": "selection_policy",
+    "--evaluation-policy": "evaluation_policy",
+    "--tir-evidence-policy": "tir_evidence_policy",
+    "--profile-policy": "profile_policy",
+    "--no-compiled-dedup": "compiled_deduplication",
+    "--structural-search-policy": "structural_search_policy",
+    "--strategy-allocation-policy": "strategy_allocation_policy",
+}
+
+
+def _explicit_baseline_fields(argv: Sequence[str]) -> frozenset[str]:
+    """Return style-controlled fields explicitly present on the command line."""
+
+    fields = set()
+    for token in argv:
+        option = token.split("=", 1)[0]
+        field = _BASELINE_OPTION_FIELDS.get(option)
+        if field is not None:
+            fields.add(field)
+    return frozenset(fields)
 
 
 if __name__ == "__main__":

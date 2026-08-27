@@ -550,7 +550,14 @@ class SearchSummary:
     strategy_rejected_candidates: int = 0
     open_exploration_candidates: int = 0
     discovered_strategy_count: int = 0
+    baseline_style: str = "native"
+    baseline_style_mode: str = "native"
+    baseline_style_canonical: bool = True
     incumbent_snapshot_interval_seconds: float = 300.0
+    max_search_seconds: float = 0.0
+    time_budget_exhausted: bool = False
+    termination_reason: str = "round-budget-completed"
+    candidate_graph_upper_bound: int = 0
     cost_ledger: JsonDict = field(default_factory=dict)
     report_paths: JsonDict = field(default_factory=dict)
 

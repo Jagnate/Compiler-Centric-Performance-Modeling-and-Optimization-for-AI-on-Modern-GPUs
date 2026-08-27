@@ -1,0 +1,148 @@
+"""Tests for the 5 x 5 related-system baseline suite driver."""
+
+from __future__ import annotations
+
+from contextlib import redirect_stdout
+import io
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPOSITORY_ROOT / "examples"))
+
+import run_final_related_system_baselines as suite
+
+from kernel_optimization.baseline_styles import BASELINE_STYLE_NAMES
+
+
+class FinalRelatedSystemBaselineTests(unittest.TestCase):
+    def test_defines_five_kernels_by_five_non_native_styles(self) -> None:
+        treatments = suite.selected_treatments()
+        self.assertEqual(len(treatments), 25)
+        self.assertEqual(
+            tuple(kernel.key for kernel in suite.KERNELS),
+            (
+                "matmul",
+                "rms_norm",
+                "conv2d",
+                "flash_attention",
+                "fused_add_rms_norm",
+            ),
+        )
+        self.assertEqual(
+            tuple(style.key for style in suite.RELATED_STYLES),
+            BASELINE_STYLE_NAMES[1:],
+        )
+        self.assertTrue(
+            all(treatment.style.key != "native" for treatment in treatments)
+        )
+
+    def test_command_uses_original_task_and_canonical_style_controls(self) -> None:
+        treatment = suite.selected_treatments(
+            only_kernels=["matmul"], only_styles=["kernelagent"]
+        )[0]
+        command = suite.build_command(
+            treatment=treatment,
+            output=Path("results/matmul/kernelagent"),
+            max_search_seconds=1800.0,
+            snapshot_interval_seconds=300.0,
+            api_url="https://api.example/v1/chat/completions",
+            api_model="test-model",
+            api_key_env="KERNEL_OPT_API_KEY",
+            resume=True,
+            repository_root=REPOSITORY_ROOT,
+        )
+
+        self.assertEqual(
+            Path(command[command.index("--source") + 1]).name,
+            "tilelang_matmul_kernel.py",
+        )
+        self.assertEqual(
+            Path(command[command.index("--task") + 1]).name,
+            "tilelang_matmul_task.json",
+        )
+        self.assertEqual(
+            command[command.index("--baseline-style") + 1], "kernelagent"
+        )
+        self.assertEqual(
+            command[command.index("--max-search-seconds") + 1], "1800.0"
+        )
+        self.assertNotIn("--agent-workers", command)
+        self.assertNotIn("--evaluation-policy", command)
+        self.assertNotIn("--strategy-allocation-policy", command)
+        self.assertIn("--resume", command)
+
+    def test_filters_keep_deterministic_kernel_major_order(self) -> None:
+        treatments = suite.selected_treatments(
+            only_kernels=["conv2d", "flash_attention"],
+            only_styles=["kernelbench", "avo"],
+        )
+        self.assertEqual(
+            [(item.kernel.key, item.style.key) for item in treatments],
+            [
+                ("conv2d", "kernelbench"),
+                ("conv2d", "avo"),
+                ("flash_attention", "kernelbench"),
+                ("flash_attention", "avo"),
+            ],
+        )
+
+    def test_existing_tasks_produce_expected_total_graph_bound(self) -> None:
+        treatments = suite.selected_treatments()
+        metadata = suite._load_workload_metadata(REPOSITORY_ROOT, treatments)
+        self.assertEqual(set(metadata), {kernel.key for kernel in suite.KERNELS})
+        self.assertTrue(
+            all(
+                item["candidate_graph_upper_bound"] == 33
+                for item in metadata.values()
+            )
+        )
+        total = sum(
+            metadata[item.kernel.key]["candidate_graph_upper_bound"]
+            for item in treatments
+        )
+        self.assertEqual(total, 825)
+
+    def test_dry_run_selects_one_treatment_without_creating_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary) / "not-created"
+            rendered = io.StringIO()
+            with redirect_stdout(rendered):
+                code = suite.main(
+                    [
+                        "--dry-run",
+                        "--api-url",
+                        "https://api.example/v1/chat/completions",
+                        "--api-model",
+                        "test-model",
+                        "--output-root",
+                        str(output_root),
+                        "--only-kernel",
+                        "fused_add_rms_norm",
+                        "--only-style",
+                        "tilefoundry",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(output_root.exists())
+            output = rendered.getvalue()
+            self.assertIn("Selected 1 treatments", output)
+            self.assertIn("tilelang_fused_add_rms_norm_task.json", output)
+            self.assertIn("--baseline-style tilefoundry", output)
+            self.assertIn("Agent workers: 1", output)
+
+    def test_default_output_and_time_cap_are_bounded(self) -> None:
+        args = suite.build_parser().parse_args([])
+        self.assertEqual(
+            args.output_root.parts[-2:],
+            ("final_eval", "related_system_baselines"),
+        )
+        self.assertEqual(args.max_search_seconds, 1800.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

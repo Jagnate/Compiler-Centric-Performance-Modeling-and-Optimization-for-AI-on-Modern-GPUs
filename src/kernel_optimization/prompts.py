@@ -61,6 +61,19 @@ def build_strategy_planning_prompt(
 ) -> str:
     """Build a compact strategy-neutral allocation request for one round."""
 
+    task_payload = {
+        "task_id": task.task_id,
+        "description": task.description,
+        "reference_semantics": task.reference,
+        "entrypoint": task.entrypoint,
+        "target": task.target,
+        "workload": task.workload,
+        "constraints": task.constraints,
+        "remaining_rounds_including_this_one": (
+            task.budget.rounds - round_number + 1
+        ),
+    }
+    _add_baseline_protocol(task_payload, task)
     request = {
         "objective": (
             "Allocate this round's candidate-generation slots to the most useful "
@@ -68,18 +81,7 @@ def build_strategy_planning_prompt(
         ),
         "round": round_number,
         "candidate_count": count,
-        "task": {
-            "task_id": task.task_id,
-            "description": task.description,
-            "reference_semantics": task.reference,
-            "entrypoint": task.entrypoint,
-            "target": task.target,
-            "workload": task.workload,
-            "constraints": task.constraints,
-            "remaining_rounds_including_this_one": (
-                task.budget.rounds - round_number + 1
-            ),
-        },
+        "task": task_payload,
         "current_best": {
             "candidate_id": parent.candidate_id,
             "generation": parent.generation,
@@ -174,22 +176,24 @@ def build_optimization_prompt(
                 "metadata.related_existing_strategies."
             ),
         ]
+    task_payload = {
+        "task_id": task.task_id,
+        "description": task.description,
+        "reference_semantics": task.reference,
+        "entrypoint": task.entrypoint,
+        "language": task.language,
+        "target": task.target,
+        "workload": task.workload,
+        "constraints": task.constraints,
+    }
+    _add_baseline_protocol(task_payload, task)
     request = {
         "objective": (
             "Propose diverse complete kernel source files that preserve semantics "
             "and may reduce measured latency on the target GPU."
         ),
         "candidate_count": count,
-        "task": {
-            "task_id": task.task_id,
-            "description": task.description,
-            "reference_semantics": task.reference,
-            "entrypoint": task.entrypoint,
-            "language": task.language,
-            "target": task.target,
-            "workload": task.workload,
-            "constraints": task.constraints,
-        },
+        "task": task_payload,
         "parent": {
             "candidate_id": parent.candidate_id,
             "generation": parent.generation,
@@ -258,6 +262,17 @@ def build_repair_prompt(
     """Build a bounded repair request around one archived failed source."""
 
     context = compress_prompt_context(evidence, history)
+    task_payload = {
+        "task_id": task.task_id,
+        "description": task.description,
+        "reference_semantics": task.reference,
+        "entrypoint": task.entrypoint,
+        "language": task.language,
+        "target": task.target,
+        "workload": task.workload,
+        "constraints": task.constraints,
+    }
+    _add_baseline_protocol(task_payload, task)
     request = {
         "mode": "repair",
         "objective": (
@@ -265,16 +280,7 @@ def build_repair_prompt(
             "failure while preserving semantics and the external interface."
         ),
         "candidate_count": 1,
-        "task": {
-            "task_id": task.task_id,
-            "description": task.description,
-            "reference_semantics": task.reference,
-            "entrypoint": task.entrypoint,
-            "language": task.language,
-            "target": task.target,
-            "workload": task.workload,
-            "constraints": task.constraints,
-        },
+        "task": task_payload,
         "failed_candidate": {
             "candidate_id": failed.candidate_id,
             "parent_id": failed.parent_id,
@@ -347,3 +353,11 @@ def build_repair_prompt(
         },
     }
     return json.dumps(request, indent=2, sort_keys=True)
+
+
+def _add_baseline_protocol(payload: Dict[str, Any], task: TaskSpec) -> None:
+    """Expose only the compact model-facing portion of a style preset."""
+
+    protocol = task.metadata.get("baseline_style_protocol")
+    if isinstance(protocol, dict):
+        payload["optimization_protocol"] = dict(protocol)

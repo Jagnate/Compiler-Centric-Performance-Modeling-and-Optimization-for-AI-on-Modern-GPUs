@@ -372,6 +372,103 @@ task JSON because they change the experimental treatment, not kernel semantics:
 --strategy-allocation-policy ai-planned|fixed|unconstrained
 ```
 
+### Related-system style presets
+
+Use one auditable preset when comparing the common harness with the control-flow
+style of a related system:
+
+```bash
+--baseline-style native|kernelagent|kernelevolve|kernelbench|avo|tilefoundry
+```
+
+For example:
+
+```bash
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_matmul_kernel.py \
+  --task examples/tilelang_matmul_task.json \
+  --baseline-style kernelagent \
+  --output results/baselines/matmul_kernelagent
+```
+
+The five related-system presets disable TileSight/TIR guidance so they do not
+inherit the main system's model. They map the shared controller onto NCU-guided
+multi-branch search, persistent evolution, iterative G+E refinement, committed
+single-lineage variation, or an external coding-agent-style loop. Task rounds and
+proposal counts remain unchanged; single-incumbent styles set `beam_width=1`.
+All presets default to one API generation worker; parallelism is enabled only by
+an explicit `--agent-workers` override.
+
+These are style emulations in a common TileLang harness, not copies of the
+original systems and not claims to reproduce their published results. The exact
+mapping, missing capabilities, override rules, and fair-comparison protocol are
+documented in [BASELINE_STYLE_PRESETS.md](BASELINE_STYLE_PRESETS.md). Every run
+records the preset and any explicit overrides in its manifest and Markdown report.
+
+Run the complete 5 x 5 related-system comparison with one command:
+
+```bash
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py
+```
+
+The runner executes 25 treatments sequentially on one GPU: the unchanged GEMM,
+RMSNorm, Conv2D, Flash Attention, and fused Add + RMSNorm source/task pairs times
+the five non-native styles. It uses each preset's canonical single-agent mode and
+does not rewrite workload shapes. Results go to
+`results/final_eval/related_system_baselines/<kernel>/<style>/`; aggregate
+`suite_summary.json` and `suite_summary.md` files are updated after every run.
+
+Each treatment has a default 1,800-second soft search cap, giving the full matrix
+a configured upper bound of 12.5 search hours plus an in-flight-call overshoot.
+Re-running the command reuses completed directories and resumes the first partial
+one. Useful controls are:
+
+```bash
+# Inspect all 25 commands without API or GPU work.
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py --dry-run
+
+# Debug one matrix cell before starting the full suite.
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --only-kernel matmul --only-style kernelagent
+
+# Explicitly disable the per-treatment time cap.
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --max-search-seconds 0
+```
+
+The default fail-fast behavior prevents one API or profiler outage from cascading
+through the matrix. Add `--continue-on-error` to collect independent failures and
+continue; the suite still exits nonzero when any cell failed.
+
+### Cost and graph bounds
+
+The task budget already bounds candidate-graph growth. The maximum number of
+stored candidate nodes is:
+
+```text
+1 + rounds * (proposals_per_round + max_repairs_per_round)
+```
+
+For example, four rounds with six proposals and two repairs per round can store
+at most 33 nodes. Deduplication and failed API returns normally make the graph
+smaller.
+
+Add a soft controller wall-clock limit when experiments must stop automatically:
+
+```bash
+--max-search-seconds 3600
+```
+
+The default is `0`, which disables the limit and preserves previous behavior.
+The timer includes seed evaluation, generation, modeling, correctness, timing,
+profiling, repairs, and final validation after the controller starts. It does not
+kill an API, compiler, CUDA Event, or NCU call in flight; that atomic operation
+finishes, then the controller writes a resumable checkpoint and exports the best
+correctness-verified incumbent available at that point. Consequently, wall time
+can exceed the limit by one in-flight operation. `summary.json` and the Markdown
+report record the limit, termination reason, graph upper bound, and whether the
+budget was exhausted.
+
 `--evaluation-policy tilesight` preserves the adaptive-fidelity pipeline:
 TileSight models every static-valid candidate, the promotion policy chooses a
 bounded hardware subset, CUDA Event checks correctness and latency, and NCU is

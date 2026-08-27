@@ -1,5 +1,12 @@
 """Adaptive-fidelity GPU kernel optimization framework."""
 
+from .baseline_styles import (
+    BASELINE_STYLE_NAMES,
+    BaselineStylePreset,
+    BaselineStyleResolution,
+    get_baseline_style,
+    resolve_baseline_style,
+)
 from .controller import OptimizationController
 from .incumbent_tracking import PeriodicIncumbentRecorder
 from .schema import (
@@ -25,6 +32,9 @@ from .structural_search import (
 )
 
 __all__ = [
+    "BASELINE_STYLE_NAMES",
+    "BaselineStylePreset",
+    "BaselineStyleResolution",
     "BudgetConfig",
     "BottleneckDiagnosis",
     "Candidate",
@@ -45,6 +55,8 @@ __all__ = [
     "StrategyPlan",
     "StructuralStrategyPortfolio",
     "TaskSpec",
+    "get_baseline_style",
+    "resolve_baseline_style",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

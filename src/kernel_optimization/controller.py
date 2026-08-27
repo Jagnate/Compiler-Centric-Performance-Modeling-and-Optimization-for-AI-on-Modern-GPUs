@@ -142,8 +142,10 @@ class OptimizationController:
         structural_search_policy: str = "off",
         strategy_allocation_policy: str = "fixed",
         incumbent_snapshot_interval_seconds: float = 300.0,
+        max_search_seconds: float = 0.0,
         evaluation_policy: str = "tilesight",
         tir_evidence_policy: str = "auto",
+        time_budget_clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.task = task
         self.source_code = source_code
@@ -153,6 +155,14 @@ class OptimizationController:
         self.store = store
         self.source_validator = source_validator or SourceValidator()
         self.run_metadata = dict(run_metadata or {})
+        baseline_style = dict(self.run_metadata.get("baseline_style") or {})
+        self.baseline_style = str(baseline_style.get("name") or "native")
+        self.baseline_style_mode = str(
+            baseline_style.get("mode") or "native"
+        )
+        self.baseline_style_canonical = bool(
+            baseline_style.get("canonical", True)
+        )
         self.progress = progress or NullProgressReporter()
         self.resume = resume
         self.preflight_calls = preflight_calls
@@ -208,6 +218,22 @@ class OptimizationController:
         self.incumbent_recorder = PeriodicIncumbentRecorder(
             store, interval_seconds=interval
         )
+        max_seconds = float(max_search_seconds)
+        if not math.isfinite(max_seconds) or max_seconds < 0:
+            raise ValueError("max_search_seconds must be finite and non-negative")
+        self.max_search_seconds = max_seconds
+        self.candidate_graph_upper_bound = (
+            1
+            + task.budget.rounds
+            * (
+                task.budget.proposals_per_round
+                + task.budget.max_repairs_per_round
+            )
+        )
+        self._time_budget_clock = time_budget_clock
+        self._time_budget_started_at: Optional[float] = None
+        self._time_budget_context: Optional[Dict[str, Any]] = None
+        self.termination_reason: Optional[str] = None
         self.strategy_portfolio = StructuralStrategyPortfolio()
         self.novelty_analyzer = SourceNoveltyAnalyzer()
         for name, value in (
@@ -261,6 +287,9 @@ class OptimizationController:
 
     def run(self) -> SearchSummary:
         started_at = time.perf_counter()
+        self._time_budget_started_at = self._time_budget_clock()
+        self._time_budget_context = None
+        self.termination_reason = None
         try:
             seed_candidate = Candidate.seed(
                 self.task,
@@ -308,6 +337,13 @@ class OptimizationController:
                 else completed_rounds + 1
             )
             for round_number in range(start_round, self.task.budget.rounds + 1):
+                if self._time_budget_exhausted(round_number, "round-start"):
+                    self._stop_for_time_budget(
+                        round_number=round_number,
+                        completed_round=completed_rounds,
+                        resume_phase="",
+                    )
+                    break
                 round_state = (
                     state
                     if state and state.get("active_round") == round_number
@@ -319,11 +355,26 @@ class OptimizationController:
                     break
                 completed_rounds = round_number
 
+            if self.termination_reason is None:
+                self.termination_reason = (
+                    "round-budget-completed"
+                    if completed_rounds >= self.task.budget.rounds
+                    else "search-stopped"
+                )
+
             if self._search_best_id is None:
                 self._search_best_id = self.beam[0].candidate.candidate_id
             search_best = self.records[self._search_best_id]
             final_seed = seed
-            if self.task.budget.final_validation_candidates > 0:
+            should_finalize = (
+                self.task.budget.final_validation_candidates > 0
+                and self.termination_reason != "time-budget"
+            )
+            if should_finalize and self._time_budget_exhausted(
+                completed_rounds + 1, "before-final-validation"
+            ):
+                should_finalize = False
+            if should_finalize:
                 final_best, final_seed = self._finalize_candidates(
                     seed, completed_rounds
                 )
@@ -346,6 +397,11 @@ class OptimizationController:
                     phase="finalized",
                     completed_round=completed_rounds,
                     active_round=None,
+                    termination_reason=(
+                        "time-budget"
+                        if self.termination_reason == "time-budget"
+                        else None
+                    ),
                 )
                 self.incumbent_recorder.record_if_changed(
                     "final-incumbent-updated"
@@ -368,20 +424,33 @@ class OptimizationController:
                 self.run_metadata,
                 self.strategy_plans,
             )
-            self._checkpoint(
-                phase="run_completed",
-                completed_round=completed_rounds,
-                active_round=None,
-            )
-            self.incumbent_recorder.record_now("run-completed")
-            self.store.append_event("run_completed", summary.to_dict())
-            self.progress.emit(
-                "run_completed",
-                "Optimization finished.",
-                best_candidate_id=summary.best_candidate_id,
-                best_latency_ms=summary.best_latency_ms,
-                speedup=summary.speedup_over_seed,
-            )
+            if self.termination_reason == "time-budget":
+                self._persist_runtime_counters()
+                self.incumbent_recorder.record_now("time-budget-stopped")
+                self.store.append_event("run_stopped", summary.to_dict())
+                self.progress.emit(
+                    "time_budget_stopped",
+                    "Search time budget reached; exported the current incumbent.",
+                    elapsed_seconds=round(self._search_elapsed_seconds(), 3),
+                    max_search_seconds=self.max_search_seconds,
+                    best_candidate_id=summary.best_candidate_id,
+                    best_latency_ms=summary.best_latency_ms,
+                )
+            else:
+                self._checkpoint(
+                    phase="run_completed",
+                    completed_round=completed_rounds,
+                    active_round=None,
+                )
+                self.incumbent_recorder.record_now("run-completed")
+                self.store.append_event("run_completed", summary.to_dict())
+                self.progress.emit(
+                    "run_completed",
+                    "Optimization finished.",
+                    best_candidate_id=summary.best_candidate_id,
+                    best_latency_ms=summary.best_latency_ms,
+                    speedup=summary.speedup_over_seed,
+                )
             return summary
         except BaseException as error:
             failure = {
@@ -404,6 +473,62 @@ class OptimizationController:
         finally:
             self.incumbent_recorder.stop()
 
+    def _search_elapsed_seconds(self) -> float:
+        if self._time_budget_started_at is None:
+            return 0.0
+        return max(
+            0.0,
+            float(self._time_budget_clock() - self._time_budget_started_at),
+        )
+
+    def _time_budget_exhausted(self, round_number: int, stage: str) -> bool:
+        if self.max_search_seconds <= 0:
+            return False
+        elapsed = self._search_elapsed_seconds()
+        if elapsed < self.max_search_seconds:
+            return False
+        if self._time_budget_context is None:
+            self.termination_reason = "time-budget"
+            self._time_budget_context = {
+                "round": round_number,
+                "stage": stage,
+                "elapsed_seconds": elapsed,
+                "max_search_seconds": self.max_search_seconds,
+                "overshoot_seconds": max(0.0, elapsed - self.max_search_seconds),
+            }
+            self.store.append_event(
+                "time_budget_exhausted", dict(self._time_budget_context)
+            )
+            self.progress.emit(
+                "time_budget_exhausted",
+                "Search time budget reached; stopping at a safe checkpoint.",
+                **self._time_budget_context,
+            )
+        return True
+
+    def _stop_for_time_budget(
+        self,
+        *,
+        round_number: int,
+        completed_round: int,
+        resume_phase: str,
+        round_candidate_ids: Sequence[str] = (),
+        selected_ids: Sequence[str] = (),
+        best_before_id: Optional[str] = None,
+    ) -> bool:
+        self._time_budget_exhausted(round_number, resume_phase or "round-start")
+        self._checkpoint(
+            phase=resume_phase,
+            completed_round=completed_round,
+            active_round=round_number,
+            round_candidate_ids=round_candidate_ids,
+            selected_ids=selected_ids,
+            best_before_id=best_before_id,
+            termination_reason="time-budget",
+        )
+        self.incumbent_recorder.record_now("time-budget-checkpoint")
+        return False
+
     def _run_round(
         self, round_number: int, resume_state: Mapping[str, Any]
     ) -> bool:
@@ -421,7 +546,15 @@ class OptimizationController:
         if not self._phase_at_least(phase, "generated"):
             generated = self._generate_round(round_number)
             candidate_ids = [item.candidate.candidate_id for item in generated]
+            if self._time_budget_exhausted(round_number, "generation"):
+                return self._stop_for_time_budget(
+                    round_number=round_number,
+                    completed_round=round_number - 1,
+                    resume_phase=phase,
+                    round_candidate_ids=candidate_ids,
+                )
             if not generated:
+                self.termination_reason = "no-new-valid-candidates"
                 self._record_round_strategy_outcomes(round_number)
                 self.store.append_event(
                     "round_stopped",
@@ -459,6 +592,13 @@ class OptimizationController:
                 candidate_ids
                 + [item.candidate.candidate_id for item in repaired]
             )
+            if self._time_budget_exhausted(round_number, "model-or-repair"):
+                return self._stop_for_time_budget(
+                    round_number=round_number,
+                    completed_round=round_number - 1,
+                    resume_phase=phase,
+                    round_candidate_ids=candidate_ids,
+                )
             resume_state = self._checkpoint(
                 phase="modeled",
                 completed_round=round_number - 1,
@@ -526,6 +666,15 @@ class OptimizationController:
                 modeled=len(promotable),
                 evaluation_policy=self.evaluation_policy,
             )
+        if self._time_budget_exhausted(round_number, "before-measurement"):
+            return self._stop_for_time_budget(
+                round_number=round_number,
+                completed_round=round_number - 1,
+                resume_phase=phase,
+                round_candidate_ids=candidate_ids,
+                selected_ids=selected_ids,
+                best_before_id=best_before_id,
+            )
         selected = self._records_for_ids(selected_ids)
 
         if not self._phase_at_least(phase, "measured"):
@@ -544,6 +693,21 @@ class OptimizationController:
                 selected_ids
                 + [item.candidate.candidate_id for item in repair_records]
             )
+            if self._time_budget_exhausted(
+                round_number, "measurement-repair-or-profile"
+            ):
+                self._update_beam(measured)
+                self.incumbent_recorder.record_if_changed(
+                    "time-budget-incumbent-updated"
+                )
+                return self._stop_for_time_budget(
+                    round_number=round_number,
+                    completed_round=round_number - 1,
+                    resume_phase=phase,
+                    round_candidate_ids=candidate_ids,
+                    selected_ids=selected_ids,
+                    best_before_id=best_before_id,
+                )
             resume_state = self._checkpoint(
                 phase="measured",
                 completed_round=round_number - 1,
@@ -573,6 +737,16 @@ class OptimizationController:
         else:
             best_before = self.records[str(best_before_id)]
 
+        if self._time_budget_exhausted(round_number, "before-round-profile"):
+            return self._stop_for_time_budget(
+                round_number=round_number,
+                completed_round=round_number - 1,
+                resume_phase=phase,
+                round_candidate_ids=candidate_ids,
+                selected_ids=selected_ids,
+                best_before_id=best_before_id,
+            )
+
         if not self._phase_at_least(phase, "round_completed"):
             if self.evaluation_policy == "tilesight":
                 self._maybe_profile_round(
@@ -580,6 +754,15 @@ class OptimizationController:
                     best_before,
                     self.beam[0],
                     measured,
+                )
+            if self._time_budget_exhausted(round_number, "round-profile"):
+                return self._stop_for_time_budget(
+                    round_number=round_number,
+                    completed_round=round_number - 1,
+                    resume_phase=phase,
+                    round_candidate_ids=candidate_ids,
+                    selected_ids=selected_ids,
+                    best_before_id=best_before_id,
                 )
             self._record_round_strategy_outcomes(round_number)
             self._checkpoint(
@@ -1021,6 +1204,8 @@ class OptimizationController:
             and item.state == "static-invalid"
         ]
         for index, parent_record in enumerate(parents):
+            if self._time_budget_exhausted(round_number, "candidate-generation"):
+                break
             parents_left = len(parents) - index
             request_count = int(math.ceil(proposals_left / parents_left))
             if request_count <= 0:
@@ -1109,7 +1294,11 @@ class OptimizationController:
                 self.store.save_candidate(record)
 
         repair_queue = list(static_failures)
-        while repair_queue and self._repair_budget_available(round_number):
+        while (
+            repair_queue
+            and self._repair_budget_available(round_number)
+            and not self._time_budget_exhausted(round_number, "static-repair")
+        ):
             failed = repair_queue.pop(0)
             repaired = self._repair_candidate(failed, round_number)
             if repaired is not None and repaired.state == "static-invalid":
@@ -1391,6 +1580,7 @@ class OptimizationController:
             or not failure.retryable
             or failed.candidate.repair_depth >= self.task.budget.max_repair_depth
             or not self._repair_budget_available(round_number)
+            or self._time_budget_exhausted(round_number, "source-repair")
         ):
             return None
 
@@ -1580,6 +1770,8 @@ class OptimizationController:
         for index, record in enumerate(records, start=1):
             if record.model is not None:
                 continue
+            if self._time_budget_exhausted(round_number, "model-candidate"):
+                break
             self.progress.emit(
                 "model_progress",
                 "Running analytical model.",
@@ -1649,7 +1841,11 @@ class OptimizationController:
     ) -> List[CandidateRecord]:
         repaired_records: List[CandidateRecord] = []
         queue = [item for item in records if item.failure is not None]
-        while queue and self._repair_budget_available(round_number):
+        while (
+            queue
+            and self._repair_budget_available(round_number)
+            and not self._time_budget_exhausted(round_number, "model-repair")
+        ):
             failed = queue.pop(0)
             repaired = self._repair_candidate(failed, round_number)
             if repaired is None:
@@ -1692,6 +1888,8 @@ class OptimizationController:
     ) -> List[CandidateRecord]:
         measured: List[CandidateRecord] = []
         for index, record in enumerate(records, start=1):
+            if self._time_budget_exhausted(round_number, "measure-candidate"):
+                break
             if record.measurement is None:
                 self.progress.emit(
                     "measure_progress",
@@ -1754,6 +1952,8 @@ class OptimizationController:
         }
         ordered = [unique[name] for name in sorted(unique)]
         for index, record in enumerate(ordered, start=1):
+            if self._time_budget_exhausted(round_number, "profile-candidate"):
+                break
             if record.profile is None:
                 self.progress.emit(
                     "profile_progress",
@@ -1791,7 +1991,13 @@ class OptimizationController:
         repair_records: List[CandidateRecord] = []
         measured_repairs: List[CandidateRecord] = []
         queue = [item for item in records if item.failure is not None]
-        while queue and self._repair_budget_available(round_number):
+        while (
+            queue
+            and self._repair_budget_available(round_number)
+            and not self._time_budget_exhausted(
+                round_number, "measurement-repair"
+            )
+        ):
             failed = queue.pop(0)
             repaired = self._repair_candidate(failed, round_number)
             if repaired is None:
@@ -1846,6 +2052,8 @@ class OptimizationController:
         best_after: CandidateRecord,
         measured: Sequence[CandidateRecord],
     ) -> None:
+        if self._time_budget_exhausted(round_number, "milestone-profile"):
+            return
         decision = self.milestones.decide(
             round_number=round_number,
             best_before=best_before,
@@ -1960,6 +2168,10 @@ class OptimizationController:
             candidates=len(unique_candidates),
         )
         for index, record in enumerate(unique_candidates, start=1):
+            if index > 1 and self._time_budget_exhausted(
+                completed_rounds + 1, "final-validation"
+            ):
+                break
             if record.final_measurement is None:
                 self.progress.emit(
                     "final_progress",
@@ -2709,6 +2921,7 @@ class OptimizationController:
         round_candidate_ids: Optional[Sequence[str]] = None,
         selected_ids: Optional[Sequence[str]] = None,
         best_before_id: Optional[str] = None,
+        termination_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         state = {
             "schema_version": 1,
@@ -2718,6 +2931,10 @@ class OptimizationController:
             "round_candidate_ids": list(round_candidate_ids or []),
             "selected_ids": list(selected_ids or []),
             "best_before_id": best_before_id,
+            "termination_reason": termination_reason,
+            "max_search_seconds": self.max_search_seconds,
+            "search_elapsed_seconds": self._search_elapsed_seconds(),
+            "candidate_graph_upper_bound": self.candidate_graph_upper_bound,
             "beam": [item.candidate.candidate_id for item in self.beam],
             "best_candidate_id": (
                 self.beam[0].candidate.candidate_id if self.beam else None
@@ -2782,6 +2999,10 @@ class OptimizationController:
                 "calibration": self.calibrator.snapshot(),
                 "evidence_memory": self.evidence_memory.snapshot(),
                 "stage_timings": self.stage_timings,
+                "termination_reason": self.termination_reason,
+                "max_search_seconds": self.max_search_seconds,
+                "search_elapsed_seconds": self._search_elapsed_seconds(),
+                "candidate_graph_upper_bound": self.candidate_graph_upper_bound,
             }
         )
         self.store.save_state(state)
@@ -2885,6 +3106,9 @@ class OptimizationController:
 
     def _experiment_config(self) -> Dict[str, Any]:
         return {
+            "baseline_style": self.baseline_style,
+            "baseline_style_mode": self.baseline_style_mode,
+            "baseline_style_canonical": self.baseline_style_canonical,
             "evaluation_policy": self.evaluation_policy,
             "requested_tir_evidence_policy": self.requested_tir_evidence_policy,
             "tir_evidence_policy": self.tir_evidence_policy,
@@ -2908,6 +3132,9 @@ class OptimizationController:
         """Treat checkpoints created before ablation controls as default runs."""
 
         normalized = dict(value)
+        normalized.setdefault("baseline_style", "native")
+        normalized.setdefault("baseline_style_mode", "native")
+        normalized.setdefault("baseline_style_canonical", True)
         normalized.setdefault("evaluation_policy", "tilesight")
         normalized.setdefault("requested_tir_evidence_policy", "auto")
         normalized.setdefault("tir_evidence_policy", "visible")
@@ -3053,9 +3280,18 @@ class OptimizationController:
                     ).strip()
                 }
             ),
+            baseline_style=self.baseline_style,
+            baseline_style_mode=self.baseline_style_mode,
+            baseline_style_canonical=self.baseline_style_canonical,
             incumbent_snapshot_interval_seconds=(
                 self.incumbent_snapshot_interval_seconds
             ),
+            max_search_seconds=self.max_search_seconds,
+            time_budget_exhausted=(self.termination_reason == "time-budget"),
+            termination_reason=(
+                self.termination_reason or "round-budget-completed"
+            ),
+            candidate_graph_upper_bound=self.candidate_graph_upper_bound,
             cost_ledger=ledger,
             report_paths=expected_report_paths(self.store.root),
         )

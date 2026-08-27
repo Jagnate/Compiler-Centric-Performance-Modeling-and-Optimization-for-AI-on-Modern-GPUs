@@ -77,6 +77,9 @@ def write_research_artifacts(
             "budget": task.budget.__dict__,
             "run": dict(run_metadata),
             "policies": {
+                "baseline_style": summary.baseline_style,
+                "baseline_style_mode": summary.baseline_style_mode,
+                "baseline_style_canonical": summary.baseline_style_canonical,
                 "evaluation": summary.evaluation_policy,
                 "requested_tir_evidence": summary.requested_tir_evidence_policy,
                 "tir_evidence": summary.tir_evidence_policy,
@@ -214,6 +217,10 @@ def _experiment_markdown(
         "| Field | Value |",
         "| --- | --- |",
         "| Task | `%s` |" % task.task_id,
+        "| Baseline style | `%s` |" % summary.baseline_style,
+        "| Baseline mode | `%s` |" % summary.baseline_style_mode,
+        "| Canonical preset | %s |"
+        % ("yes" if summary.baseline_style_canonical else "no"),
         "| Evaluation policy | `%s` |" % summary.evaluation_policy,
         "| TIR evidence policy (requested -> effective) | `%s` -> `%s` |"
         % (
@@ -239,6 +246,9 @@ def _experiment_markdown(
         % _format(generator_metadata.get("agent_workers", 1)),
         "| Incumbent snapshot interval | %s s |"
         % _format(summary.incumbent_snapshot_interval_seconds),
+        "| Search time budget | %s s |" % _format(summary.max_search_seconds),
+        "| Candidate graph upper bound | %d |"
+        % summary.candidate_graph_upper_bound,
         "| AI planner calls | %d |" % summary.planner_calls,
         "| Planner fallbacks | %d |" % summary.planner_fallbacks,
         "| Completed rounds | %d |" % summary.completed_rounds,
@@ -250,6 +260,9 @@ def _experiment_markdown(
         "| Seed latency | %s ms |" % _format(summary.seed_latency_ms),
         "| Best final latency | %s ms |" % _format(summary.best_latency_ms),
         "| Speedup over seed | %sx |" % _format(summary.speedup_over_seed),
+        "| Termination reason | `%s` |" % summary.termination_reason,
+        "| Time budget exhausted | %s |"
+        % ("yes" if summary.time_budget_exhausted else "no"),
         "| Search-best latency | %s ms |"
         % _format(summary.search_best_latency_ms),
         "| Generated candidates | %d |" % summary.generated_candidates,

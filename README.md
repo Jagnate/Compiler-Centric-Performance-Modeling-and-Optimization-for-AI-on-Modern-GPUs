@@ -209,6 +209,12 @@ schedule. On the target RTX 3090 this is intentionally resource-heavy, while
 remaining correct and executable, and leaves occupancy and tile-shape
 opportunities for the optimizer.
 
+The Flash Attention seed follows the official TileLang BSHD online-softmax
+dataflow, including staging each output tile's loop-invariant Q data once before
+the K/V loop. Its workload shape and factory interface are adapted for this
+system, while the 64 x 64 one-stage schedule remains a conservative starting
+configuration.
+
 The fused Add + RMSNorm seed uses one row per CTA, 64 threads, and 128-element
 hidden chunks. Its first pass writes `Z = X + residual`; its normalization pass
 then deliberately reloads both inputs and recomputes Z. This is valid on an

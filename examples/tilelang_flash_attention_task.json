@@ -115,6 +115,6 @@
   "metadata": {
     "kernel_family": "flash-attention",
     "purpose": "End-to-end hosted-API source optimization example.",
-    "seed_policy": "The fused online-softmax algorithm is fixed, but the input schedule and data movement are deliberately under-tuned."
+    "seed_policy": "The seed follows the official TileLang BSHD online-softmax dataflow, including loop-invariant Q staging, while retaining an under-tuned 64 x 64 one-stage schedule."
   }
 }

@@ -1,4 +1,4 @@
-"""TileLang Flash Attention source used as an optimization seed."""
+"""Official-structure TileLang Flash Attention optimization seed."""
 
 # TileLang evaluates T.Buffer annotations while @T.prim_func constructs TIR.
 # Postponed annotations must therefore remain disabled in candidate sources.
@@ -16,7 +16,7 @@ def make_flash_attention_program(
     num_stages: int = 1,
     threads: int = 128,
 ):
-    """Construct a stable but deliberately conservative Flash Attention seed."""
+    """Construct an official-style online-softmax Flash Attention seed."""
 
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     shape = (batch, seq_len, heads, dim)
@@ -49,6 +49,11 @@ def make_flash_attention_program(
             scores_sum = T.alloc_fragment((block_m,), accum_dtype)
             logsum = T.alloc_fragment((block_m,), accum_dtype)
 
+            # Q is invariant across all K/V tiles for this output tile.
+            T.copy(
+                q[bz, bx * block_m : (bx + 1) * block_m, by, :],
+                q_shared,
+            )
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -63,12 +68,6 @@ def make_flash_attention_program(
             )
 
             for ko in T.Pipelined(loop_range, num_stages=num_stages):
-                # This baseline intentionally reloads loop-invariant Q. Hoisting the
-                # copy is a simple, semantics-preserving data-movement optimization.
-                T.copy(
-                    q[bz, bx * block_m : (bx + 1) * block_m, by, :],
-                    q_shared,
-                )
                 T.copy(
                     k[bz, ko * block_n : (ko + 1) * block_n, by, :],
                     k_shared,

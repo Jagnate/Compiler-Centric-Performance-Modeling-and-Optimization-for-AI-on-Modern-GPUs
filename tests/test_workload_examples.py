@@ -134,16 +134,17 @@ class WorkloadContractTests(unittest.TestCase):
                 )
                 self.assertIn("under-tuned", task.metadata["seed_policy"])
 
-    def test_flash_attention_seed_exposes_invariant_q_hoisting(self) -> None:
+    def test_flash_attention_seed_hoists_loop_invariant_q(self) -> None:
         source = (
             REPOSITORY_ROOT / "examples" / "tilelang_flash_attention_kernel.py"
         ).read_text(encoding="utf-8")
 
+        q_copy = source.index("q[bz, bx * block_m")
         pipeline = source.index("for ko in T.Pipelined")
-        q_copy = source.index("q[bz, bx * block_m", pipeline)
         k_copy = source.index("k[bz, ko * block_n", pipeline)
-        self.assertLess(pipeline, q_copy)
-        self.assertLess(q_copy, k_copy)
+        self.assertLess(q_copy, pipeline)
+        self.assertLess(pipeline, k_copy)
+        self.assertEqual(source.count("q[bz, bx * block_m"), 1)
 
     def test_new_workloads_exercise_multiple_input_shapes(self) -> None:
         expected_changes = {

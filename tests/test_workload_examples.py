@@ -68,7 +68,13 @@ def _factory_defaults(source: str, entrypoint: str) -> dict[str, object]:
 
 class WorkloadContractTests(unittest.TestCase):
     def test_all_task_shapes_match_seed_factory_signatures(self) -> None:
-        for name in ("matmul", "flash_attention", "rms_norm", "conv2d"):
+        for name in (
+            "matmul",
+            "flash_attention",
+            "rms_norm",
+            "fused_add_rms_norm",
+            "conv2d",
+        ):
             with self.subTest(workload=name):
                 task = _load_task(name)
                 source_path = (
@@ -97,6 +103,11 @@ class WorkloadContractTests(unittest.TestCase):
                 "threads": 128,
             },
             "rms_norm": {
+                "block_rows": 1,
+                "block_hidden": 128,
+                "threads": 64,
+            },
+            "fused_add_rms_norm": {
                 "block_rows": 1,
                 "block_hidden": 128,
                 "threads": 64,
@@ -137,6 +148,7 @@ class WorkloadContractTests(unittest.TestCase):
     def test_new_workloads_exercise_multiple_input_shapes(self) -> None:
         expected_changes = {
             "rms_norm": {"rows", "hidden_size"},
+            "fused_add_rms_norm": {"rows", "hidden_size"},
             "conv2d": {
                 "batch",
                 "in_height",
@@ -166,7 +178,12 @@ class WorkloadContractTests(unittest.TestCase):
                 self.assertTrue(expected <= changed)
 
     def test_new_workload_plugins_validate_every_configured_case(self) -> None:
-        for name in ("rms_norm", "conv2d"):
+        expected_outputs = {
+            "rms_norm": [2],
+            "fused_add_rms_norm": [3, 4],
+            "conv2d": [2],
+        }
+        for name, outputs in expected_outputs.items():
             with self.subTest(workload=name):
                 task = _load_task(name)
                 request = {"task": task.to_dict()}
@@ -177,10 +194,28 @@ class WorkloadContractTests(unittest.TestCase):
                 )
                 for case in cases:
                     plugin.validate_case(case, task.to_dict())
-                    self.assertEqual(plugin.output_indices(case, task.to_dict()), [2])
+                    self.assertEqual(
+                        plugin.output_indices(case, task.to_dict()), outputs
+                    )
                     self.assertTrue(callable(plugin.reference_program(case, task.to_dict())))
 
-    def test_invalid_rms_norm_and_conv2d_shapes_are_rejected(self) -> None:
+    def test_fused_add_rms_norm_seed_exposes_retention_optimization(self) -> None:
+        source = (
+            REPOSITORY_ROOT
+            / "examples"
+            / "tilelang_fused_add_rms_norm_kernel.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            source.count("x[bx * block_rows, ko * block_hidden]"), 2
+        )
+        self.assertEqual(
+            source.count("residual[bx * block_rows, ko * block_hidden]"), 2
+        )
+        self.assertIn("residual_out[bx * block_rows, ko * block_hidden]", source)
+        self.assertIn("normalized[bx * block_rows, ko * block_hidden]", source)
+
+    def test_invalid_new_workload_shapes_are_rejected(self) -> None:
         rms_task = _load_task("rms_norm").to_dict()
         rms_plugin = _load_module(
             REPOSITORY_ROOT / "examples" / "workloads" / "rms_norm.py",
@@ -199,6 +234,27 @@ class WorkloadContractTests(unittest.TestCase):
                 rms_task,
             )
 
+        fused_task = _load_task("fused_add_rms_norm").to_dict()
+        fused_plugin = _load_module(
+            REPOSITORY_ROOT
+            / "examples"
+            / "workloads"
+            / "fused_add_rms_norm.py",
+            "test_invalid_fused_add_rms_norm",
+        )
+        with self.assertRaisesRegex(ValueError, "positive integer rows"):
+            fused_plugin.validate_case(
+                {
+                    "case_id": "invalid-fused",
+                    "factory_arguments": {
+                        "rows": 0,
+                        "hidden_size": 4096,
+                        "epsilon": 1e-6,
+                    },
+                },
+                fused_task,
+            )
+
         conv_task = _load_task("conv2d").to_dict()
         conv_plugin = _load_module(
             REPOSITORY_ROOT / "examples" / "workloads" / "conv2d.py",
@@ -214,7 +270,11 @@ class WorkloadContractTests(unittest.TestCase):
 
     def test_new_workloads_receive_family_specific_search_guidance(self) -> None:
         portfolio = StructuralStrategyPortfolio()
-        for name, marker in (("rms_norm", "RMSNorm"), ("conv2d", "convolution")):
+        for name, marker in (
+            ("rms_norm", "RMSNorm"),
+            ("fused_add_rms_norm", "residual-add retention"),
+            ("conv2d", "convolution"),
+        ):
             with self.subTest(workload=name):
                 catalog = portfolio.strategy_catalog(_load_task(name))
                 hints = " ".join(item["family_hint"] for item in catalog)
@@ -237,6 +297,22 @@ class RealTileLangSeedSmokeTests(unittest.TestCase):
             block_rows=1,
             block_hidden=256,
             threads=128,
+        )
+        self.assertIsNotNone(program)
+
+    def test_constructs_fused_add_rms_norm_primfunc(self) -> None:
+        module = _load_module(
+            REPOSITORY_ROOT
+            / "examples"
+            / "tilelang_fused_add_rms_norm_kernel.py",
+            "tilelang_fused_add_rms_norm_seed_smoke",
+        )
+        program = module.make_fused_add_rms_norm_program(
+            rows=8,
+            hidden_size=256,
+            block_rows=1,
+            block_hidden=128,
+            threads=64,
         )
         self.assertIsNotNone(program)
 

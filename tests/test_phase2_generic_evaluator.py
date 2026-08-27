@@ -33,7 +33,13 @@ class GenericEvaluatorTests(unittest.TestCase):
             name: TaskSpec.from_json_file(
                 REPOSITORY_ROOT / "examples" / f"tilelang_{name}_task.json"
             )
-            for name in ("matmul", "flash_attention", "rms_norm", "conv2d")
+            for name in (
+                "matmul",
+                "flash_attention",
+                "rms_norm",
+                "fused_add_rms_norm",
+                "conv2d",
+            )
         }
         commands = {tuple(task.evaluator["command"]) for task in tasks.values()}
         plugins = {

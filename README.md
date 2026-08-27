@@ -179,19 +179,24 @@ examples/tilelang_flash_attention_kernel.py    API-editable Flash Attention seed
 examples/tilelang_flash_attention_task.json    Flash Attention contract
 examples/tilelang_rms_norm_kernel.py           API-editable weighted RMSNorm seed
 examples/tilelang_rms_norm_task.json           RMSNorm optimization contract
+examples/tilelang_fused_add_rms_norm_kernel.py API-editable fused Add + RMSNorm seed
+examples/tilelang_fused_add_rms_norm_task.json fused Add + RMSNorm contract
 examples/tilelang_conv2d_kernel.py             API-editable NHWC Conv2D seed
 examples/tilelang_conv2d_task.json             Conv2D optimization contract
 examples/tilesight_kernel_evaluator.py         shared TileSight/CUDA/NCU runtime
 examples/workloads/matmul.py                   immutable Matmul semantics
 examples/workloads/flash_attention.py          immutable attention semantics
 examples/workloads/rms_norm.py                 immutable weighted RMSNorm semantics
+examples/workloads/fused_add_rms_norm.py       immutable fused Add + RMSNorm semantics
 examples/workloads/conv2d.py                   immutable NHWC/HWIO Conv2D semantics
 ```
 
-All four example tasks target an RTX 3090. Matmul uses a 2048 x 2048 x 2048
+All five example tasks target an RTX 3090. Matmul uses a 2048 x 2048 x 2048
 FP16 primary workload. Flash Attention uses B=1, H=32, S=1024, D=64 FP16 BSHD
-input. Weighted RMSNorm uses 8192 rows with hidden size 4096. Conv2D uses NHWC
-N=32, H=W=56, C=64 input and an HWIO 3 x 3 x 64 x 128 filter.
+input. Weighted RMSNorm and fused Add + RMSNorm use 8192 rows with hidden size
+4096. The fused workload returns both the normalized tensor and the FP16
+residual sum. Conv2D uses NHWC N=32, H=W=56, C=64 input and an HWIO 3 x 3 x 64
+x 128 filter.
 
 The editable seeds are deliberately under-tuned, correctness-first baselines.
 They retain a stable Tensor Core or reduction algorithm while exposing ordinary
@@ -203,6 +208,12 @@ The Matmul seed specifically uses a validated 128 x 128 x 32, three-stage
 schedule. On the target RTX 3090 this is intentionally resource-heavy, while
 remaining correct and executable, and leaves occupancy and tile-shape
 opportunities for the optimizer.
+
+The fused Add + RMSNorm seed uses one row per CTA, 64 threads, and 128-element
+hidden chunks. Its first pass writes `Z = X + residual`; its normalization pass
+then deliberately reloads both inputs and recomputes Z. This is valid on an
+RTX 3090 but exposes measurable retention, vectorization, reduction-mapping,
+and dual-output writeback opportunities without making the seed invalid.
 
 Input shapes are semantic task data rather than a fixed schedule search space.
 Change `workload.factory_arguments` in the selected task JSON to set the primary
@@ -231,6 +242,11 @@ PYTHONPATH=src python3 examples/validate_seed_kernel.py \
   --source examples/tilelang_rms_norm_kernel.py \
   --task examples/tilelang_rms_norm_task.json \
   --output results/rms_norm_seed_validation
+
+PYTHONPATH=src python3 examples/validate_seed_kernel.py \
+  --source examples/tilelang_fused_add_rms_norm_kernel.py \
+  --task examples/tilelang_fused_add_rms_norm_task.json \
+  --output results/fused_add_rms_norm_seed_validation
 
 PYTHONPATH=src python3 examples/validate_seed_kernel.py \
   --source examples/tilelang_conv2d_kernel.py \
@@ -279,13 +295,18 @@ PYTHONPATH=src python3 -m kernel_optimization.cli \
   --output results/flash_attention_api_run
 ```
 
-RMSNorm and Conv2D use the same command shape:
+RMSNorm, fused Add + RMSNorm, and Conv2D use the same command shape:
 
 ```bash
 PYTHONPATH=src python3 -m kernel_optimization.cli \
   --source examples/tilelang_rms_norm_kernel.py \
   --task examples/tilelang_rms_norm_task.json \
   --output results/rms_norm_api_run
+
+PYTHONPATH=src python3 -m kernel_optimization.cli \
+  --source examples/tilelang_fused_add_rms_norm_kernel.py \
+  --task examples/tilelang_fused_add_rms_norm_task.json \
+  --output results/fused_add_rms_norm_api_run
 
 PYTHONPATH=src python3 -m kernel_optimization.cli \
   --source examples/tilelang_conv2d_kernel.py \

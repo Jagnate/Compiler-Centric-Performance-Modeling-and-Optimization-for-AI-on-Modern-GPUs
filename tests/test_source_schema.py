@@ -110,6 +110,12 @@ class SourceValidatorTests(unittest.TestCase):
                 "tilelang_flash_attention_task.json",
                 "tilelang_flash_attention_kernel.py",
             ),
+            ("tilelang_rms_norm_task.json", "tilelang_rms_norm_kernel.py"),
+            (
+                "tilelang_fused_add_rms_norm_task.json",
+                "tilelang_fused_add_rms_norm_kernel.py",
+            ),
+            ("tilelang_conv2d_task.json", "tilelang_conv2d_kernel.py"),
         )
         for task_name, source_name in examples:
             with self.subTest(task=task_name):

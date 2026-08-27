@@ -951,6 +951,12 @@ def _kernel_family(task: TaskSpec) -> str:
         return "flash-attention"
     if "matmul" in text or "gemm" in text:
         return "matmul"
+    if (
+        "add-rmsnorm" in text
+        or "add_rms_norm" in text
+        or "add + rmsnorm" in text
+    ):
+        return "add-rmsnorm"
     if "rmsnorm" in text or "rms_norm" in text or "rms norm" in text:
         return "rmsnorm"
     if "conv2d" in text or "convolution" in text:
@@ -1046,6 +1052,38 @@ def _family_hint(family: str, strategy_id: str) -> str:
             "work-decomposition": (
                 "Consider one-pass versus two-pass reduction, split reductions, or fused "
                 "epilogues while preserving exact RMSNorm semantics."
+            ),
+        },
+        "add-rmsnorm": {
+            "parameter-tuning": (
+                "Explore compatible row tiles, hidden-dimension chunks, thread counts, "
+                "and vector widths for the fused residual-add and RMSNorm kernel."
+            ),
+            "open-structural-exploration": (
+                "Look beyond named lanes for a concrete residual-add retention, RMSNorm "
+                "reduction, dataflow, or fusion change supported by APIs already "
+                "available in the source environment."
+            ),
+            "memory-layout": (
+                "Consider shared/fragment organization that can retain the residual sum "
+                "through normalization while preserving both required outputs."
+            ),
+            "data-movement": (
+                "Avoid redundant X and residual rereads or repeated addition; consider "
+                "coalesced/vectorized inputs, weight loads, and both output writebacks."
+            ),
+            "execution-mapping": (
+                "Consider how rows and hidden-dimension reduction chunks map across CTAs, "
+                "warps, and threads on the target GPU."
+            ),
+            "pipeline-structure": (
+                "Consider overlap among residual-add loads, reduction chunks, weight "
+                "loads, and dual-output production rather than only changing a tile."
+            ),
+            "work-decomposition": (
+                "Consider retaining or reusing Z = X + residual across the reduction and "
+                "normalization phases, one- versus two-pass organization, and fused "
+                "writeback while returning both normalized output and Z."
             ),
         },
         "conv2d": {

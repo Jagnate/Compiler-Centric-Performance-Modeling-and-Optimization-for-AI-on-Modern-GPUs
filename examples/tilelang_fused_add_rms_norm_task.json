@@ -1,0 +1,109 @@
+{
+  "task_id": "tilelang_fused_add_rms_norm_r8192_h4096_rtx3090",
+  "description": "Optimize a fused residual-add plus weighted RMSNorm TileLang kernel for an RTX 3090.",
+  "reference": "For X[rows, hidden_size], residual[rows, hidden_size], and weight[hidden_size], first compute Z = float16(X + residual), then compute Y = Z * rsqrt(mean(float32(Z)^2, axis=-1) + epsilon) * weight with float32 reduction and float16 output. Return both Y and Z.",
+  "entrypoint": "make_fused_add_rms_norm_program",
+  "language": "python",
+  "target": {
+    "architecture": "rtx3090",
+    "tilelang_target": "cuda -arch=sm_86",
+    "write_policy": "write-through"
+  },
+  "workload": {
+    "factory_arguments": {
+      "rows": 8192,
+      "hidden_size": 4096,
+      "epsilon": 1e-06
+    },
+    "output_indices": [3, 4],
+    "atol": 0.02,
+    "rtol": 0.02,
+    "max_mismatched_ratio": 0.01,
+    "warmup_ms": 25.0,
+    "rep_ms": 100.0,
+    "benchmark_backend": "event",
+    "return_mode": "median"
+  },
+  "constraints": {
+    "preserve_entrypoint": true,
+    "max_source_bytes": 200000,
+    "required_fragments": [
+      "from tilelang import language as T",
+      "def make_fused_add_rms_norm_program"
+    ],
+    "forbidden_fragments": [
+      "subprocess",
+      "os.system",
+      "eval(",
+      "exec("
+    ]
+  },
+  "budget": {
+    "rounds": 4,
+    "proposals_per_round": 6,
+    "beam_width": 3,
+    "min_promotions_per_round": 2,
+    "max_promotions_per_round": 4,
+    "ncu_improvement_threshold": 0.05,
+    "ncu_max_staleness_rounds": 3,
+    "ncu_plateau_rounds": 2,
+    "max_repairs_per_round": 2,
+    "max_repair_depth": 2,
+    "calibration_min_samples": 2,
+    "final_validation_candidates": 3,
+    "random_seed": 23
+  },
+  "evaluator": {
+    "type": "command",
+    "command": ["python3", "examples/tilesight_kernel_evaluator.py"],
+    "working_directory": "..",
+    "timeout_seconds": 1800,
+    "environment": {
+      "PYTHONPATH": "../TileSight"
+    },
+    "runtime": {
+      "plugin": "examples/workloads/fused_add_rms_norm.py",
+      "architecture_profile": "ncu",
+      "require_target_match": true,
+      "model_collect_ptxas": true,
+      "measurement_repeats": 2,
+      "final_repeats": 5,
+      "search_cases": [
+        {
+          "case_id": "primary-r8192-h4096"
+        },
+        {
+          "case_id": "public-r2048-h4096",
+          "factory_arguments": {
+            "rows": 2048,
+            "hidden_size": 4096
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-r4096-h8192",
+          "factory_arguments": {
+            "rows": 4096,
+            "hidden_size": 8192
+          }
+        },
+        {
+          "case_id": "heldout-r16384-h1024",
+          "factory_arguments": {
+            "rows": 16384,
+            "hidden_size": 1024
+          }
+        }
+      ],
+      "profile_directory": "results/ncu_profiles/fused_add_rms_norm",
+      "ncu_set": "full",
+      "ncu_cache_control": "all"
+    }
+  },
+  "metadata": {
+    "kernel_family": "fused-add-rmsnorm",
+    "purpose": "Level-2 composite-operation hosted-API source optimization example.",
+    "seed_policy": "The input is a correctness-first under-tuned two-pass reduction that deliberately reloads and recomputes the residual sum with conservative chunk and thread defaults."
+  }
+}

@@ -346,7 +346,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     style_metadata = style.to_dict()
     style_metadata["controller_policies"] = dict(policies)
     run_metadata = {
-        "framework_version": "0.12.1",
+        "framework_version": "0.13.0",
         "baseline_style": style_metadata,
         "generator": {
             "type": "hosted-api",

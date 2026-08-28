@@ -440,6 +440,20 @@ The default fail-fast behavior prevents one API or profiler outage from cascadin
 through the matrix. Add `--continue-on-error` to collect independent failures and
 continue; the suite still exits nonzero when any cell failed.
 
+Run the second workload family, including the native full system, with:
+
+```bash
+PYTHONPATH=src python3 examples/run_final_related_system_shape_1.py
+```
+
+This executes 30 treatments: five kernels times `native` plus the five proxy
+styles. The checked-in `examples/related_system_shape_1.json` changes the complete
+primary/public/held-out workload family without modifying any base task. Effective
+tasks and per-treatment NCU reports are materialized below
+`results/final_eval/related_system_baselines_shape_1/`. All cases are distinct
+from the first suite. The shape rationale and first-suite findings are documented
+in [SHAPE_1_EXPERIMENT.md](SHAPE_1_EXPERIMENT.md).
+
 ### Cost and graph bounds
 
 The task budget already bounds candidate-graph growth. The maximum number of

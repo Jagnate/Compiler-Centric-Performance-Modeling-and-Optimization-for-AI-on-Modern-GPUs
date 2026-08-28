@@ -1,0 +1,219 @@
+{
+  "suite_id": "related_system_shape_1",
+  "title": "Related-System Baselines: Shape Family 1",
+  "description": "A second RTX 3090 workload family designed from the first 25-run suite: rectangular GEMM, narrower normalization rows, channel-heavy Conv2D, and longer causal attention.",
+  "workloads": {
+    "matmul": {
+      "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_shape1",
+      "description": "Optimize a TileLang FP16 tall rectangular matrix multiplication kernel for an RTX 3090.",
+      "rationale": "The first square GEMM separated styles well. This shape doubles primary arithmetic while changing the M:N aspect ratio, testing tile selection rather than repeating a square-size scale-up.",
+      "factory_arguments": {
+        "m": 4096,
+        "n": 1024,
+        "k": 4096
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-m4096-n1024-k4096"
+        },
+        {
+          "case_id": "public-m2048-n1024-k4096",
+          "factory_arguments": {
+            "m": 2048,
+            "n": 1024,
+            "k": 4096
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-m1024-n4096-k2048",
+          "factory_arguments": {
+            "m": 1024,
+            "n": 4096,
+            "k": 2048
+          }
+        },
+        {
+          "case_id": "heldout-m3072-n1536-k4096",
+          "factory_arguments": {
+            "m": 3072,
+            "n": 1536,
+            "k": 4096
+          }
+        }
+      ]
+    },
+    "rms_norm": {
+      "task_id": "tilelang_rms_norm_r16384_h2048_rtx3090_shape1",
+      "description": "Optimize a weighted TileLang FP16 RMSNorm kernel with 16384 rows and hidden size 2048 for an RTX 3090.",
+      "rationale": "The first suite found fast search candidates that often failed held-out final selection. Keeping the primary element count constant while halving hidden width tests reduction mapping and cross-shape robustness.",
+      "factory_arguments": {
+        "rows": 16384,
+        "hidden_size": 2048,
+        "epsilon": 1e-06
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-r16384-h2048"
+        },
+        {
+          "case_id": "public-r4096-h2048",
+          "factory_arguments": {
+            "rows": 4096,
+            "hidden_size": 2048
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-r12288-h4096",
+          "factory_arguments": {
+            "rows": 12288,
+            "hidden_size": 4096
+          }
+        },
+        {
+          "case_id": "heldout-r32768-h1024",
+          "factory_arguments": {
+            "rows": 32768,
+            "hidden_size": 1024
+          }
+        }
+      ]
+    },
+    "conv2d": {
+      "task_id": "tilelang_conv2d_n32_h28_w28_c128_f256_k3_rtx3090_shape1",
+      "description": "Optimize a channel-heavy TileLang FP16 NHWC Conv2D kernel for an RTX 3090.",
+      "rationale": "The first Conv2D was discriminative. This common later-stage 3x3 layer preserves approximately the same MAC count while trading spatial area for input and output channels.",
+      "factory_arguments": {
+        "batch": 32,
+        "in_height": 28,
+        "in_width": 28,
+        "in_channels": 128,
+        "out_channels": 256,
+        "kernel_size": 3,
+        "stride": 1,
+        "dilation": 1,
+        "padding": 1
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-n32-h28-w28-c128-f256-k3-s1"
+        },
+        {
+          "case_id": "public-n8-h28-w28-c128-f256-k3-s1",
+          "factory_arguments": {
+            "batch": 8
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-n16-h28-w28-c128-f256-k3-s2",
+          "factory_arguments": {
+            "batch": 16,
+            "stride": 2
+          }
+        },
+        {
+          "case_id": "heldout-n32-h14-w14-c256-f512-k3-s1",
+          "factory_arguments": {
+            "batch": 32,
+            "in_height": 14,
+            "in_width": 14,
+            "in_channels": 256,
+            "out_channels": 512
+          }
+        }
+      ]
+    },
+    "flash_attention": {
+      "task_id": "tilelang_flash_attention_b1_h32_s2048_d64_causal_rtx3090_shape1",
+      "description": "Optimize a TileLang causal Flash Attention forward kernel with sequence length 2048 for an RTX 3090.",
+      "rationale": "The first 1024-token kernel was only about 0.15 ms and showed little optimization. A 2048-token causal workload roughly doubles useful attention-pair work while remaining practical on a 24 GB RTX 3090.",
+      "factory_arguments": {
+        "batch": 1,
+        "heads": 32,
+        "seq_len": 2048,
+        "dim": 64,
+        "is_causal": true
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-b1-h32-s2048-d64-causal"
+        },
+        {
+          "case_id": "public-b1-h8-s1024-d64-causal",
+          "factory_arguments": {
+            "batch": 1,
+            "heads": 8,
+            "seq_len": 1024,
+            "dim": 64,
+            "is_causal": true
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-b1-h16-s2048-d64-noncausal",
+          "factory_arguments": {
+            "batch": 1,
+            "heads": 16,
+            "seq_len": 2048,
+            "dim": 64,
+            "is_causal": false
+          }
+        },
+        {
+          "case_id": "heldout-b2-h8-s1536-d64-causal",
+          "factory_arguments": {
+            "batch": 2,
+            "heads": 8,
+            "seq_len": 1536,
+            "dim": 64,
+            "is_causal": true
+          }
+        }
+      ]
+    },
+    "fused_add_rms_norm": {
+      "task_id": "tilelang_fused_add_rms_norm_r16384_h2048_rtx3090_shape1",
+      "description": "Optimize fused residual Add plus weighted RMSNorm with 16384 rows and hidden size 2048 for an RTX 3090.",
+      "rationale": "All five first-suite styles converged to the same 1.51x result. The same element count with half the hidden width tests whether that optimization is structural or specialized to hidden size 4096.",
+      "factory_arguments": {
+        "rows": 16384,
+        "hidden_size": 2048,
+        "epsilon": 1e-06
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-r16384-h2048"
+        },
+        {
+          "case_id": "public-r4096-h2048",
+          "factory_arguments": {
+            "rows": 4096,
+            "hidden_size": 2048
+          }
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "heldout-r12288-h4096",
+          "factory_arguments": {
+            "rows": 12288,
+            "hidden_size": 4096
+          }
+        },
+        {
+          "case_id": "heldout-r32768-h1024",
+          "factory_arguments": {
+            "rows": 32768,
+            "hidden_size": 1024
+          }
+        }
+      ]
+    }
+  }
+}

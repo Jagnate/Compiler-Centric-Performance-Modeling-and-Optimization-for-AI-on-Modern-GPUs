@@ -812,7 +812,9 @@ class OptimizationController:
                         "environment failed: %s" % record.failure.message
                     )
                 raise RuntimeError(
-                    "the input kernel is invalid according to the model backend"
+                    "the input kernel is invalid according to the model backend "
+                    "[%s]: %s"
+                    % (record.failure.category, record.failure.message)
                 )
             record.model = self.calibrator.apply(self.task, record.model)
             self._register_compiled_identity(record)

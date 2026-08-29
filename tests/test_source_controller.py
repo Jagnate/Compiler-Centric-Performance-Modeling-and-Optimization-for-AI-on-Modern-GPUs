@@ -114,6 +114,32 @@ class SourceOptimizationControllerTests(unittest.TestCase):
             candidate_sources = list((output / "candidates").glob("*/kernel.py"))
             self.assertEqual(len(candidate_sources), summary.generated_candidates)
 
+    def test_invalid_seed_error_includes_model_diagnostic(self) -> None:
+        task = TaskSpec(
+            task_id="invalid-seed-diagnostic",
+            description="Expose the model's seed rejection reason.",
+            reference="kernel(x) returns x.",
+            entrypoint="kernel",
+            constraints={"required_fragments": ["def kernel"]},
+        )
+
+        with tempfile.TemporaryDirectory(prefix="kernel-invalid-seed-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code=SOURCE_TEMPLATE % 0,
+                source_name="kernel.py",
+                generator=mock.Mock(),
+                backend=_InvalidSeedBackend(),
+                store=ArtifactStore(Path(directory)),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"model backend \[compile-or-lowering\]: "
+                r"ValueError: unresolved CTA-dependent extent",
+            ):
+                controller.run()
+
 
 class _SourceTransport:
     def __call__(self, url, headers, payload, timeout):
@@ -182,6 +208,22 @@ class _SourceBackend:
             bottleneck="tensor-core",
             metrics={"profile_source": "test-fake"},
         )
+
+
+class _InvalidSeedBackend:
+    def model(self, task: TaskSpec, candidate: Candidate) -> ModelEvaluation:
+        del task, candidate
+        return ModelEvaluation(
+            valid=False,
+            bottleneck="compile-or-model-failure",
+            diagnostics=["ValueError: unresolved CTA-dependent extent"],
+        )
+
+    def measure(self, task: TaskSpec, candidate: Candidate) -> Measurement:
+        raise AssertionError("an invalid seed must not be measured")
+
+    def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
+        raise AssertionError("an invalid seed must not be profiled")
 
 
 if __name__ == "__main__":

@@ -140,6 +140,36 @@ class SourceOptimizationControllerTests(unittest.TestCase):
             ):
                 controller.run()
 
+    def test_seed_gpu_oom_is_reported_as_environment_failure(self) -> None:
+        task = TaskSpec(
+            task_id="seed-gpu-oom",
+            description="Classify evaluator GPU memory exhaustion.",
+            reference="kernel(x) returns x.",
+            entrypoint="kernel",
+            constraints={"required_fragments": ["def kernel"]},
+        )
+
+        with tempfile.TemporaryDirectory(prefix="kernel-seed-gpu-oom-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code=SOURCE_TEMPLATE % 0,
+                source_name="kernel.py",
+                generator=mock.Mock(),
+                backend=_GpuOomSeedBackend(),
+                store=ArtifactStore(Path(directory)),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"evaluator environment failed: OutOfMemoryError: "
+                r"CUDA out of memory",
+            ):
+                controller.run()
+
+        seed = next(iter(controller.records.values()))
+        self.assertEqual(seed.state, "seed-infrastructure-failed")
+        self.assertEqual(seed.failure.category, "infrastructure-gpu-memory")
+
 
 class _SourceTransport:
     def __call__(self, url, headers, payload, timeout):
@@ -224,6 +254,18 @@ class _InvalidSeedBackend:
 
     def profile(self, task: TaskSpec, candidate: Candidate) -> ProfileEvaluation:
         raise AssertionError("an invalid seed must not be profiled")
+
+
+class _GpuOomSeedBackend(_SourceBackend):
+    def measure(self, task: TaskSpec, candidate: Candidate) -> Measurement:
+        del task, candidate
+        return Measurement(
+            correct=False,
+            error=(
+                "OutOfMemoryError: CUDA out of memory. Tried to allocate "
+                "256.00 MiB."
+            ),
+        )
 
 
 if __name__ == "__main__":

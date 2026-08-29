@@ -207,6 +207,23 @@ class DiagnosisTests(unittest.TestCase):
         self.assertFalse(failure.retryable)
         self.assertTrue(failure.details["infrastructure_failure"])
 
+    def test_cuda_oom_is_gpu_memory_infrastructure_not_correctness(self) -> None:
+        failure = FailureClassifier.measurement(
+            Measurement(
+                correct=False,
+                error=(
+                    "OutOfMemoryError: CUDA out of memory. Tried to allocate "
+                    "256.00 MiB; GPU 0 has 221.31 MiB free."
+                ),
+            )
+        )
+
+        self.assertEqual(failure.category, "infrastructure-gpu-memory")
+        self.assertEqual(failure.stage, "measure")
+        self.assertFalse(failure.retryable)
+        self.assertTrue(failure.details["infrastructure_failure"])
+        self.assertEqual(failure.details["original_stage"], "measure")
+
     def test_profiler_permission_failure_is_infrastructure(self) -> None:
         failure = FailureClassifier.profile(
             "ERR_NVGPUCTRPERM: permission to access NVIDIA GPU performance counters"

@@ -41,6 +41,14 @@ _UTILIZATION_ALIASES = {
 
 _INFRASTRUCTURE_PATTERNS = (
     (
+        "infrastructure-gpu-memory",
+        (
+            "cuda out of memory",
+            "cuda_error_out_of_memory",
+            "hip out of memory",
+        ),
+    ),
+    (
         "infrastructure-storage",
         (
             "disk quota exceeded",

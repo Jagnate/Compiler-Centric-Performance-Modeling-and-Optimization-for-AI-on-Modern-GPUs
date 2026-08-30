@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Mapping, Sequence
 
 from .prompt_compression import (
     COMPRESSION_VERSION,
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LESSON_LIMIT,
     NO_COMPRESSION_POLICY,
     compact_failure_context,
     compress_prompt_context,
@@ -146,11 +148,20 @@ def build_optimization_prompt(
     history: Sequence[Dict[str, Any]],
     count: int,
     metadata_compression_policy: str = COMPRESSION_VERSION,
+    metadata_history_limit: int = DEFAULT_HISTORY_LIMIT,
+    metadata_lesson_limit: int = DEFAULT_LESSON_LIMIT,
 ) -> str:
     """Build one source optimization request with explicit evidence provenance."""
 
+    prompt_evidence = _canonical_prompt_evidence(
+        evidence, parent.candidate_id, metadata_compression_policy
+    )
     context = compress_prompt_context(
-        evidence, history, policy=metadata_compression_policy
+        prompt_evidence,
+        _without_current_candidate(history, parent.candidate_id),
+        policy=metadata_compression_policy,
+        history_limit=metadata_history_limit,
+        lesson_limit=metadata_lesson_limit,
     )
     generation_request = dict(evidence.get("generation_request") or {})
     strategy_assignments = list(
@@ -274,11 +285,20 @@ def build_repair_prompt(
     evidence: Dict[str, Any],
     history: Sequence[Dict[str, Any]],
     metadata_compression_policy: str = COMPRESSION_VERSION,
+    metadata_history_limit: int = DEFAULT_HISTORY_LIMIT,
+    metadata_lesson_limit: int = DEFAULT_LESSON_LIMIT,
 ) -> str:
     """Build a bounded repair request around one archived failed source."""
 
+    prompt_evidence = _canonical_prompt_evidence(
+        evidence, failed.candidate_id, metadata_compression_policy
+    )
     context = compress_prompt_context(
-        evidence, history, policy=metadata_compression_policy
+        prompt_evidence,
+        _without_current_candidate(history, failed.candidate_id),
+        policy=metadata_compression_policy,
+        history_limit=metadata_history_limit,
+        lesson_limit=metadata_lesson_limit,
     )
     task_payload = {
         "task_id": task.task_id,
@@ -376,6 +396,53 @@ def build_repair_prompt(
         },
     }
     return json.dumps(request, indent=2, sort_keys=True)
+
+
+def _without_current_candidate(
+    history: Sequence[Dict[str, Any]], candidate_id: str
+) -> list[Dict[str, Any]]:
+    """Avoid serializing the current candidate both as parent and as history."""
+
+    result = []
+    for item in history:
+        item_id = item.get("candidate_id")
+        candidate = item.get("candidate")
+        if item_id is None and isinstance(candidate, Mapping):
+            item_id = candidate.get("candidate_id")
+        if item_id == candidate_id:
+            continue
+        result.append(dict(item))
+    return result
+
+
+def _canonical_prompt_evidence(
+    evidence: Dict[str, Any], candidate_id: str, policy: str
+) -> Dict[str, Any]:
+    """Reference current evidence instead of repeating it inside raw lessons."""
+
+    if policy != NO_COMPRESSION_POLICY:
+        return evidence
+    result = dict(evidence)
+    lessons = []
+    for original in list(evidence.get("shared_memory") or []):
+        if not isinstance(original, Mapping):
+            lessons.append(original)
+            continue
+        lesson = dict(original)
+        if lesson.get("candidate_id") == candidate_id and isinstance(
+            lesson.get("supporting_evidence"), Mapping
+        ):
+            lesson["supporting_evidence"] = {
+                "reference": "observed_evidence",
+                "candidate_id": candidate_id,
+                "note": (
+                    "The complete current evidence is already present in the "
+                    "dedicated observed_evidence field."
+                ),
+            }
+        lessons.append(lesson)
+    result["shared_memory"] = lessons
+    return result
 
 
 def _add_baseline_protocol(payload: Dict[str, Any], task: TaskSpec) -> None:

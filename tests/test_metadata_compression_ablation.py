@@ -28,6 +28,10 @@ class MetadataCompressionAblationTests(unittest.TestCase):
         self.assertEqual(
             args.output, "results/final_eval/metadata_compression_matmul"
         )
+        self.assertEqual(args.compressed_api_max_input_tokens, 60000)
+        self.assertEqual(args.uncompressed_api_max_input_tokens, 1000000)
+        self.assertEqual(args.compressed_context_target_tokens, 60000)
+        self.assertEqual(args.rounds, 8)
 
     def test_none_controller_history_keeps_all_raw_candidate_metadata(self) -> None:
         task = TaskSpec(
@@ -92,6 +96,9 @@ class MetadataCompressionAblationTests(unittest.TestCase):
             policy="key-metrics-v1",
             snapshot_interval_seconds=300.0,
             api_max_input_tokens=60000,
+            compressed_context_target_tokens=60000,
+            metadata_history_limit=64,
+            metadata_lesson_limit=64,
             resume=False,
             forwarded=["--max-search-seconds", "1800"],
         )
@@ -105,6 +112,14 @@ class MetadataCompressionAblationTests(unittest.TestCase):
             command[command.index("--incumbent-snapshot-interval-seconds") + 1],
             "300.0",
         )
+        self.assertEqual(
+            command[command.index("--compressed-context-target-tokens") + 1],
+            "60000",
+        )
+        self.assertEqual(
+            command[command.index("--metadata-history-limit") + 1], "64"
+        )
+        self.assertEqual(command[command.index("--agent-workers") + 1], "1")
         self.assertEqual(command[-2:], ["--max-search-seconds", "1800"])
 
     def test_exports_call_round_and_time_token_tables(self) -> None:
@@ -122,7 +137,7 @@ class MetadataCompressionAblationTests(unittest.TestCase):
             summaries = ablation._write_comparison_artifacts(root)
 
             self.assertEqual(summaries[0]["status"], "completed")
-            self.assertEqual(summaries[1]["status"], "prompt-budget-exceeded")
+            self.assertEqual(summaries[1]["status"], "local-limit-exceeded")
             with (root / "token_usage_by_call.csv").open(
                 encoding="utf-8", newline=""
             ) as handle:
@@ -140,7 +155,138 @@ class MetadataCompressionAblationTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn("Per-Round Growth", report)
-            self.assertIn("prompt-budget-exceeded", report)
+            self.assertIn("local-limit-exceeded", report)
+            self.assertTrue((root / "token_usage_by_5min.csv").is_file())
+
+    def test_provider_request_limit_is_an_expected_terminal_boundary(self) -> None:
+        value = ablation._classify_limit_error(
+            {
+                "status_code": 429,
+                "error_code": "rate_limit_exceeded",
+                "response_body": (
+                    "Request too large for model on tokens per min (TPM): "
+                    "Limit 200000, Requested 201696. The input or output tokens "
+                    "must be reduced."
+                ),
+            }
+        )
+
+        self.assertEqual(value["kind"], "provider_token_limit_exceeded")
+        self.assertEqual(value["limit_tokens"], 200000)
+        self.assertEqual(value["requested_tokens"], 201696)
+
+    def test_provider_limit_failure_is_archived_as_expected_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="provider-limit-") as directory:
+            root = Path(directory)
+            api = root / "api_calls"
+            api.mkdir()
+            error = {
+                "status_code": 429,
+                "error_code": "rate_limit_exceeded",
+                "response_body": (
+                    "Request too large on tokens per min: Limit 200000, "
+                    "Requested 240000."
+                ),
+            }
+            (api / "0001_round-003-generate-failed.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "round-003-generate-failed",
+                        "metadata": {
+                            "round": 3,
+                            "provider": {
+                                "prompt_size": {"estimated_input_tokens": 240000},
+                                "error": error,
+                            },
+                        },
+                        "exchange": {"error": error},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "task.json").write_text(
+                json.dumps(
+                    {
+                        "run": {
+                            "generator": {
+                                "max_input_tokens": 1000000,
+                                "compressed_context_target_tokens": None,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "failure.json").write_text(
+                json.dumps({"error_type": "HostedApiError", "message": "429"}),
+                encoding="utf-8",
+            )
+
+            calls = ablation._load_api_calls(root, "uncompressed", "none")
+            summary = ablation._summarize_treatment(
+                root, "uncompressed", "none", calls
+            )
+
+            self.assertEqual(calls[0]["limit_kind"], "provider_token_limit_exceeded")
+            self.assertEqual(summary["status"], "provider-limit-exceeded")
+            self.assertEqual(summary["provider_limit_tokens"], 200000)
+            self.assertEqual(summary["provider_requested_tokens"], 240000)
+
+    def test_five_minute_rows_report_incremental_and_cumulative_tokens(self) -> None:
+        snapshots = [
+            {
+                "treatment": "compressed",
+                "metadata_compression_policy": "key-metrics-v1",
+                "reason": "interval",
+                "scheduled_elapsed_seconds": "300",
+                "elapsed_seconds": "300.1",
+                "api_input_tokens": "100",
+                "api_output_tokens": "20",
+                "api_total_tokens": "120",
+                "completed_round": "0",
+                "active_round": "1",
+            },
+            {
+                "treatment": "compressed",
+                "metadata_compression_policy": "key-metrics-v1",
+                "reason": "interval",
+                "scheduled_elapsed_seconds": "600",
+                "elapsed_seconds": "600.1",
+                "api_input_tokens": "350",
+                "api_output_tokens": "50",
+                "api_total_tokens": "400",
+                "completed_round": "1",
+                "active_round": "2",
+            },
+        ]
+
+        rows = ablation._five_minute_rows(
+            snapshots, snapshot_interval_seconds=300.0
+        )
+
+        self.assertEqual(rows[0]["window_label"], "0-5 min")
+        self.assertEqual(rows[0]["tokens_in_window"], 120.0)
+        self.assertEqual(rows[1]["window_label"], "5-10 min")
+        self.assertEqual(rows[1]["tokens_in_window"], 280.0)
+        self.assertEqual(rows[1]["cumulative_total_tokens"], 400.0)
+
+    def test_materializes_same_eight_round_task_for_both_treatments(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="compression-task-") as directory:
+            root = Path(directory)
+            source = root / "task.json"
+            source.write_text(
+                json.dumps({"task_id": "x", "budget": {"rounds": 4}}),
+                encoding="utf-8",
+            )
+
+            path = ablation._materialize_ablation_task(source, root, 8)
+            value = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(value["budget"]["rounds"], 8)
+            self.assertEqual(
+                value["metadata"]["metadata_compression_ablation"]["treatments"],
+                ["compressed", "uncompressed"],
+            )
 
 
 def _write_treatment(

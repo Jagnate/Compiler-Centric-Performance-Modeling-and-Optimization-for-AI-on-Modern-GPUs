@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 COMPRESSION_VERSION = "key-metrics-v1"
@@ -164,8 +164,9 @@ def compress_prompt_context(
 def _compression_note(policy: str) -> str:
     if policy == NO_COMPRESSION_POLICY:
         return (
-            "Compression is disabled for this ablation request; full accumulated "
-            "metadata is included subject only to the API input-token safety budget."
+            "Compression is disabled for this ablation request. Full accumulated "
+            "prior-candidate metadata is included; duplicate copies of the current "
+            "candidate and its supporting evidence are represented by references."
         )
     return (
         "Full-fidelity evidence remains in run artifacts; this request contains "
@@ -233,6 +234,114 @@ def prompt_size_metadata(
         "max_output_tokens": output_tokens,
         "estimated_reserved_tokens": estimated_input_tokens + output_tokens,
     }
+
+
+def fit_compressed_prompt_to_budget(
+    prompt: str,
+    *,
+    system_prompt: str,
+    max_output_tokens: Optional[int],
+    target_input_tokens: int,
+) -> Tuple[str, Dict[str, Any]]:
+    """Trim bounded context arrays until a JSON prompt fits its input target.
+
+    The current parent source, task contract, current evidence, and response schema
+    are never removed. Only the oldest compact history records and the lowest
+    priority compact lessons are eligible for trimming.
+    """
+
+    if target_input_tokens <= 0:
+        raise ValueError("target_input_tokens must be positive")
+    try:
+        request = json.loads(prompt)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("compressed prompt must be a JSON object") from error
+    if not isinstance(request, dict):
+        raise ValueError("compressed prompt must be a JSON object")
+
+    history = request.get("recent_history")
+    lessons = request.get("shared_evidence_memory")
+    if not isinstance(history, list):
+        history = []
+        request["recent_history"] = history
+    if not isinstance(lessons, list):
+        lessons = []
+        request["shared_evidence_memory"] = lessons
+    provenance = request.get("context_provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+        request["context_provenance"] = provenance
+
+    initial_history = len(history)
+    initial_lessons = len(lessons)
+    dropped_history = 0
+    dropped_lessons = 0
+    provenance.update(
+        {
+            "input_token_target": target_input_tokens,
+            "budget_policy": (
+                "preserve-current-context;drop-oldest-history-and-"
+                "lowest-priority-lessons"
+            ),
+            "budget_trimmed": False,
+            "history_records_before_budget": initial_history,
+            "shared_lessons_before_budget": initial_lessons,
+        }
+    )
+
+    size: Dict[str, Any] = {}
+    while True:
+        provenance["history_records_included"] = len(history)
+        provenance["shared_lessons_included"] = len(lessons)
+        provenance["history_records_dropped_for_budget"] = dropped_history
+        provenance["shared_lessons_dropped_for_budget"] = dropped_lessons
+        provenance["budget_trimmed"] = bool(dropped_history or dropped_lessons)
+        rendered = json.dumps(request, indent=2, sort_keys=True)
+        size = prompt_size_metadata(system_prompt, rendered, max_output_tokens)
+        provenance["final_estimated_input_tokens"] = int(
+            size["estimated_input_tokens"]
+        )
+        provenance["input_target_satisfied"] = (
+            int(size["estimated_input_tokens"]) <= target_input_tokens
+        )
+        rendered = json.dumps(request, indent=2, sort_keys=True)
+        size = prompt_size_metadata(system_prompt, rendered, max_output_tokens)
+        if int(size["estimated_input_tokens"]) <= target_input_tokens:
+            break
+
+        history_size = _json_size(history[0]) if len(history) > 1 else -1
+        lesson_size = _json_size(lessons[-1]) if len(lessons) > 1 else -1
+        if history_size < 0 and lesson_size < 0:
+            break
+        if history_size >= lesson_size and len(history) > 1:
+            history.pop(0)
+            dropped_history += 1
+        elif len(lessons) > 1:
+            lessons.pop()
+            dropped_lessons += 1
+
+    provenance["final_estimated_input_tokens"] = int(
+        size["estimated_input_tokens"]
+    )
+    provenance["input_target_satisfied"] = (
+        int(size["estimated_input_tokens"]) <= target_input_tokens
+    )
+    rendered = json.dumps(request, indent=2, sort_keys=True)
+    final_size = prompt_size_metadata(system_prompt, rendered, max_output_tokens)
+    metadata = {
+        "target_input_tokens": target_input_tokens,
+        "initial_history_records": initial_history,
+        "included_history_records": len(history),
+        "dropped_history_records": dropped_history,
+        "initial_shared_lessons": initial_lessons,
+        "included_shared_lessons": len(lessons),
+        "dropped_shared_lessons": dropped_lessons,
+        "trimmed": bool(dropped_history or dropped_lessons),
+        "target_satisfied": int(final_size["estimated_input_tokens"])
+        <= target_input_tokens,
+        "final_estimated_input_tokens": int(final_size["estimated_input_tokens"]),
+    }
+    return rendered, metadata
 
 
 def enforce_prompt_budget(metadata: Mapping[str, Any], max_input_tokens: int) -> None:

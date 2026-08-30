@@ -13,7 +13,11 @@ from kernel_optimization.generators.api import (
     OpenAICompatibleGenerator,
 )
 from kernel_optimization.prompt_compression import PromptBudgetError
-from kernel_optimization.prompts import build_optimization_prompt
+from kernel_optimization.prompt_compression import (
+    fit_compressed_prompt_to_budget,
+    prompt_size_metadata,
+)
+from kernel_optimization.prompts import SYSTEM_PROMPT, build_optimization_prompt
 from kernel_optimization.schema import Candidate, TaskSpec
 
 
@@ -143,6 +147,108 @@ class PromptCompressionTests(unittest.TestCase):
         self.assertEqual(
             provenance["raw_context_characters"],
             provenance["compressed_context_characters"],
+        )
+
+    def test_current_parent_is_not_duplicated_in_uncompressed_history(self) -> None:
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        prompt = build_optimization_prompt(
+            task,
+            parent,
+            {
+                "observed": {"profile": {"metrics": {"value": 1}}},
+                "shared_memory": [
+                    {
+                        "lesson_id": "current-lesson",
+                        "candidate_id": parent.candidate_id,
+                        "supporting_evidence": {
+                            "raw_duplicate": "lesson-duplicate" * 1000
+                        },
+                    }
+                ],
+            },
+            [
+                {
+                    "candidate": {"candidate_id": parent.candidate_id},
+                    "large_profile": "duplicate" * 1000,
+                },
+                {
+                    "candidate": {"candidate_id": "older-candidate"},
+                    "large_profile": "unique",
+                },
+            ],
+            count=1,
+            metadata_compression_policy="none",
+        )
+        request = json.loads(prompt)
+
+        self.assertEqual(len(request["recent_history"]), 1)
+        self.assertEqual(
+            request["recent_history"][0]["candidate"]["candidate_id"],
+            "older-candidate",
+        )
+        self.assertNotIn("duplicate" * 100, prompt)
+        self.assertNotIn("lesson-duplicate" * 100, prompt)
+        self.assertEqual(
+            request["shared_evidence_memory"][0]["supporting_evidence"][
+                "reference"
+            ],
+            "observed_evidence",
+        )
+
+    def test_budgeted_compression_keeps_recent_context_and_source(self) -> None:
+        task = make_task()
+        source = "def make_kernel():\n    return 1\n"
+        parent = Candidate.seed(task, source, "kernel.py")
+        history = [
+            {
+                "candidate_id": "candidate-%02d" % index,
+                "generation": index,
+                "hypothesis": ("history-%02d " % index) + ("x" * 700),
+            }
+            for index in range(40)
+        ]
+        evidence = {
+            "shared_memory": [
+                {
+                    "lesson_id": "lesson-%02d" % index,
+                    "observed_fact": "y" * 700,
+                }
+                for index in range(30)
+            ]
+        }
+        prompt = build_optimization_prompt(
+            task,
+            parent,
+            evidence,
+            history,
+            count=1,
+            metadata_history_limit=64,
+            metadata_lesson_limit=64,
+        )
+        before = prompt_size_metadata(SYSTEM_PROMPT, prompt, 12000)
+        self.assertGreater(before["estimated_input_tokens"], 9000)
+
+        fitted, metadata = fit_compressed_prompt_to_budget(
+            prompt,
+            system_prompt=SYSTEM_PROMPT,
+            max_output_tokens=12000,
+            target_input_tokens=9000,
+        )
+        request = json.loads(fitted)
+        after = prompt_size_metadata(SYSTEM_PROMPT, fitted, 12000)
+
+        self.assertLessEqual(after["estimated_input_tokens"], 9000)
+        self.assertTrue(metadata["trimmed"])
+        self.assertTrue(metadata["target_satisfied"])
+        self.assertEqual(request["parent"]["source_code"], source)
+        self.assertEqual(
+            request["recent_history"][-1]["candidate_id"], "candidate-39"
+        )
+        self.assertNotEqual(
+            request["recent_history"][0]["candidate_id"], "candidate-00"
         )
 
 

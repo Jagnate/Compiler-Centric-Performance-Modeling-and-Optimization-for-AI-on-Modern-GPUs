@@ -22,7 +22,12 @@ from .generators import (
 )
 from .manifest import collect_environment_manifest
 from .progress import ProgressReporter
-from .prompt_compression import COMPRESSION_VERSION, METADATA_COMPRESSION_POLICIES
+from .prompt_compression import (
+    COMPRESSION_VERSION,
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LESSON_LIMIT,
+    METADATA_COMPRESSION_POLICIES,
+)
 from .schema import Candidate, TaskSpec
 from .source_validation import SourceValidator
 
@@ -95,6 +100,33 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Use the bounded key-metric prompt context, or disable compression "
             "for a controlled token-growth ablation."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-history-limit",
+        type=int,
+        default=DEFAULT_HISTORY_LIMIT,
+        help=(
+            "Maximum compact history records offered to a compressed generation "
+            "or repair prompt. The default preserves existing behavior."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-lesson-limit",
+        type=int,
+        default=DEFAULT_LESSON_LIMIT,
+        help=(
+            "Maximum compact evidence lessons offered to a compressed generation "
+            "or repair prompt. The default preserves existing behavior."
+        ),
+    )
+    parser.add_argument(
+        "--compressed-context-target-tokens",
+        type=int,
+        help=(
+            "Optional input-token target for compressed generation and repair "
+            "prompts. Oldest compact history and lowest-priority lessons are "
+            "trimmed deterministically; omitted by default."
         ),
     )
     parser.add_argument(
@@ -308,6 +340,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             estimated_reserved_tokens=size.get("estimated_reserved_tokens"),
             input_budget=size.get("max_input_tokens"),
             user_characters=size.get("user_characters"),
+            compressed_context_budget=size.get("compressed_context_budget"),
         )
 
     api_config = ApiGeneratorConfig(
@@ -324,6 +357,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         retry_backoff_seconds=args.api_retry_backoff,
         use_json_object=not args.no_json_response_format,
         metadata_compression_policy=args.metadata_compression_policy,
+        metadata_history_limit=args.metadata_history_limit,
+        metadata_lesson_limit=args.metadata_lesson_limit,
+        compressed_context_target_tokens=args.compressed_context_target_tokens,
     )
 
     def create_generator():
@@ -373,6 +409,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "api_key_environment_variable": args.api_key_env,
             "agent_workers": args.agent_workers,
             "metadata_compression_policy": args.metadata_compression_policy,
+            "metadata_history_limit": args.metadata_history_limit,
+            "metadata_lesson_limit": args.metadata_lesson_limit,
+            "compressed_context_target_tokens": (
+                args.compressed_context_target_tokens
+            ),
         },
         "experiment": {
             "baseline_style": style.preset.name,
@@ -399,6 +440,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "structural_search_policy": args.structural_search_policy,
             "strategy_allocation_policy": args.strategy_allocation_policy,
             "metadata_compression_policy": args.metadata_compression_policy,
+            "metadata_history_limit": args.metadata_history_limit,
+            "metadata_lesson_limit": args.metadata_lesson_limit,
+            "compressed_context_target_tokens": (
+                args.compressed_context_target_tokens
+            ),
             "agent_workers": args.agent_workers,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,

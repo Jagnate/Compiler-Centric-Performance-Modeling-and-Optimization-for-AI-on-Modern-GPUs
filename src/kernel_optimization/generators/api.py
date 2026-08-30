@@ -13,9 +13,13 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from ..prompt_compression import (
     COMPRESSION_VERSION,
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_LESSON_LIMIT,
     METADATA_COMPRESSION_POLICIES,
+    NO_COMPRESSION_POLICY,
     PromptBudgetError,
     enforce_prompt_budget,
+    fit_compressed_prompt_to_budget,
     prompt_size_metadata,
 )
 from ..prompts import (
@@ -83,6 +87,9 @@ class ApiGeneratorConfig:
     use_json_object: bool = True
     max_input_tokens: int = 60000
     metadata_compression_policy: str = COMPRESSION_VERSION
+    metadata_history_limit: int = DEFAULT_HISTORY_LIMIT
+    metadata_lesson_limit: int = DEFAULT_LESSON_LIMIT
+    compressed_context_target_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not self.api_url.startswith(("http://", "https://")):
@@ -103,6 +110,24 @@ class ApiGeneratorConfig:
             raise ValueError(
                 "metadata_compression_policy must be one of: %s"
                 % ", ".join(METADATA_COMPRESSION_POLICIES)
+            )
+        if self.metadata_history_limit <= 0:
+            raise ValueError("metadata_history_limit must be positive")
+        if self.metadata_lesson_limit <= 0:
+            raise ValueError("metadata_lesson_limit must be positive")
+        if (
+            self.compressed_context_target_tokens is not None
+            and self.compressed_context_target_tokens <= 0
+        ):
+            raise ValueError(
+                "compressed_context_target_tokens must be positive when provided"
+            )
+        if (
+            self.compressed_context_target_tokens is not None
+            and self.compressed_context_target_tokens > self.max_input_tokens
+        ):
+            raise ValueError(
+                "compressed_context_target_tokens cannot exceed max_input_tokens"
             )
         if self.max_tokens_field not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError(
@@ -174,6 +199,8 @@ class OpenAICompatibleGenerator:
             history,
             count,
             metadata_compression_policy=self.config.metadata_compression_policy,
+            metadata_history_limit=self.config.metadata_history_limit,
+            metadata_lesson_limit=self.config.metadata_lesson_limit,
         )
         return self._generate_from_prompt(prompt, count=count, kind="generate")
 
@@ -228,6 +255,8 @@ class OpenAICompatibleGenerator:
             evidence,
             history,
             metadata_compression_policy=self.config.metadata_compression_policy,
+            metadata_history_limit=self.config.metadata_history_limit,
+            metadata_lesson_limit=self.config.metadata_lesson_limit,
         )
         proposals = self._generate_from_prompt(prompt, count=1, kind="repair")
         return proposals[0]
@@ -340,6 +369,18 @@ class OpenAICompatibleGenerator:
         kind: str,
         max_output_tokens: Optional[int],
     ) -> Any:
+        context_budget: Dict[str, Any] = {}
+        if (
+            kind in {"generate", "repair"}
+            and self.config.metadata_compression_policy != NO_COMPRESSION_POLICY
+            and self.config.compressed_context_target_tokens is not None
+        ):
+            prompt, context_budget = fit_compressed_prompt_to_budget(
+                prompt,
+                system_prompt=system_prompt,
+                max_output_tokens=max_output_tokens,
+                target_input_tokens=self.config.compressed_context_target_tokens,
+            )
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
@@ -358,6 +399,8 @@ class OpenAICompatibleGenerator:
             prompt,
             max_output_tokens,
         )
+        if context_budget:
+            size["compressed_context_budget"] = context_budget
         self._observe_request(kind, size)
         try:
             enforce_prompt_budget(size, self.config.max_input_tokens)

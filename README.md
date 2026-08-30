@@ -646,9 +646,12 @@ provider usage metadata remains authoritative after a successful call.
 
 ### Metadata compression ablation
 
-The default `key-metrics-v1` policy is unchanged. A controlled experiment may
-disable generation and repair context compression while retaining the same local
-input-token safety limit:
+The default full-system `key-metrics-v1` behavior is unchanged: eight compact
+history records, eight compact lessons, no context-filling target, and a 60,000
+token local safety guard. The ablation driver opts into a larger compact-record
+reservoir and a deterministic budget packer without changing ordinary runs.
+
+A controlled experiment may select either prompt policy directly:
 
 ```bash
 --metadata-compression-policy key-metrics-v1
@@ -657,21 +660,59 @@ input-token safety limit:
 
 `none` includes complete accumulated candidate-record metadata, relevant run
 lessons, raw TileSight/NCU metadata, and full failure diagnostics. Historical
-source files remain excluded so the experiment isolates metadata growth; the
-current parent source is complete in both treatments. It is intended only for
-token-growth experiments. The strategy planner keeps its existing separately
-bounded planning context in both treatments, so the ablation isolates generation
-and repair metadata compression.
+source files remain excluded. The current parent record is also removed from
+history because its source and current evidence are already present in dedicated
+fields; this canonical deduplication prevents the first request from containing
+the same record twice without compressing earlier candidates. The strategy
+planner keeps its separately bounded context in both treatments.
 
 Run both treatments with one command:
 
 ```bash
 PYTHONPATH=src python3 examples/run_metadata_compression_ablation.py \
   --snapshot-interval-seconds 300 \
-  --api-max-input-tokens 60000 \
+  --output results/final_eval/metadata_compression_matmul_v2 \
   -- \
-  --max-search-seconds 3600
+  --max-search-seconds 7200
 ```
+
+The driver creates one derived eight-round task and runs one agent per treatment.
+Its defaults intentionally use different terminal boundaries:
+
+```text
+compressed:
+  compact history limit       64 records
+  compact lesson limit        64 lessons
+  compressed context target   60,000 estimated input tokens
+  local hard guard            60,000 estimated input tokens
+
+uncompressed:
+  full canonical history      grows each round
+  local probe guard           1,000,000 estimated input tokens
+  expected terminal boundary  provider TPM or context-window rejection
+```
+
+The compressed packer removes the oldest compact history and lowest-priority
+lessons only after the complete request would exceed its target. Current source,
+task semantics, current evidence, and the response schema are never trimmed.
+The uncompressed local guard is deliberately high so a provider error such as
+`Limit 200000, Requested 201696` can be archived as the experimental endpoint.
+The exact provider boundary depends on the model, organization, project, and
+current rate-limit tier. This experiment is expected to make one rejected
+provider request; that rejected request has no successful-call token usage.
+
+Override the experiment boundaries when needed:
+
+```bash
+--compressed-api-max-input-tokens 60000 \
+--compressed-context-target-tokens 60000 \
+--uncompressed-api-max-input-tokens 1000000 \
+--rounds 8
+```
+
+The legacy `--api-max-input-tokens` option sets the same local guard for both
+treatments. It is retained for reproducibility but should not be used when the
+goal is to observe the provider boundary.
 
 The driver defaults to Matmul. Flash Attention has a larger source and often
 uses more hosted-model tokens, but source length and repair traffic are fixed
@@ -693,16 +734,18 @@ uncompressed/                  no-compression run artifacts
 token_usage_by_call.csv        actual and estimated tokens per API call
 token_usage_by_round.csv       provider token usage grouped by search round
 token_usage_by_time.csv        round and fixed wall-clock snapshots
+token_usage_by_5min.csv        new and cumulative tokens per five-minute window
 compression_comparison.json    machine-readable treatment summary
 compression_comparison.md      human-readable comparison
 ```
 
-Both cumulative curves grow because every hosted-model call consumes tokens.
-The expected compression signal is a bounded per-call input size and roughly
-linear cumulative growth. Without compression, per-call input size may grow with
-history, producing superlinear cumulative growth until the local input budget is
-reached. A local prompt-budget stop in the uncompressed treatment is recorded as
-`prompt-budget-exceeded` and is a valid ablation outcome.
+The Markdown report starts with the five-minute table: `Tokens in window` is new
+provider usage since the preceding snapshot, while `Cumulative` is total usage
+since that treatment began. It then reports the maximum estimated input request
+for each round against the applicable boundary. The expected result is bounded
+compressed per-call context near the local target and steeper uncompressed
+growth ending at `provider-limit-exceeded`. If a user explicitly lowers the
+uncompressed local guard, `local-limit-exceeded` is reported instead.
 
 Transient rate-limit, connection, and server failures use bounded exponential
 retry. Quota exhaustion and other permanent client errors fail immediately.

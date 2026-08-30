@@ -2504,7 +2504,7 @@ class OptimizationController:
         lesson_limit = (
             None
             if self.metadata_compression_policy == NO_COMPRESSION_POLICY
-            else 12
+            else 64
         )
         lessons = self.evidence_memory.for_prompt(record, limit=lesson_limit)
         if self.tir_evidence_policy == "visible":
@@ -2884,7 +2884,10 @@ class OptimizationController:
         )
         if self.metadata_compression_policy == NO_COMPRESSION_POLICY:
             return [item.to_dict(include_source=False) for item in records]
-        prompt_records = records[-20:]
+        # The prompt compressor applies the model-facing limit. Keep a larger
+        # compact-record reservoir so controlled budget-growth experiments can
+        # pack additional history without changing normal eight-record prompts.
+        prompt_records = records[-64:]
         return [
             {
                 "candidate_id": item.candidate.candidate_id,

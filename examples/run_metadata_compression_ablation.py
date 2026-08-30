@@ -861,9 +861,11 @@ def _materialize_ablation_task(
 ) -> Path:
     """Create one immutable task contract shared by both treatments."""
 
+    source_task = source_task.resolve()
     value = _read_json(source_task)
     if not value:
         raise SystemExit("Task contract is not a JSON object: %s" % source_task)
+    _anchor_evaluator_working_directory(value, source_task.parent)
     budget = _mapping(value.get("budget"))
     budget["rounds"] = rounds
     value["budget"] = budget
@@ -877,13 +879,38 @@ def _materialize_ablation_task(
     path = output / "ablation_task.json"
     rendered = json.dumps(value, indent=2, sort_keys=True) + "\n"
     if path.is_file() and path.read_text(encoding="utf-8") != rendered:
-        if any((output / label).exists() for label, _policy in TREATMENTS):
+        existing = _read_json(path)
+        _anchor_evaluator_working_directory(existing, source_task.parent)
+        existing_rendered = json.dumps(existing, indent=2, sort_keys=True) + "\n"
+        if (
+            existing_rendered != rendered
+            and any((output / label).exists() for label, _policy in TREATMENTS)
+        ):
             raise SystemExit(
                 "Existing ablation task differs from the requested configuration; "
                 "choose a fresh --output directory"
             )
     path.write_text(rendered, encoding="utf-8")
     return path
+
+
+def _anchor_evaluator_working_directory(
+    task: Dict[str, Any], source_task_directory: Path
+) -> None:
+    """Preserve evaluator path semantics after copying a task into results/."""
+
+    evaluator_value = task.get("evaluator")
+    if not isinstance(evaluator_value, Mapping):
+        return
+    evaluator = dict(evaluator_value)
+    working_directory_value = evaluator.get("working_directory")
+    if not working_directory_value:
+        return
+    working_directory = Path(str(working_directory_value)).expanduser()
+    if not working_directory.is_absolute():
+        working_directory = source_task_directory / working_directory
+    evaluator["working_directory"] = str(working_directory.resolve())
+    task["evaluator"] = evaluator
 
 
 def _run_generator_config(treatment: Path) -> Dict[str, Any]:

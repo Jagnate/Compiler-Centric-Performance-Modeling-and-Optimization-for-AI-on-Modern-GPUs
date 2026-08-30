@@ -11,6 +11,7 @@ import unittest
 from examples import run_metadata_compression_ablation as ablation
 from kernel_optimization.archive import ArtifactStore
 from kernel_optimization.controller import OptimizationController
+from kernel_optimization.factory import create_backend
 from kernel_optimization.schema import (
     Candidate,
     CandidateProposal,
@@ -286,6 +287,85 @@ class MetadataCompressionAblationTests(unittest.TestCase):
             self.assertEqual(
                 value["metadata"]["metadata_compression_ablation"]["treatments"],
                 ["compressed", "uncompressed"],
+            )
+
+    def test_materialized_task_preserves_original_evaluator_working_directory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="compression-task-path-") as directory:
+            repository = Path(directory) / "repository"
+            examples = repository / "examples"
+            output = repository / "results" / "final_eval" / "compression"
+            examples.mkdir(parents=True)
+            output.mkdir(parents=True)
+            source = examples / "task.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "task_id": "path-test",
+                        "description": "Preserve evaluator path semantics.",
+                        "reference": "Return the expected output.",
+                        "entrypoint": "kernel",
+                        "budget": {"rounds": 4},
+                        "evaluator": {
+                            "type": "command",
+                            "command": ["python3", "examples/evaluator.py"],
+                            "working_directory": "..",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            path = ablation._materialize_ablation_task(source, output, 8)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            backend = create_backend(TaskSpec.from_json_file(path), path.parent)
+
+            self.assertEqual(
+                Path(value["evaluator"]["working_directory"]),
+                repository.resolve(),
+            )
+            self.assertEqual(backend.working_directory, repository.resolve())
+
+    def test_upgrades_legacy_relative_evaluator_path_for_resume(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="compression-task-resume-") as directory:
+            repository = Path(directory) / "repository"
+            examples = repository / "examples"
+            output = repository / "results" / "compression"
+            examples.mkdir(parents=True)
+            output.mkdir(parents=True)
+            source = examples / "task.json"
+            task = {
+                "task_id": "resume-path-test",
+                "budget": {"rounds": 4},
+                "evaluator": {
+                    "type": "command",
+                    "command": ["python3", "examples/evaluator.py"],
+                    "working_directory": "..",
+                },
+            }
+            source.write_text(json.dumps(task), encoding="utf-8")
+            legacy = dict(task)
+            legacy["budget"] = {"rounds": 8}
+            legacy["metadata"] = {
+                "metadata_compression_ablation": {
+                    "source_task": str(source.resolve()),
+                    "rounds": 8,
+                    "treatments": ["compressed", "uncompressed"],
+                }
+            }
+            (output / "ablation_task.json").write_text(
+                json.dumps(legacy, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            (output / "uncompressed").mkdir()
+
+            path = ablation._materialize_ablation_task(source, output, 8)
+            value = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                Path(value["evaluator"]["working_directory"]),
+                repository.resolve(),
             )
 
 

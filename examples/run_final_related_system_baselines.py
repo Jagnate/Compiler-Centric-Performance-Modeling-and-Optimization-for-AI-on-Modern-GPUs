@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run five related-system style baselines across five example kernels."""
+"""Run the native system and five related-system styles across five kernels."""
 
 from __future__ import annotations
 
@@ -104,7 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run related-system style comparisons on the five kernel tasks. "
-            "The default is 25 proxy treatments; --include-native makes 30."
+            "The default is 30 treatments: the native full system plus five "
+            "proxy styles across five kernels."
         )
     )
     parser.add_argument(
@@ -122,11 +123,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Run only this style; repeat to select several.",
     )
-    parser.add_argument(
+    native_group = parser.add_mutually_exclusive_group()
+    native_group.add_argument(
         "--include-native",
+        dest="include_native",
         action="store_true",
-        help="Include this project's native full system before the five proxies.",
+        help=(
+            "Include this project's native full system before the five proxies "
+            "(the default; retained for command compatibility)."
+        ),
     )
+    native_group.add_argument(
+        "--exclude-native",
+        dest="include_native",
+        action="store_false",
+        help="Run only the five related-system proxy styles (25 treatments).",
+    )
+    parser.set_defaults(include_native=True)
     parser.add_argument(
         "--workload-suite",
         type=Path,
@@ -207,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
 def selected_treatments(
     only_kernels: Optional[Sequence[str]] = None,
     only_styles: Optional[Sequence[str]] = None,
-    include_native: bool = False,
+    include_native: bool = True,
 ) -> List[Treatment]:
     """Return the deterministic kernel-major comparison matrix."""
 

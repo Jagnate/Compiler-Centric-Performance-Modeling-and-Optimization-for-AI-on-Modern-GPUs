@@ -1,4 +1,4 @@
-"""Tests for the 5 x 5 related-system baseline suite driver."""
+"""Tests for the 5 x 6 related-system baseline suite driver."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ from kernel_optimization.baseline_styles import BASELINE_STYLE_NAMES
 
 
 class FinalRelatedSystemBaselineTests(unittest.TestCase):
-    def test_defines_five_kernels_by_five_non_native_styles(self) -> None:
+    def test_default_defines_five_kernels_by_six_styles(self) -> None:
         treatments = suite.selected_treatments()
-        self.assertEqual(len(treatments), 25)
+        self.assertEqual(len(treatments), 30)
         self.assertEqual(
             tuple(kernel.key for kernel in suite.KERNELS),
             (
@@ -38,6 +38,18 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             tuple(style.key for style in suite.RELATED_STYLES),
             BASELINE_STYLE_NAMES[1:],
         )
+        self.assertEqual(
+            tuple(style.key for style in suite.ALL_STYLES),
+            BASELINE_STYLE_NAMES,
+        )
+        self.assertEqual(
+            [item.style.key for item in treatments[:6]],
+            list(BASELINE_STYLE_NAMES),
+        )
+
+    def test_can_exclude_native_for_proxy_only_matrix(self) -> None:
+        treatments = suite.selected_treatments(include_native=False)
+        self.assertEqual(len(treatments), 25)
         self.assertTrue(
             all(treatment.style.key != "native" for treatment in treatments)
         )
@@ -205,6 +217,10 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         self.assertEqual(args.measurement_repeats, 3)
         self.assertEqual(args.time_budget_round_ceiling, 128)
         self.assertEqual(args.workload_suite, suite.DEFAULT_WORKLOAD_SUITE)
+        self.assertTrue(args.include_native)
+        self.assertFalse(
+            suite.build_parser().parse_args(["--exclude-native"]).include_native
+        )
 
     def test_fixed_time_completion_requires_time_budget_termination(self) -> None:
         valid = {

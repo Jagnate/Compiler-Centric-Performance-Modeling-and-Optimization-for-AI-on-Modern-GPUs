@@ -405,17 +405,18 @@ mapping, missing capabilities, override rules, and fair-comparison protocol are
 documented in [BASELINE_STYLE_PRESETS.md](BASELINE_STYLE_PRESETS.md). Every run
 records the preset and any explicit overrides in its manifest and Markdown report.
 
-Run the complete 5 x 5 related-system comparison with one command:
+Run the complete 5 x 6 related-system comparison with one command:
 
 ```bash
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py
 ```
 
-The runner executes 25 treatments sequentially on one GPU: GEMM, RMSNorm,
-Conv2D, Flash Attention, and fused Add + RMSNorm times the five non-native
-styles. It uses each preset's canonical single-agent mode and materializes the
-checked-in `examples/related_system_basic_shapes.json` workload family. The
-fixed primary/final shapes are GEMM `1024 x 1024 x 1024`, RMSNorm and fused norm
+The runner executes 30 treatments sequentially on one GPU: GEMM, RMSNorm,
+Conv2D, Flash Attention, and fused Add + RMSNorm times this project's native
+full system and the five non-native styles. It uses each preset's canonical
+single-agent mode and materializes the checked-in
+`examples/related_system_basic_shapes.json` workload family. The fixed
+primary/final shapes are GEMM `1024 x 1024 x 1024`, RMSNorm and fused norm
 `4096 x 4096`, Conv2D `N16 H56 W56 C64 F128 K3`, and Flash Attention
 `B1 H8 S1024 D64`. Base task files are not modified. Results go to
 `results/final_eval/related_system_baselines_30m_basic/<kernel>/<style>/`; aggregate
@@ -426,8 +427,8 @@ Each treatment uses exactly the same fixed-time protocol: one agent,
 ceiling that is intentionally unreachable during a normal 30-minute hosted-model
 run. `--search-until-time-budget` keeps searching after an empty candidate round.
 At the first safe checkpoint after the deadline, the controller exports the best
-verified incumbent and records `termination_reason=time-budget`. The full 25-cell
-matrix therefore has a configured search budget of 12.5 GPU-hours plus bounded
+verified incumbent and records `termination_reason=time-budget`. The full 30-cell
+matrix therefore has a configured search budget of 15 GPU-hours plus bounded
 in-flight-call overshoot. A result that ends at the round ceiling or any other
 early condition is marked `ended-early`, not silently accepted as fair.
 
@@ -435,16 +436,16 @@ Re-running the command reuses valid completed directories and resumes the first
 partial one. Useful controls are:
 
 ```bash
-# Inspect all 25 commands without API or GPU work.
+# Inspect all 30 commands without API or GPU work.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py --dry-run
 
 # Debug one matrix cell before starting the full suite.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
   --only-kernel matmul --only-style kernelagent
 
-# Include this project's native full system for a 5 x 6 matrix.
+# Run only the five related-system proxy styles for the old 5 x 5 matrix.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --include-native
+  --exclude-native
 
 # Reproduce the old round-budget semantics explicitly.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \

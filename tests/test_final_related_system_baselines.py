@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import importlib
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -52,6 +54,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             api_url="https://api.example/v1/chat/completions",
             api_model="test-model",
             api_key_env="KERNEL_OPT_API_KEY",
+            search_until_time_budget=True,
             resume=True,
             repository_root=REPOSITORY_ROOT,
         )
@@ -73,6 +76,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         self.assertNotIn("--agent-workers", command)
         self.assertNotIn("--evaluation-policy", command)
         self.assertNotIn("--strategy-allocation-policy", command)
+        self.assertIn("--search-until-time-budget", command)
         self.assertIn("--resume", command)
 
     def test_filters_keep_deterministic_kernel_major_order(self) -> None:
@@ -90,21 +94,75 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             ],
         )
 
-    def test_existing_tasks_produce_expected_total_graph_bound(self) -> None:
-        treatments = suite.selected_treatments()
-        metadata = suite._load_workload_metadata(REPOSITORY_ROOT, treatments)
-        self.assertEqual(set(metadata), {kernel.key for kernel in suite.KERNELS})
-        self.assertTrue(
-            all(
-                item["candidate_graph_upper_bound"] == 33
-                for item in metadata.values()
+    def test_basic_suite_materializes_fixed_shapes_and_equal_measurement_budget(
+        self,
+    ) -> None:
+        workload_suite = suite._load_workload_suite(suite.DEFAULT_WORKLOAD_SUITE)
+        treatments = suite.selected_treatments(only_styles=["kernelagent"])
+        expected_shapes = {
+            "matmul": {"m": 1024, "n": 1024, "k": 1024},
+            "rms_norm": {
+                "rows": 4096,
+                "hidden_size": 4096,
+                "epsilon": 1e-06,
+            },
+            "conv2d": {
+                "batch": 16,
+                "in_height": 56,
+                "in_width": 56,
+                "in_channels": 64,
+                "out_channels": 128,
+                "kernel_size": 3,
+                "stride": 1,
+                "dilation": 1,
+                "padding": 1,
+            },
+            "flash_attention": {
+                "batch": 1,
+                "heads": 8,
+                "seq_len": 1024,
+                "dim": 64,
+                "is_causal": False,
+            },
+            "fused_add_rms_norm": {
+                "rows": 4096,
+                "hidden_size": 4096,
+                "epsilon": 1e-06,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            paths, payloads = suite._prepare_treatment_tasks(
+                REPOSITORY_ROOT,
+                Path(temporary),
+                treatments,
+                workload_suite,
+                dry_run=False,
+                measurement_repeats=3,
+                round_ceiling=128,
             )
-        )
-        total = sum(
-            metadata[item.kernel.key]["candidate_graph_upper_bound"]
-            for item in treatments
-        )
-        self.assertEqual(total, 825)
+
+            self.assertEqual(set(payloads), set(expected_shapes))
+            for kernel, expected in expected_shapes.items():
+                task = payloads[kernel]
+                runtime = task["evaluator"]["runtime"]
+                self.assertEqual(task["workload"]["factory_arguments"], expected)
+                self.assertEqual(task["budget"]["rounds"], 128)
+                self.assertEqual(runtime["measurement_repeats"], 3)
+                self.assertEqual(len(runtime["search_cases"]), 1)
+                self.assertEqual(len(runtime["final_cases"]), 1)
+                self.assertNotEqual(
+                    runtime["search_cases"][0]["case_id"],
+                    runtime["final_cases"][0]["case_id"],
+                )
+                plugin = importlib.import_module(
+                    runtime["plugin"][:-3].replace("/", ".")
+                )
+                for raw_case in runtime["search_cases"] + runtime["final_cases"]:
+                    case = dict(raw_case)
+                    case["factory_arguments"] = dict(expected)
+                    plugin.validate_case(case, task)
+                task_path = paths[(kernel, "kernelagent")]
+                self.assertEqual(json.loads(task_path.read_text()), task)
 
     def test_dry_run_selects_one_treatment_without_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,17 +189,45 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             self.assertFalse(output_root.exists())
             output = rendered.getvalue()
             self.assertIn("Selected 1 treatments", output)
-            self.assertIn("tilelang_fused_add_rms_norm_task.json", output)
+            self.assertIn("_tasks/fused_add_rms_norm/tilefoundry.json", output)
             self.assertIn("--baseline-style tilefoundry", output)
+            self.assertIn("--search-until-time-budget", output)
             self.assertIn("Agent workers: 1", output)
 
     def test_default_output_and_time_cap_are_bounded(self) -> None:
         args = suite.build_parser().parse_args([])
         self.assertEqual(
             args.output_root.parts[-2:],
-            ("final_eval", "related_system_baselines"),
+            ("final_eval", "related_system_baselines_30m_basic"),
         )
         self.assertEqual(args.max_search_seconds, 1800.0)
+        self.assertEqual(args.budget_mode, "fixed-time")
+        self.assertEqual(args.measurement_repeats, 3)
+        self.assertEqual(args.time_budget_round_ceiling, 128)
+        self.assertEqual(args.workload_suite, suite.DEFAULT_WORKLOAD_SUITE)
+
+    def test_fixed_time_completion_requires_time_budget_termination(self) -> None:
+        valid = {
+            "termination_reason": "time-budget",
+            "time_budget_exhausted": True,
+        }
+        early = {
+            "termination_reason": "round-ceiling-before-time-budget",
+            "time_budget_exhausted": False,
+        }
+
+        self.assertEqual(
+            suite._completed_treatment_status(
+                valid, budget_mode="fixed-time", reused=False
+            ),
+            "completed",
+        )
+        self.assertEqual(
+            suite._completed_treatment_status(
+                early, budget_mode="fixed-time", reused=False
+            ),
+            "ended-early",
+        )
 
 
 if __name__ == "__main__":

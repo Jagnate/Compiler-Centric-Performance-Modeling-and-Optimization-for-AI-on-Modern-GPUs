@@ -1,0 +1,110 @@
+{
+  "suite_id": "related_system_basic_shapes",
+  "title": "Related-System Baselines: Basic Fixed Shapes",
+  "description": "A single representative RTX 3090 shape per kernel. Search and final validation use the same shape so every style receives the same workload and fixed wall-clock budget.",
+  "workloads": {
+    "matmul": {
+      "task_id": "tilelang_matmul_m1024_n1024_k1024_rtx3090_basic",
+      "rationale": "Use the basic square 1024 GEMM requested for the fixed-time comparison.",
+      "factory_arguments": {
+        "m": 1024,
+        "n": 1024,
+        "k": 1024
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-m1024-n1024-k1024"
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "final-m1024-n1024-k1024"
+        }
+      ]
+    },
+    "rms_norm": {
+      "task_id": "tilelang_rms_norm_r4096_h4096_rtx3090_basic",
+      "rationale": "Use a standard 4096-wide normalization workload with 4096 rows.",
+      "factory_arguments": {
+        "rows": 4096,
+        "hidden_size": 4096,
+        "epsilon": 1e-06
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-r4096-h4096"
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "final-r4096-h4096"
+        }
+      ]
+    },
+    "conv2d": {
+      "task_id": "tilelang_conv2d_n16_h56_w56_c64_f128_k3_rtx3090_basic",
+      "rationale": "Use a conventional ResNet-like 3x3 NHWC convolution at a moderate batch size.",
+      "factory_arguments": {
+        "batch": 16,
+        "in_height": 56,
+        "in_width": 56,
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 1,
+        "dilation": 1,
+        "padding": 1
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-n16-h56-w56-c64-f128-k3-s1"
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "final-n16-h56-w56-c64-f128-k3-s1"
+        }
+      ]
+    },
+    "flash_attention": {
+      "task_id": "tilelang_flash_attention_b1_h8_s1024_d64_rtx3090_basic",
+      "rationale": "Use the basic B1 H8 S1024 D64 non-causal attention workload.",
+      "factory_arguments": {
+        "batch": 1,
+        "heads": 8,
+        "seq_len": 1024,
+        "dim": 64,
+        "is_causal": false
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-b1-h8-s1024-d64"
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "final-b1-h8-s1024-d64"
+        }
+      ]
+    },
+    "fused_add_rms_norm": {
+      "task_id": "tilelang_fused_add_rms_norm_r4096_h4096_rtx3090_basic",
+      "rationale": "Match RMSNorm with a 4096 by 4096 fused residual-add workload.",
+      "factory_arguments": {
+        "rows": 4096,
+        "hidden_size": 4096,
+        "epsilon": 1e-06
+      },
+      "search_cases": [
+        {
+          "case_id": "primary-r4096-h4096"
+        }
+      ],
+      "final_cases": [
+        {
+          "case_id": "final-r4096-h4096"
+        }
+      ]
+    }
+  }
+}

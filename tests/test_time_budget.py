@@ -30,6 +30,7 @@ class SearchTimeBudgetTests(unittest.TestCase):
             ["--source", "kernel.py", "--task", "task.json"]
         )
         self.assertEqual(args.max_search_seconds, 0.0)
+        self.assertFalse(args.search_until_time_budget)
 
     def test_stops_after_inflight_generation_and_exports_seed(self) -> None:
         task = _budget_task("time-budget-generation")
@@ -102,6 +103,64 @@ class SearchTimeBudgetTests(unittest.TestCase):
         self.assertEqual(summary.best_latency_ms, 1.0)
         self.assertIn("TILE = 2", best_source)
 
+    def test_fixed_time_mode_continues_after_an_empty_candidate_round(self) -> None:
+        task = _budget_task("fixed-time-empty-round")
+        clock = _Clock()
+        generator = _EmptySlowGenerator(clock, delay_seconds=3)
+        with tempfile.TemporaryDirectory(prefix="kernel-time-budget-") as directory:
+            root = Path(directory)
+            controller = OptimizationController(
+                task=task,
+                source_code=SOURCE,
+                source_name="kernel.py",
+                generator=generator,
+                backend=_Backend(),
+                store=ArtifactStore(root),
+                structural_search_policy="off",
+                strategy_allocation_policy="unconstrained",
+                incumbent_snapshot_interval_seconds=0,
+                max_search_seconds=5,
+                search_until_time_budget=True,
+                time_budget_clock=clock,
+            )
+
+            summary = controller.run()
+            events = [
+                json.loads(line)["event"]
+                for line in (root / "events.jsonl").read_text().splitlines()
+            ]
+
+        self.assertEqual(generator.calls, 2)
+        self.assertEqual(summary.completed_rounds, 1)
+        self.assertEqual(summary.termination_reason, "time-budget")
+        self.assertTrue(summary.time_budget_exhausted)
+        self.assertEqual(summary.best_latency_ms, 3.0)
+        self.assertIn("empty_round_continued", events)
+
+    def test_resumed_time_budget_counts_prior_search_elapsed_time(self) -> None:
+        clock = _Clock()
+        with tempfile.TemporaryDirectory(prefix="kernel-time-budget-") as directory:
+            controller = OptimizationController(
+                task=_budget_task("cumulative-time-budget"),
+                source_code=SOURCE,
+                source_name="kernel.py",
+                generator=_EmptySlowGenerator(clock, delay_seconds=1),
+                backend=_Backend(),
+                store=ArtifactStore(Path(directory)),
+                incumbent_snapshot_interval_seconds=0,
+                max_search_seconds=5,
+                search_until_time_budget=True,
+                time_budget_clock=clock,
+            )
+            controller._time_budget_started_at = clock()
+            controller._prior_search_elapsed_seconds = 4.0
+            clock.advance(2.0)
+
+            exhausted = controller._time_budget_exhausted(2, "resume-test")
+
+        self.assertTrue(exhausted)
+        self.assertEqual(controller._search_elapsed_seconds(), 6.0)
+
     def test_rejects_invalid_time_budget(self) -> None:
         with tempfile.TemporaryDirectory(prefix="kernel-time-budget-") as directory:
             with self.assertRaisesRegex(ValueError, "max_search_seconds"):
@@ -113,6 +172,16 @@ class SearchTimeBudgetTests(unittest.TestCase):
                     backend=_Backend(),
                     store=ArtifactStore(Path(directory)),
                     max_search_seconds=-1,
+                )
+            with self.assertRaisesRegex(ValueError, "positive max_search_seconds"):
+                OptimizationController(
+                    task=_minimal_task(),
+                    source_code=SOURCE,
+                    source_name="kernel.py",
+                    generator=_SlowGenerator(_Clock()),
+                    backend=_Backend(),
+                    store=ArtifactStore(Path(directory) / "fixed-time"),
+                    search_until_time_budget=True,
                 )
 
 
@@ -143,6 +212,19 @@ class _SlowGenerator:
                 source_code=PROPOSAL,
             )
         ]
+
+
+class _EmptySlowGenerator:
+    def __init__(self, clock: _Clock, delay_seconds: float) -> None:
+        self.clock = clock
+        self.delay_seconds = float(delay_seconds)
+        self.calls = 0
+
+    def generate(self, task, parent, evidence, history, count):
+        del task, parent, evidence, history, count
+        self.calls += 1
+        self.clock.advance(self.delay_seconds)
+        return []
 
 
 class _Backend:

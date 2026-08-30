@@ -176,5 +176,13 @@ and between candidates. One already-running API/compiler/GPU operation is allowe
 to finish so artifacts remain consistent. All presets use one API agent unless an
 explicit `--agent-workers` override is supplied.
 
+The checked-in `run_final_related_system_baselines.py` protocol additionally uses
+`--search-until-time-budget` and a deliberately high safety round ceiling. This
+prevents an empty generation round or a short task round budget from ending one
+style before the common 1,800-second cutoff. Resumed runs count previously
+checkpointed search time, and only `termination_reason=time-budget` is accepted as
+a valid equal-time result. The suite fixes `measurement_repeats=3` and uses one
+basic shape per kernel for every style.
+
 Do not label these numbers as "KernelAgent results" or "AVO results." Use names
 such as **KernelAgent-style proxy in our common harness**.

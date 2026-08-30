@@ -46,6 +46,8 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             ("final_eval", "related_system_baselines_shape_1"),
         )
         self.assertEqual(args.workload_suite, shape_driver.DEFAULT_WORKLOAD_SUITE)
+        self.assertEqual(args.budget_mode, "rounds")
+        self.assertEqual(args.measurement_repeats, 2)
 
     def test_every_shape_one_case_differs_from_first_suite(self) -> None:
         suite = baseline_driver._load_workload_suite(

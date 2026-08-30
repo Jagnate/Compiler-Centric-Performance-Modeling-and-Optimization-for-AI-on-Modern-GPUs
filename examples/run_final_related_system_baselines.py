@@ -19,9 +19,17 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = (
-    REPOSITORY_ROOT / "results" / "final_eval" / "related_system_baselines"
+    REPOSITORY_ROOT
+    / "results"
+    / "final_eval"
+    / "related_system_baselines_30m_basic"
+)
+DEFAULT_WORKLOAD_SUITE = (
+    REPOSITORY_ROOT / "examples" / "related_system_basic_shapes.json"
 )
 DEFAULT_MAX_SEARCH_SECONDS = 1800.0
+DEFAULT_MEASUREMENT_REPEATS = 3
+DEFAULT_TIME_BUDGET_ROUND_CEILING = 128
 
 
 @dataclass(frozen=True)
@@ -122,16 +130,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workload-suite",
         type=Path,
+        default=DEFAULT_WORKLOAD_SUITE,
         help=(
-            "Optional JSON workload-family overrides. Effective task files are "
-            "materialized under the output root without changing base tasks."
+            "JSON workload-family overrides. Defaults to the checked-in basic "
+            "fixed-shape suite; effective tasks are materialized under the output "
+            "root without changing base tasks."
         ),
     )
     parser.add_argument(
         "--max-search-seconds",
         type=float,
         default=DEFAULT_MAX_SEARCH_SECONDS,
-        help="Soft controller limit per treatment; default 1800, or 0 to disable.",
+        help="Controller search budget per treatment; default 1800 seconds.",
+    )
+    parser.add_argument(
+        "--budget-mode",
+        choices=("fixed-time", "rounds"),
+        default="fixed-time",
+        help=(
+            "Use wall-clock time as the primary stopping condition, or preserve "
+            "the task's normal round budget."
+        ),
+    )
+    parser.add_argument(
+        "--time-budget-round-ceiling",
+        type=int,
+        default=DEFAULT_TIME_BUDGET_ROUND_CEILING,
+        help=(
+            "Safety round ceiling materialized for fixed-time runs; default 128 "
+            "is intentionally above what a 30-minute hosted-model run can finish."
+        ),
+    )
+    parser.add_argument(
+        "--measurement-repeats",
+        type=int,
+        default=DEFAULT_MEASUREMENT_REPEATS,
+        help="CUDA Event measurement repeats per search candidate; default 3.",
     )
     parser.add_argument(
         "--incumbent-snapshot-interval-seconds", type=float, default=300.0
@@ -210,6 +244,7 @@ def build_command(
     api_output_price_per_million: Optional[float] = None,
     skip_api_preflight: bool = False,
     no_json_response_format: bool = False,
+    search_until_time_budget: bool = False,
     resume: bool = False,
     repository_root: Path = REPOSITORY_ROOT,
     task_path: Optional[Path] = None,
@@ -266,6 +301,8 @@ def build_command(
         command.append("--skip-api-preflight")
     if no_json_response_format:
         command.append("--no-json-response-format")
+    if search_until_time_budget:
+        command.append("--search-until-time-budget")
     if resume:
         command.append("--resume")
     return command
@@ -295,6 +332,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         treatments,
         workload_suite,
         dry_run=args.dry_run,
+        measurement_repeats=args.measurement_repeats,
+        round_ceiling=(
+            args.time_budget_round_ceiling
+            if args.budget_mode == "fixed-time"
+            else None
+        ),
     )
     workloads = _load_workload_metadata(
         REPOSITORY_ROOT,
@@ -317,6 +360,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flush=True,
     )
     print("Agent workers: 1 (canonical preset default)", flush=True)
+    print(
+        "Budget mode: %s; measurement repeats: %d"
+        % (args.budget_mode, args.measurement_repeats),
+        flush=True,
+    )
     print("Candidate graph upper bound: %d nodes" % graph_bound, flush=True)
     if args.max_search_seconds > 0:
         print(
@@ -345,18 +393,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output = output_root / treatment.relative_output
         summary_path = output / "summary.json"
         if summary_path.is_file():
+            summary = _read_json(summary_path)
+            status = _completed_treatment_status(
+                summary, budget_mode=args.budget_mode, reused=True
+            )
             print(
-                "\n[%d/%d] %s / %s already complete; reusing %s"
+                "\n[%d/%d] %s / %s already complete (%s); reusing %s"
                 % (
                     index,
                     len(treatments),
                     treatment.kernel.title,
                     treatment.style.title,
+                    status,
                     summary_path,
                 ),
                 flush=True,
             )
-            rows.append(_summary_row(treatment, _read_json(summary_path), "reused"))
+            rows.append(_summary_row(treatment, summary, status))
+            if status == "ended-early":
+                failure_code = failure_code or 1
             continue
 
         resume = output.is_dir() and any(output.iterdir())
@@ -380,6 +435,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             api_output_price_per_million=args.api_output_price_per_million,
             skip_api_preflight=args.skip_api_preflight,
             no_json_response_format=args.no_json_response_format,
+            search_until_time_budget=args.budget_mode == "fixed-time",
             resume=resume,
             task_path=task_paths[(treatment.kernel.key, treatment.style.key)],
         )
@@ -415,6 +471,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 rows,
                 args.max_search_seconds,
                 workload_suite,
+                budget_mode=args.budget_mode,
+                measurement_repeats=args.measurement_repeats,
             )
             if not args.continue_on_error:
                 print(
@@ -426,7 +484,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             continue
 
         if summary_path.is_file():
-            rows.append(_summary_row(treatment, _read_json(summary_path), "completed"))
+            summary = _read_json(summary_path)
+            status = _completed_treatment_status(
+                summary, budget_mode=args.budget_mode, reused=False
+            )
+            rows.append(_summary_row(treatment, summary, status))
+            if status == "ended-early":
+                failure_code = failure_code or 1
         else:
             failure_code = failure_code or 1
             rows.append(
@@ -443,6 +507,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             rows,
             args.max_search_seconds,
             workload_suite,
+            budget_mode=args.budget_mode,
+            measurement_repeats=args.measurement_repeats,
         )
 
     if args.dry_run:
@@ -456,10 +522,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows,
         args.max_search_seconds,
         workload_suite,
+        budget_mode=args.budget_mode,
+        measurement_repeats=args.measurement_repeats,
     )
     print("\nSuite summary: %s" % (output_root / "suite_summary.md"), flush=True)
     if failure_code:
-        print("Some treatments failed; rerun the same command to resume them.")
+        print(
+            "Some treatments failed or ended before the fixed-time budget; "
+            "inspect suite_summary.md."
+        )
         return failure_code
     print("All %d treatments completed." % len(treatments), flush=True)
     return 0
@@ -482,6 +553,8 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         "api_planner_max_output_tokens",
         "api_max_input_tokens",
         "api_retries",
+        "measurement_repeats",
+        "time_budget_round_ceiling",
     ):
         if int(getattr(args, name)) <= 0:
             raise SystemExit("--%s must be positive" % name.replace("_", "-"))
@@ -493,6 +566,10 @@ def _validate_arguments(args: argparse.Namespace) -> None:
         args.api_output_price_per_million is None
     ):
         raise SystemExit("API cost reporting requires both token prices")
+    if args.budget_mode == "fixed-time" and args.max_search_seconds <= 0:
+        raise SystemExit(
+            "fixed-time budget mode requires a positive --max-search-seconds"
+        )
     if not args.api_url or not args.api_model:
         raise SystemExit(
             "Set KERNEL_OPT_API_URL and KERNEL_OPT_API_MODEL, or pass "
@@ -572,6 +649,8 @@ def _prepare_treatment_tasks(
     workload_suite: Optional[Mapping[str, Any]],
     *,
     dry_run: bool,
+    measurement_repeats: Optional[int] = None,
+    round_ceiling: Optional[int] = None,
 ) -> tuple[Dict[tuple[str, str], Path], Dict[str, Dict[str, Any]]]:
     task_paths: Dict[tuple[str, str], Path] = {}
     task_payloads: Dict[str, Dict[str, Any]] = {}
@@ -594,6 +673,8 @@ def _prepare_treatment_tasks(
             workload_suite,
             repository_root,
             treatment_output,
+            measurement_repeats=measurement_repeats,
+            round_ceiling=round_ceiling,
         )
         task_path = (
             output_root
@@ -616,6 +697,9 @@ def _derive_task(
     workload_suite: Mapping[str, Any],
     repository_root: Path,
     treatment_output: Path,
+    *,
+    measurement_repeats: Optional[int] = None,
+    round_ceiling: Optional[int] = None,
 ) -> Dict[str, Any]:
     task = copy.deepcopy(dict(base_task))
     base_task_id = str(task.get("task_id"))
@@ -628,6 +712,11 @@ def _derive_task(
     )
     task["workload"] = workload
 
+    if round_ceiling is not None:
+        budget = dict(task.get("budget") or {})
+        budget["rounds"] = int(round_ceiling)
+        task["budget"] = budget
+
     evaluator = dict(task.get("evaluator") or {})
     runtime = dict(evaluator.get("runtime") or {})
     runtime["search_cases"] = copy.deepcopy(list(override["search_cases"]))
@@ -635,6 +724,8 @@ def _derive_task(
     runtime["profile_directory"] = str(
         (treatment_output / "ncu_profiles").resolve()
     )
+    if measurement_repeats is not None:
+        runtime["measurement_repeats"] = int(measurement_repeats)
     evaluator["runtime"] = runtime
     evaluator["working_directory"] = str(repository_root.resolve())
     task["evaluator"] = evaluator
@@ -648,6 +739,11 @@ def _derive_task(
         "kernel": kernel.key,
         "style": treatment.style.key,
         "rationale": override.get("rationale"),
+    }
+    metadata["comparison_budget"] = {
+        "mode": "fixed-time" if round_ceiling is not None else "rounds",
+        "round_ceiling": round_ceiling,
+        "measurement_repeats": measurement_repeats,
     }
     task["metadata"] = metadata
     return task
@@ -695,7 +791,9 @@ def _load_workload_metadata(
         )
         budget = dict(task.get("budget") or {})
         runtime = dict(dict(task.get("evaluator") or {}).get("runtime") or {})
-        shape_suite = dict(dict(task.get("metadata") or {}).get("shape_suite") or {})
+        task_metadata = dict(task.get("metadata") or {})
+        shape_suite = dict(task_metadata.get("shape_suite") or {})
+        comparison_budget = dict(task_metadata.get("comparison_budget") or {})
         rounds = int(budget.get("rounds", 0))
         proposals = int(budget.get("proposals_per_round", 0))
         repairs = int(budget.get("max_repairs_per_round", 0))
@@ -716,6 +814,9 @@ def _load_workload_metadata(
             "rounds": rounds,
             "proposals_per_round": proposals,
             "max_repairs_per_round": repairs,
+            "measurement_repeats": runtime.get("measurement_repeats"),
+            "comparison_budget_mode": comparison_budget.get("mode"),
+            "round_ceiling": comparison_budget.get("round_ceiling"),
             "candidate_graph_upper_bound": 1 + rounds * (proposals + repairs),
         }
     return metadata
@@ -754,6 +855,17 @@ def _summary_row(
     }
 
 
+def _completed_treatment_status(
+    summary: Mapping[str, Any], *, budget_mode: str, reused: bool
+) -> str:
+    if budget_mode == "fixed-time" and not (
+        summary.get("termination_reason") == "time-budget"
+        and bool(summary.get("time_budget_exhausted"))
+    ):
+        return "ended-early"
+    return "reused" if reused else "completed"
+
+
 def _write_reports(
     output_root: Path,
     treatments: Sequence[Treatment],
@@ -761,6 +873,9 @@ def _write_reports(
     rows: Sequence[Mapping[str, Any]],
     max_search_seconds: float,
     workload_suite: Optional[Mapping[str, Any]] = None,
+    *,
+    budget_mode: str = "rounds",
+    measurement_repeats: Optional[int] = None,
 ) -> None:
     status_counts: Dict[str, int] = {}
     for row in rows:
@@ -795,6 +910,16 @@ def _write_reports(
         "output_root": str(output_root),
         "planned_treatments": len(treatments),
         "agent_workers": 1,
+        "budget_mode": budget_mode,
+        "measurement_repeats": measurement_repeats,
+        "time_budget_round_ceiling": (
+            max(
+                int(item.get("round_ceiling") or 0)
+                for item in workloads.values()
+            )
+            if budget_mode == "fixed-time" and workloads
+            else None
+        ),
         "max_search_seconds_per_treatment": max_search_seconds,
         "maximum_configured_search_seconds": (
             max_search_seconds * len(treatments) if max_search_seconds > 0 else None
@@ -831,6 +956,11 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
         "| --- | ---: |",
         "| Planned treatments | %s |" % payload["planned_treatments"],
         "| Agent workers | 1 |",
+        "| Budget mode | `%s` |" % payload.get("budget_mode"),
+        "| Measurement repeats | %s |"
+        % _format_value(payload.get("measurement_repeats")),
+        "| Time-budget round ceiling | %s |"
+        % _format_value(payload.get("time_budget_round_ceiling")),
         "| Search cap per treatment | %s seconds |"
         % _format_value(payload["max_search_seconds_per_treatment"]),
         "| Candidate graph upper bound | %s nodes |"
@@ -927,8 +1057,10 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             "",
             source_note,
             "",
-            "A `time-budget` termination is a valid fixed-time result. Rerunning "
-            "the suite reuses completed rows and resumes an interrupted row.",
+            "For `fixed-time` runs, only a `time-budget` termination is a valid "
+            "equal-budget result. The controller exports the best verified "
+            "incumbent at its safe stopping checkpoint. Rerunning the suite "
+            "reuses valid completed rows and resumes an interrupted row.",
             "",
         ]
     )

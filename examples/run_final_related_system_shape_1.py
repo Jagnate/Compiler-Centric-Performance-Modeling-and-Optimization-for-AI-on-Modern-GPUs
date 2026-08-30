@@ -23,6 +23,10 @@ DEFAULT_WORKLOAD_SUITE = REPOSITORY_ROOT / "examples" / "related_system_shape_1.
 def build_forwarded_arguments(arguments: Sequence[str]) -> list[str]:
     defaults = [
         "--include-native",
+        "--budget-mode",
+        "rounds",
+        "--measurement-repeats",
+        "2",
         "--workload-suite",
         str(DEFAULT_WORKLOAD_SUITE),
         "--output-root",

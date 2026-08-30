@@ -180,6 +180,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--search-until-time-budget",
+        action="store_true",
+        help=(
+            "Treat --max-search-seconds as the primary search budget. Empty "
+            "candidate rounds continue until the deadline; the task must provide "
+            "a sufficiently high round ceiling."
+        ),
+    )
+    parser.add_argument(
         "--selection-policy",
         choices=("adaptive", "model-top", "random", "measure-all"),
         default="adaptive",
@@ -266,6 +275,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if not math.isfinite(args.max_search_seconds) or args.max_search_seconds < 0:
         raise SystemExit("--max-search-seconds must be finite and non-negative")
+    if args.search_until_time_budget and args.max_search_seconds <= 0:
+        raise SystemExit(
+            "--search-until-time-budget requires a positive --max-search-seconds"
+        )
     for name in ("api_input_price_per_million", "api_output_price_per_million"):
         value = getattr(args, name)
         if value is not None and value < 0:
@@ -452,6 +465,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.incumbent_snapshot_interval_seconds
             ),
             "max_search_seconds": args.max_search_seconds,
+            "search_until_time_budget": args.search_until_time_budget,
             "candidate_graph_upper_bound": (
                 1
                 + task.budget.rounds
@@ -544,6 +558,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.incumbent_snapshot_interval_seconds
         ),
         max_search_seconds=args.max_search_seconds,
+        search_until_time_budget=args.search_until_time_budget,
         evaluation_policy=args.evaluation_policy,
         tir_evidence_policy=args.tir_evidence_policy,
         metadata_compression_policy=args.metadata_compression_policy,

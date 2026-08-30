@@ -148,6 +148,7 @@ class OptimizationController:
         strategy_allocation_policy: str = "fixed",
         incumbent_snapshot_interval_seconds: float = 300.0,
         max_search_seconds: float = 0.0,
+        search_until_time_budget: bool = False,
         evaluation_policy: str = "tilesight",
         tir_evidence_policy: str = "auto",
         metadata_compression_policy: str = COMPRESSION_VERSION,
@@ -234,6 +235,11 @@ class OptimizationController:
         if not math.isfinite(max_seconds) or max_seconds < 0:
             raise ValueError("max_search_seconds must be finite and non-negative")
         self.max_search_seconds = max_seconds
+        self.search_until_time_budget = bool(search_until_time_budget)
+        if self.search_until_time_budget and self.max_search_seconds <= 0:
+            raise ValueError(
+                "search_until_time_budget requires a positive max_search_seconds"
+            )
         self.candidate_graph_upper_bound = (
             1
             + task.budget.rounds
@@ -244,6 +250,7 @@ class OptimizationController:
         )
         self._time_budget_clock = time_budget_clock
         self._time_budget_started_at: Optional[float] = None
+        self._prior_search_elapsed_seconds = 0.0
         self._time_budget_context: Optional[Dict[str, Any]] = None
         self.termination_reason: Optional[str] = None
         self.strategy_portfolio = StructuralStrategyPortfolio()
@@ -368,11 +375,22 @@ class OptimizationController:
                 completed_rounds = round_number
 
             if self.termination_reason is None:
-                self.termination_reason = (
-                    "round-budget-completed"
-                    if completed_rounds >= self.task.budget.rounds
-                    else "search-stopped"
-                )
+                if (
+                    self.search_until_time_budget
+                    and completed_rounds >= self.task.budget.rounds
+                ):
+                    self._time_budget_exhausted(
+                        completed_rounds + 1, "round-ceiling"
+                    )
+                if self.termination_reason is None:
+                    self.termination_reason = (
+                        "round-ceiling-before-time-budget"
+                        if self.search_until_time_budget
+                        and completed_rounds >= self.task.budget.rounds
+                        else "round-budget-completed"
+                        if completed_rounds >= self.task.budget.rounds
+                        else "search-stopped"
+                    )
 
             if self._search_best_id is None:
                 self._search_best_id = self.beam[0].candidate.candidate_id
@@ -425,7 +443,7 @@ class OptimizationController:
                 search_best,
                 final_seed,
                 best_source_path,
-                elapsed_seconds=time.perf_counter() - started_at,
+                elapsed_seconds=self._search_elapsed_seconds(),
             )
             self.store.save_summary(summary)
             write_research_artifacts(
@@ -487,10 +505,9 @@ class OptimizationController:
 
     def _search_elapsed_seconds(self) -> float:
         if self._time_budget_started_at is None:
-            return 0.0
-        return max(
-            0.0,
-            float(self._time_budget_clock() - self._time_budget_started_at),
+            return self._prior_search_elapsed_seconds
+        return self._prior_search_elapsed_seconds + max(
+            0.0, float(self._time_budget_clock() - self._time_budget_started_at)
         )
 
     def _time_budget_exhausted(self, round_number: int, stage: str) -> bool:
@@ -566,8 +583,28 @@ class OptimizationController:
                     round_candidate_ids=candidate_ids,
                 )
             if not generated:
-                self.termination_reason = "no-new-valid-candidates"
                 self._record_round_strategy_outcomes(round_number)
+                if self.search_until_time_budget:
+                    self.store.append_event(
+                        "empty_round_continued",
+                        {
+                            "round": round_number,
+                            "reason": "no-new-valid-source-candidates",
+                            "max_search_seconds": self.max_search_seconds,
+                        },
+                    )
+                    self._checkpoint(
+                        phase="round_completed",
+                        completed_round=round_number,
+                        active_round=None,
+                    )
+                    self.progress.emit(
+                        "empty_round_continued",
+                        "No new valid candidates; continuing the fixed-time search.",
+                        round=round_number,
+                    )
+                    return True
+                self.termination_reason = "no-new-valid-candidates"
                 self.store.append_event(
                     "round_stopped",
                     {"round": round_number, "reason": "no-new-valid-source-candidates"},
@@ -907,6 +944,9 @@ class OptimizationController:
             )
         current_preflight_usage = dict(self.generator_usage)
         current_stage_timings = dict(self.stage_timings)
+        self._prior_search_elapsed_seconds = max(
+            0.0, float(state.get("search_elapsed_seconds", 0.0) or 0.0)
+        )
         self.records = self.store.load_candidates()
         seed_records = [
             item for item in self.records.values() if item.candidate.generation == 0
@@ -3167,6 +3207,7 @@ class OptimizationController:
             "structural_search_policy": self.structural_search_policy,
             "strategy_allocation_policy": self.strategy_allocation_policy,
             "metadata_compression_policy": self.metadata_compression_policy,
+            "search_until_time_budget": self.search_until_time_budget,
             "api_input_price_per_million": self.api_input_price_per_million,
             "api_output_price_per_million": self.api_output_price_per_million,
         }
@@ -3181,6 +3222,7 @@ class OptimizationController:
         normalized.setdefault("baseline_style_canonical", True)
         normalized.setdefault("evaluation_policy", "tilesight")
         normalized.setdefault("metadata_compression_policy", COMPRESSION_VERSION)
+        normalized.setdefault("search_until_time_budget", False)
         normalized.setdefault("requested_tir_evidence_policy", "auto")
         normalized.setdefault("tir_evidence_policy", "visible")
         normalized.setdefault(

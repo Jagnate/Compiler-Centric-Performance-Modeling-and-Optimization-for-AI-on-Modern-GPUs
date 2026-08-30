@@ -411,17 +411,28 @@ Run the complete 5 x 5 related-system comparison with one command:
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py
 ```
 
-The runner executes 25 treatments sequentially on one GPU: the unchanged GEMM,
-RMSNorm, Conv2D, Flash Attention, and fused Add + RMSNorm source/task pairs times
-the five non-native styles. It uses each preset's canonical single-agent mode and
-does not rewrite workload shapes. Results go to
-`results/final_eval/related_system_baselines/<kernel>/<style>/`; aggregate
+The runner executes 25 treatments sequentially on one GPU: GEMM, RMSNorm,
+Conv2D, Flash Attention, and fused Add + RMSNorm times the five non-native
+styles. It uses each preset's canonical single-agent mode and materializes the
+checked-in `examples/related_system_basic_shapes.json` workload family. The
+fixed primary/final shapes are GEMM `1024 x 1024 x 1024`, RMSNorm and fused norm
+`4096 x 4096`, Conv2D `N16 H56 W56 C64 F128 K3`, and Flash Attention
+`B1 H8 S1024 D64`. Base task files are not modified. Results go to
+`results/final_eval/related_system_baselines_30m_basic/<kernel>/<style>/`; aggregate
 `suite_summary.json` and `suite_summary.md` files are updated after every run.
 
-Each treatment has a default 1,800-second soft search cap, giving the full matrix
-a configured upper bound of 12.5 search hours plus an in-flight-call overshoot.
-Re-running the command reuses completed directories and resumes the first partial
-one. Useful controls are:
+Each treatment uses exactly the same fixed-time protocol: one agent,
+`measurement_repeats=3`, a 1,800-second controller budget, and a 128-round safety
+ceiling that is intentionally unreachable during a normal 30-minute hosted-model
+run. `--search-until-time-budget` keeps searching after an empty candidate round.
+At the first safe checkpoint after the deadline, the controller exports the best
+verified incumbent and records `termination_reason=time-budget`. The full 25-cell
+matrix therefore has a configured search budget of 12.5 GPU-hours plus bounded
+in-flight-call overshoot. A result that ends at the round ceiling or any other
+early condition is marked `ended-early`, not silently accepted as fair.
+
+Re-running the command reuses valid completed directories and resumes the first
+partial one. Useful controls are:
 
 ```bash
 # Inspect all 25 commands without API or GPU work.
@@ -431,9 +442,13 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py --dry-run
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
   --only-kernel matmul --only-style kernelagent
 
-# Explicitly disable the per-treatment time cap.
+# Include this project's native full system for a 5 x 6 matrix.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --max-search-seconds 0
+  --include-native
+
+# Reproduce the old round-budget semantics explicitly.
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --budget-mode rounds
 ```
 
 The default fail-fast behavior prevents one API or profiler outage from cascading

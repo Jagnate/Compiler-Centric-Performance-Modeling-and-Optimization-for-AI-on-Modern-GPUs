@@ -96,6 +96,55 @@ class PromptCompressionTests(unittest.TestCase):
         self.assertGreater(observed_sizes[0]["estimated_input_tokens"], 20)
         self.assertEqual(observed_sizes[0]["max_input_tokens"], 20)
 
+    def test_none_policy_preserves_complete_accumulated_metadata(self) -> None:
+        task = make_task()
+        parent = Candidate.seed(
+            task, "def make_kernel():\n    return 1\n", "kernel.py"
+        )
+        evidence = {
+            "observed": {
+                "profile": {
+                    "valid": True,
+                    "metrics": {
+                        "raw_metrics": {"vendor_metric": 123.0},
+                        "captured_passes": ["LowerTileOp", "StorageRewrite"],
+                    },
+                }
+            },
+            "shared_memory": [
+                {"lesson_id": "lesson-%02d" % index, "raw": "kept"}
+                for index in range(15)
+            ],
+        }
+        history = [
+            {
+                "candidate_id": "candidate-%02d" % index,
+                "compiler_dump": "complete-dump-%02d" % index,
+            }
+            for index in range(25)
+        ]
+
+        prompt = build_optimization_prompt(
+            task,
+            parent,
+            evidence,
+            history,
+            count=1,
+            metadata_compression_policy="none",
+        )
+        request = json.loads(prompt)
+
+        self.assertEqual(len(request["shared_evidence_memory"]), 15)
+        self.assertEqual(len(request["recent_history"]), 25)
+        self.assertIn("raw_metrics", prompt)
+        self.assertIn("complete-dump-00", prompt)
+        provenance = request["context_provenance"]
+        self.assertEqual(provenance["compression_version"], "none")
+        self.assertEqual(
+            provenance["raw_context_characters"],
+            provenance["compressed_context_characters"],
+        )
+
 
 def _huge_evidence(sentinel: str):
     raw_metrics = {"metric_%05d" % index: float(index) for index in range(5000)}

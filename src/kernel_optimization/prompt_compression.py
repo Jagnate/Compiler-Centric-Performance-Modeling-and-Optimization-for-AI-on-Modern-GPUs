@@ -10,6 +10,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 
 COMPRESSION_VERSION = "key-metrics-v1"
+NO_COMPRESSION_POLICY = "none"
+METADATA_COMPRESSION_POLICIES = (COMPRESSION_VERSION, NO_COMPRESSION_POLICY)
 DEFAULT_HISTORY_LIMIT = 8
 DEFAULT_LESSON_LIMIT = 8
 
@@ -108,46 +110,66 @@ def compress_prompt_context(
     evidence: Optional[Mapping[str, Any]],
     history: Sequence[Mapping[str, Any]],
     *,
+    policy: str = COMPRESSION_VERSION,
     history_limit: int = DEFAULT_HISTORY_LIMIT,
     lesson_limit: int = DEFAULT_LESSON_LIMIT,
 ) -> CompressedPromptContext:
     """Build a bounded model-facing view without mutating archived evidence."""
 
+    if policy not in METADATA_COMPRESSION_POLICIES:
+        raise ValueError(
+            "metadata compression policy must be one of: %s"
+            % ", ".join(METADATA_COMPRESSION_POLICIES)
+        )
     raw_evidence = dict(evidence or {})
     raw_history = [dict(item) for item in history]
-    compressed_evidence = {
-        "observed": _compact_observed(raw_evidence.get("observed")),
-        "predicted": _compact_model(raw_evidence.get("predicted")),
-        "model_trust": _compact_trust(raw_evidence.get("model_trust")),
-        "calibration": _compact_calibration(raw_evidence.get("calibration")),
-        "shared_memory": _compact_lessons(
-            raw_evidence.get("shared_memory"), lesson_limit
-        ),
-    }
-    compressed_history = [
-        _compact_history_record(item) for item in raw_history[-history_limit:]
-    ]
+    if policy == NO_COMPRESSION_POLICY:
+        compressed_evidence = raw_evidence
+        compressed_history = raw_history
+    else:
+        compressed_evidence = {
+            "observed": _compact_observed(raw_evidence.get("observed")),
+            "predicted": _compact_model(raw_evidence.get("predicted")),
+            "model_trust": _compact_trust(raw_evidence.get("model_trust")),
+            "calibration": _compact_calibration(raw_evidence.get("calibration")),
+            "shared_memory": _compact_lessons(
+                raw_evidence.get("shared_memory"), lesson_limit
+            ),
+        }
+        compressed_history = [
+            _compact_history_record(item) for item in raw_history[-history_limit:]
+        ]
+    compressed_lessons = compressed_evidence.get("shared_memory") or []
     provenance = {
-        "compression_version": COMPRESSION_VERSION,
+        "compression_version": policy,
         "raw_evidence_sha256": _digest(raw_evidence),
         "raw_history_sha256": _digest(raw_history),
         "history_records_available": len(raw_history),
         "history_records_included": len(compressed_history),
         "shared_lessons_available": len(raw_evidence.get("shared_memory") or []),
-        "shared_lessons_included": len(compressed_evidence["shared_memory"]),
+        "shared_lessons_included": len(compressed_lessons),
         "raw_context_characters": _json_size(raw_evidence) + _json_size(raw_history),
         "compressed_context_characters": (
             _json_size(compressed_evidence) + _json_size(compressed_history)
         ),
-        "note": (
-            "Full-fidelity evidence remains in run artifacts; this request contains "
-            "a deterministic key-metric summary."
-        ),
+        "note": _compression_note(policy),
     }
     return CompressedPromptContext(
         evidence=compressed_evidence,
         history=compressed_history,
         provenance=provenance,
+    )
+
+
+def _compression_note(policy: str) -> str:
+    if policy == NO_COMPRESSION_POLICY:
+        return (
+            "Compression is disabled for this ablation request; full accumulated "
+            "metadata is included subject only to the API input-token safety budget."
+        )
+    return (
+        "Full-fidelity evidence remains in run artifacts; this request contains "
+        "a deterministic key-metric summary."
     )
 
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Sequence
 
-from .prompt_compression import compact_failure_context, compress_prompt_context
+from .prompt_compression import (
+    COMPRESSION_VERSION,
+    NO_COMPRESSION_POLICY,
+    compact_failure_context,
+    compress_prompt_context,
+)
 from .schema import Candidate, TaskSpec
 
 
@@ -140,10 +145,13 @@ def build_optimization_prompt(
     evidence: Dict[str, Any],
     history: Sequence[Dict[str, Any]],
     count: int,
+    metadata_compression_policy: str = COMPRESSION_VERSION,
 ) -> str:
     """Build one source optimization request with explicit evidence provenance."""
 
-    context = compress_prompt_context(evidence, history)
+    context = compress_prompt_context(
+        evidence, history, policy=metadata_compression_policy
+    )
     generation_request = dict(evidence.get("generation_request") or {})
     strategy_assignments = list(
         generation_request.get("strategy_assignments") or []
@@ -265,10 +273,13 @@ def build_repair_prompt(
     failure: Dict[str, Any],
     evidence: Dict[str, Any],
     history: Sequence[Dict[str, Any]],
+    metadata_compression_policy: str = COMPRESSION_VERSION,
 ) -> str:
     """Build a bounded repair request around one archived failed source."""
 
-    context = compress_prompt_context(evidence, history)
+    context = compress_prompt_context(
+        evidence, history, policy=metadata_compression_policy
+    )
     task_payload = {
         "task_id": task.task_id,
         "description": task.description,
@@ -314,7 +325,11 @@ def build_repair_prompt(
                 ),
             },
         },
-        "classified_failure": compact_failure_context(failure),
+        "classified_failure": (
+            dict(failure)
+            if metadata_compression_policy == NO_COMPRESSION_POLICY
+            else compact_failure_context(failure)
+        ),
         "shared_evidence_memory": context.evidence.get("shared_memory", []),
         "model_trust": context.evidence.get("model_trust"),
         "calibration_state": context.evidence.get("calibration"),

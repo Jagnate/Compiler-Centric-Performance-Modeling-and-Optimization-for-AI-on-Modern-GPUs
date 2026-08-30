@@ -31,6 +31,7 @@ _CSV_FIELDS = (
     "evaluation_policy",
     "tir_evidence_policy",
     "strategy_allocation_policy",
+    "metadata_compression_policy",
     "candidate_id",
     "generation",
     "state",
@@ -64,6 +65,9 @@ _CSV_FIELDS = (
     "generator_calls",
     "planner_calls",
     "api_request_attempts",
+    "api_input_tokens",
+    "api_output_tokens",
+    "api_total_tokens",
 )
 
 
@@ -203,6 +207,7 @@ class PeriodicIncumbentRecorder:
         )
         incumbent_latency = _comparable_latency(incumbent, selection_basis)
         seed_latency = _comparable_latency(seed, selection_basis)
+        generator_usage = dict(state.get("generator_usage") or {})
         speedup = (
             seed_latency / incumbent_latency
             if seed_latency is not None and incumbent_latency is not None
@@ -245,6 +250,16 @@ class PeriodicIncumbentRecorder:
                 "generator_calls": state.get("generator_calls", 0),
                 "planner_calls": state.get("planner_calls", 0),
                 "api_request_attempts": state.get("api_request_attempts", 0),
+            },
+            "api_usage": {
+                "provider_usage": generator_usage,
+                "input_tokens": _usage_token_count(
+                    generator_usage, "prompt_tokens", "input_tokens"
+                ),
+                "output_tokens": _usage_token_count(
+                    generator_usage, "completion_tokens", "output_tokens"
+                ),
+                "total_tokens": _total_token_count(generator_usage),
             },
             "beam_candidate_ids": list(state.get("beam") or []),
             "scan_errors": scan_errors,
@@ -455,6 +470,8 @@ def _csv_row(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     counts = dict(counts) if isinstance(counts, Mapping) else {}
     policies = snapshot.get("policies")
     policies = dict(policies) if isinstance(policies, Mapping) else {}
+    api_usage = snapshot.get("api_usage")
+    api_usage = dict(api_usage) if isinstance(api_usage, Mapping) else {}
     return {
         "sequence": snapshot.get("sequence"),
         "timestamp": snapshot.get("timestamp"),
@@ -468,6 +485,9 @@ def _csv_row(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "tir_evidence_policy": policies.get("tir_evidence_policy"),
         "strategy_allocation_policy": policies.get(
             "strategy_allocation_policy"
+        ),
+        "metadata_compression_policy": policies.get(
+            "metadata_compression_policy"
         ),
         "candidate_id": incumbent.get("candidate_id"),
         "generation": incumbent.get("generation"),
@@ -502,7 +522,27 @@ def _csv_row(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "generator_calls": counts.get("generator_calls"),
         "planner_calls": counts.get("planner_calls"),
         "api_request_attempts": counts.get("api_request_attempts"),
+        "api_input_tokens": api_usage.get("input_tokens"),
+        "api_output_tokens": api_usage.get("output_tokens"),
+        "api_total_tokens": api_usage.get("total_tokens"),
     }
+
+
+def _usage_token_count(value: Mapping[str, Any], *names: str) -> float:
+    for name in names:
+        item = value.get(name)
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            return float(item)
+    return 0.0
+
+
+def _total_token_count(value: Mapping[str, Any]) -> float:
+    explicit = _usage_token_count(value, "total_tokens")
+    if explicit > 0:
+        return explicit
+    return _usage_token_count(
+        value, "prompt_tokens", "input_tokens"
+    ) + _usage_token_count(value, "completion_tokens", "output_tokens")
 
 
 def _timestamp() -> str:

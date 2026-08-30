@@ -242,6 +242,8 @@ def _experiment_markdown(
         % summary.structural_search_policy,
         "| Strategy allocation policy | `%s` |"
         % summary.strategy_allocation_policy,
+        "| Metadata compression policy | `%s` |"
+        % summary.metadata_compression_policy,
         "| Concurrent generation agents | %s |"
         % _format(generator_metadata.get("agent_workers", 1)),
         "| Incumbent snapshot interval | %s s |"

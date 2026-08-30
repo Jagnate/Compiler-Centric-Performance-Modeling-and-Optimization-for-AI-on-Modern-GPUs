@@ -558,6 +558,7 @@ class SearchSummary:
     compiled_equivalent_candidates: int = 0
     structural_search_policy: str = "off"
     strategy_allocation_policy: str = "unconstrained"
+    metadata_compression_policy: str = "key-metrics-v1"
     planner_calls: int = 0
     planner_fallbacks: int = 0
     structural_candidates: int = 0

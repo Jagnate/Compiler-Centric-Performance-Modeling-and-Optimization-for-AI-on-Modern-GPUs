@@ -140,6 +140,13 @@ class IncumbentTrackingTests(unittest.TestCase):
         self.assertEqual(csv_rows[-1]["candidate_id"], faster.candidate_id)
         self.assertEqual(csv_rows[-1]["registers_per_thread"], "64")
         self.assertEqual(csv_rows[-1]["reason"], "interval")
+        self.assertEqual(interval["api_usage"]["input_tokens"], 100.0)
+        self.assertEqual(interval["api_usage"]["output_tokens"], 50.0)
+        self.assertEqual(interval["api_usage"]["total_tokens"], 150.0)
+        self.assertEqual(csv_rows[-1]["api_total_tokens"], "150.0")
+        self.assertEqual(
+            csv_rows[-1]["metadata_compression_policy"], "key-metrics-v1"
+        )
 
     def test_resume_continues_sequence_and_active_elapsed_time(self) -> None:
         task = _task()
@@ -301,6 +308,14 @@ def _state(phase: str, best_candidate_id: str):
         "generator_calls": 2,
         "planner_calls": 1,
         "api_request_attempts": 3,
+        "generator_usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        },
+        "experiment": {
+            "metadata_compression_policy": "key-metrics-v1",
+        },
     }
 
 

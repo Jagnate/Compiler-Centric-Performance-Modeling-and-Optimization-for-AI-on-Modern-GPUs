@@ -22,6 +22,7 @@ from .generators import (
 )
 from .manifest import collect_environment_manifest
 from .progress import ProgressReporter
+from .prompt_compression import COMPRESSION_VERSION, METADATA_COMPRESSION_POLICIES
 from .schema import Candidate, TaskSpec
 from .source_validation import SourceValidator
 
@@ -84,7 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=60000,
         help=(
             "Conservative local input-token budget checked before network access. "
-            "Prompt context is compressed before this check."
+            "The configured prompt context is prepared before this check."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-compression-policy",
+        choices=METADATA_COMPRESSION_POLICIES,
+        default=COMPRESSION_VERSION,
+        help=(
+            "Use the bounded key-metric prompt context, or disable compression "
+            "for a controlled token-growth ablation."
         ),
     )
     parser.add_argument(
@@ -291,7 +301,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def report_api_request(size):
         progress.emit(
             "api_request_ready",
-            "API request prepared with a bounded prompt context.",
+            "API request prepared with the configured prompt context.",
             kind=size.get("kind"),
             estimated_input_tokens=size.get("estimated_input_tokens"),
             max_output_tokens=size.get("max_output_tokens"),
@@ -313,6 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_retries=args.api_retries,
         retry_backoff_seconds=args.api_retry_backoff,
         use_json_object=not args.no_json_response_format,
+        metadata_compression_policy=args.metadata_compression_policy,
     )
 
     def create_generator():
@@ -361,6 +372,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "max_retries": args.api_retries,
             "api_key_environment_variable": args.api_key_env,
             "agent_workers": args.agent_workers,
+            "metadata_compression_policy": args.metadata_compression_policy,
         },
         "experiment": {
             "baseline_style": style.preset.name,
@@ -386,6 +398,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "compiled_deduplication": policies["compiled_deduplication"],
             "structural_search_policy": args.structural_search_policy,
             "strategy_allocation_policy": args.strategy_allocation_policy,
+            "metadata_compression_policy": args.metadata_compression_policy,
             "agent_workers": args.agent_workers,
             "api_input_price_per_million": args.api_input_price_per_million,
             "api_output_price_per_million": args.api_output_price_per_million,
@@ -487,6 +500,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_search_seconds=args.max_search_seconds,
         evaluation_policy=args.evaluation_policy,
         tir_evidence_policy=args.tir_evidence_policy,
+        metadata_compression_policy=args.metadata_compression_policy,
     )
     summary = controller.run()
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))

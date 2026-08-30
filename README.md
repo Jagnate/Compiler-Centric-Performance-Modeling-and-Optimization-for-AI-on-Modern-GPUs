@@ -644,6 +644,66 @@ explicitly:
 The input count is an intentionally conservative dependency-free estimate;
 provider usage metadata remains authoritative after a successful call.
 
+### Metadata compression ablation
+
+The default `key-metrics-v1` policy is unchanged. A controlled experiment may
+disable generation and repair context compression while retaining the same local
+input-token safety limit:
+
+```bash
+--metadata-compression-policy key-metrics-v1
+--metadata-compression-policy none
+```
+
+`none` includes complete accumulated candidate-record metadata, relevant run
+lessons, raw TileSight/NCU metadata, and full failure diagnostics. Historical
+source files remain excluded so the experiment isolates metadata growth; the
+current parent source is complete in both treatments. It is intended only for
+token-growth experiments. The strategy planner keeps its existing separately
+bounded planning context in both treatments, so the ablation isolates generation
+and repair metadata compression.
+
+Run both treatments with one command:
+
+```bash
+PYTHONPATH=src python3 examples/run_metadata_compression_ablation.py \
+  --snapshot-interval-seconds 300 \
+  --api-max-input-tokens 60000 \
+  -- \
+  --max-search-seconds 3600
+```
+
+The driver defaults to Matmul. Flash Attention has a larger source and often
+uses more hosted-model tokens, but source length and repair traffic are fixed
+prompt overheads that confound a metadata-compression result. Matmul compiles
+reliably, usually completes more rounds, and exposes a cleaner contrast between
+bounded compressed history and growing raw candidate metadata. `--source` and
+`--task` remain available for a secondary workload.
+
+The API URL, model, and key use the same `KERNEL_OPT_API_*` environment variables
+as the main CLI. Arguments after `--` are forwarded to both treatments. The
+driver reuses completed treatment directories and supports `--resume` for an
+interrupted experiment.
+
+The comparison directory contains:
+
+```text
+compressed/                    key-metrics-v1 run artifacts
+uncompressed/                  no-compression run artifacts
+token_usage_by_call.csv        actual and estimated tokens per API call
+token_usage_by_round.csv       provider token usage grouped by search round
+token_usage_by_time.csv        round and fixed wall-clock snapshots
+compression_comparison.json    machine-readable treatment summary
+compression_comparison.md      human-readable comparison
+```
+
+Both cumulative curves grow because every hosted-model call consumes tokens.
+The expected compression signal is a bounded per-call input size and roughly
+linear cumulative growth. Without compression, per-call input size may grow with
+history, producing superlinear cumulative growth until the local input budget is
+reached. A local prompt-budget stop in the uncompressed treatment is recorded as
+`prompt-budget-exceeded` and is a valid ablation outcome.
+
 Transient rate-limit, connection, and server failures use bounded exponential
 retry. Quota exhaustion and other permanent client errors fail immediately.
 Provider requests and responses are archived without authorization headers or

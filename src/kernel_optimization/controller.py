@@ -21,6 +21,11 @@ from .evidence import GlobalEvidenceMemory
 from .incumbent_tracking import PeriodicIncumbentRecorder
 from .milestones import create_profile_policy
 from .progress import NullProgressReporter, ProgressReporter
+from .prompt_compression import (
+    COMPRESSION_VERSION,
+    METADATA_COMPRESSION_POLICIES,
+    NO_COMPRESSION_POLICY,
+)
 from .protocols import CandidateGenerator, PerformanceBackend
 from .reporting import expected_report_paths, write_research_artifacts
 from .schema import (
@@ -145,6 +150,7 @@ class OptimizationController:
         max_search_seconds: float = 0.0,
         evaluation_policy: str = "tilesight",
         tir_evidence_policy: str = "auto",
+        metadata_compression_policy: str = COMPRESSION_VERSION,
         time_budget_clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.task = task
@@ -180,6 +186,12 @@ class OptimizationController:
             policies["requested_tir_evidence_policy"]
         )
         self.tir_evidence_policy = str(policies["tir_evidence_policy"])
+        if metadata_compression_policy not in METADATA_COMPRESSION_POLICIES:
+            raise ValueError(
+                "metadata_compression_policy must be one of: %s"
+                % ", ".join(METADATA_COMPRESSION_POLICIES)
+            )
+        self.metadata_compression_policy = metadata_compression_policy
         self.requested_selection_policy_name = str(
             policies["requested_selection_policy"]
         )
@@ -773,6 +785,7 @@ class OptimizationController:
                 selected_ids=selected_ids,
                 best_before_id=best_before_id,
             )
+            self.incumbent_recorder.record_now("round-completed")
         self.progress.emit(
             "round_completed",
             "Finished search round %d." % round_number,
@@ -1478,6 +1491,7 @@ class OptimizationController:
             returned=len(proposals),
             elapsed_seconds=round(elapsed, 3),
         )
+        self._persist_runtime_counters()
         return proposals
 
     def _validate_candidate_novelty(
@@ -1673,6 +1687,7 @@ class OptimizationController:
             },
             getattr(self.generator, "last_exchange", None),
         )
+        self._persist_runtime_counters()
 
         inherited_metadata = dict(proposal.metadata)
         for name in (
@@ -2486,7 +2501,12 @@ class OptimizationController:
     def _shared_evidence_for_prompt(
         self, record: CandidateRecord
     ) -> List[Dict[str, Any]]:
-        lessons = self.evidence_memory.for_prompt(record)
+        lesson_limit = (
+            None
+            if self.metadata_compression_policy == NO_COMPRESSION_POLICY
+            else 12
+        )
+        lessons = self.evidence_memory.for_prompt(record, limit=lesson_limit)
         if self.tir_evidence_policy == "visible":
             return lessons
 
@@ -2862,6 +2882,9 @@ class OptimizationController:
                 item.candidate.candidate_id,
             ),
         )
+        if self.metadata_compression_policy == NO_COMPRESSION_POLICY:
+            return [item.to_dict(include_source=False) for item in records]
+        prompt_records = records[-20:]
         return [
             {
                 "candidate_id": item.candidate.candidate_id,
@@ -2926,7 +2949,7 @@ class OptimizationController:
                     item.profile.bottleneck if item.profile else None
                 ),
             }
-            for item in records[-20:]
+            for item in prompt_records
         ]
 
     def _checkpoint(
@@ -3140,6 +3163,7 @@ class OptimizationController:
             "compiled_deduplication": self.compiled_deduplication,
             "structural_search_policy": self.structural_search_policy,
             "strategy_allocation_policy": self.strategy_allocation_policy,
+            "metadata_compression_policy": self.metadata_compression_policy,
             "api_input_price_per_million": self.api_input_price_per_million,
             "api_output_price_per_million": self.api_output_price_per_million,
         }
@@ -3153,6 +3177,7 @@ class OptimizationController:
         normalized.setdefault("baseline_style_mode", "native")
         normalized.setdefault("baseline_style_canonical", True)
         normalized.setdefault("evaluation_policy", "tilesight")
+        normalized.setdefault("metadata_compression_policy", COMPRESSION_VERSION)
         normalized.setdefault("requested_tir_evidence_policy", "auto")
         normalized.setdefault("tir_evidence_policy", "visible")
         normalized.setdefault(
@@ -3254,6 +3279,7 @@ class OptimizationController:
             ),
             structural_search_policy=self.structural_search_policy,
             strategy_allocation_policy=self.strategy_allocation_policy,
+            metadata_compression_policy=self.metadata_compression_policy,
             planner_calls=self.planner_calls,
             planner_fallbacks=self.planner_fallbacks,
             structural_candidates=sum(

@@ -61,7 +61,7 @@ class GlobalEvidenceMemory:
         return lesson
 
     def for_prompt(
-        self, parent: CandidateRecord, limit: int = 12
+        self, parent: CandidateRecord, limit: Optional[int] = 12
     ) -> List[Dict[str, Any]]:
         parent_bottleneck = (
             parent.diagnosis.category if parent.diagnosis is not None else "unknown"
@@ -82,7 +82,9 @@ class GlobalEvidenceMemory:
             value += {"high": 2.0, "medium": 1.0}.get(item.confidence, 0.0)
             return value, item.round_number, item.lesson_id
 
-        selected = sorted(self.lessons, key=score, reverse=True)[:limit]
+        selected = sorted(self.lessons, key=score, reverse=True)
+        if limit is not None:
+            selected = selected[:limit]
         return [item.to_dict() for item in selected]
 
     def snapshot(self) -> Dict[str, Any]:
@@ -193,4 +195,3 @@ class GlobalEvidenceMemory:
             recommended_actions=list(recommendations),
             created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         )
-

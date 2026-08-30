@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from ..prompt_compression import (
+    COMPRESSION_VERSION,
+    METADATA_COMPRESSION_POLICIES,
     PromptBudgetError,
     enforce_prompt_budget,
     prompt_size_metadata,
@@ -80,6 +82,7 @@ class ApiGeneratorConfig:
     retry_backoff_seconds: float = 2.0
     use_json_object: bool = True
     max_input_tokens: int = 60000
+    metadata_compression_policy: str = COMPRESSION_VERSION
 
     def __post_init__(self) -> None:
         if not self.api_url.startswith(("http://", "https://")):
@@ -96,6 +99,11 @@ class ApiGeneratorConfig:
             raise ValueError("planner_max_output_tokens must be positive")
         if self.max_input_tokens <= 0:
             raise ValueError("max_input_tokens must be positive")
+        if self.metadata_compression_policy not in METADATA_COMPRESSION_POLICIES:
+            raise ValueError(
+                "metadata_compression_policy must be one of: %s"
+                % ", ".join(METADATA_COMPRESSION_POLICIES)
+            )
         if self.max_tokens_field not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError(
                 "max_tokens_field must be max_tokens or max_completion_tokens"
@@ -159,7 +167,14 @@ class OpenAICompatibleGenerator:
         history: Sequence[Dict[str, Any]],
         count: int,
     ) -> List[CandidateProposal]:
-        prompt = build_optimization_prompt(task, parent, evidence, history, count)
+        prompt = build_optimization_prompt(
+            task,
+            parent,
+            evidence,
+            history,
+            count,
+            metadata_compression_policy=self.config.metadata_compression_policy,
+        )
         return self._generate_from_prompt(prompt, count=count, kind="generate")
 
     def plan_strategies(
@@ -212,6 +227,7 @@ class OpenAICompatibleGenerator:
             failure,
             evidence,
             history,
+            metadata_compression_policy=self.config.metadata_compression_policy,
         )
         proposals = self._generate_from_prompt(prompt, count=1, kind="repair")
         return proposals[0]

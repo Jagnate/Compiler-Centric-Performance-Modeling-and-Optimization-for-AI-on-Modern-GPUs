@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import os
 import sys
@@ -59,6 +60,109 @@ class CommandSourceBackendTests(unittest.TestCase):
         self.assertIsInstance(backend, CommandBackend)
         self.assertEqual(backend.working_directory, REPOSITORY_ROOT)
         self.assertEqual(backend.environment["PYTHONPATH"], "../TileSight")
+        self.assertTrue(backend.persistent_process)
+        self.assertEqual(backend.worker_max_requests, 32)
+
+    def test_persistent_worker_reuses_one_process_and_archives_attempts(self) -> None:
+        task = TaskSpec(
+            task_id="persistent-command-test",
+            description="Reuse one warmed evaluator process.",
+            reference="Return the input.",
+            entrypoint="kernel",
+        )
+        candidate = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        with tempfile.TemporaryDirectory(prefix="persistent-command-") as directory:
+            backend = CommandBackend(
+                command=[sys.executable, str(FIXTURE)],
+                working_directory=REPOSITORY_ROOT,
+                artifact_directory=Path(directory),
+                persistent_process=True,
+                worker_max_requests=8,
+            )
+            try:
+                modeled = backend.model(task, candidate)
+                measured = backend.measure(task, candidate)
+                profiled = backend.profile(task, candidate)
+            finally:
+                backend.close()
+
+            pids = {
+                modeled.metrics["worker_pid"],
+                measured.metrics["worker_pid"],
+                profiled.metrics["worker_pid"],
+            }
+            self.assertEqual(len(pids), 1)
+            self.assertEqual(modeled.metrics["worker_request_index"], 1)
+            self.assertEqual(measured.metrics["worker_request_index"], 2)
+            self.assertEqual(profiled.metrics["worker_request_index"], 3)
+            attempts = sorted(Path(directory).glob("*/*/attempt.json"))
+            self.assertEqual(len(attempts), 3)
+            metadata = [json.loads(path.read_text()) for path in attempts]
+            self.assertTrue(
+                all(item["execution_mode"] == "persistent-worker" for item in metadata)
+            )
+            self.assertTrue(all(item["worker_start_count"] == 1 for item in metadata))
+
+    def test_persistent_worker_restarts_at_the_request_bound(self) -> None:
+        task = TaskSpec(
+            task_id="bounded-persistent-command-test",
+            description="Bound evaluator process lifetime.",
+            reference="Return the input.",
+            entrypoint="kernel",
+        )
+        candidate = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        backend = CommandBackend(
+            command=[sys.executable, str(FIXTURE)],
+            working_directory=REPOSITORY_ROOT,
+            persistent_process=True,
+            worker_max_requests=2,
+        )
+        try:
+            modeled = backend.model(task, candidate)
+            measured = backend.measure(task, candidate)
+            profiled = backend.profile(task, candidate)
+        finally:
+            backend.close()
+
+        self.assertEqual(modeled.metrics["worker_pid"], measured.metrics["worker_pid"])
+        self.assertNotEqual(modeled.metrics["worker_pid"], profiled.metrics["worker_pid"])
+        self.assertEqual(profiled.metrics["worker_request_index"], 1)
+
+    def test_persistent_worker_recovers_after_a_candidate_crashes_it(self) -> None:
+        task = TaskSpec(
+            task_id="crashing-persistent-command-test",
+            description="Restart after an evaluator process crash.",
+            reference="Return the input.",
+            entrypoint="kernel",
+        )
+        crashing = Candidate.seed(
+            task,
+            "# KERNEL_OPT_TEST_WORKER_EXIT\ndef kernel(x):\n    return x\n",
+            "kernel.py",
+        )
+        healthy = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")
+        with tempfile.TemporaryDirectory(prefix="crashing-command-") as directory:
+            backend = CommandBackend(
+                command=[sys.executable, str(FIXTURE)],
+                working_directory=REPOSITORY_ROOT,
+                artifact_directory=Path(directory),
+                persistent_process=True,
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "worker exited"):
+                    backend.model(task, crashing)
+                modeled = backend.model(task, healthy)
+                metadata = dict(backend.last_stage_metadata)
+            finally:
+                backend.close()
+
+            self.assertTrue(modeled.valid)
+            self.assertEqual(metadata["worker_start_count"], 2)
+            failed_attempt = next(
+                Path(directory).glob(crashing.candidate_id + "/model_*/attempt.json")
+            )
+            failure = json.loads(failed_attempt.read_text())
+            self.assertEqual(failure["status"], "failed")
 
     def test_factory_isolates_tilelang_cache_inside_run_output(self) -> None:
         task_path = REPOSITORY_ROOT / "examples" / "tilelang_matmul_task.json"

@@ -157,6 +157,8 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             for kernel, expected in expected_shapes.items():
                 task = payloads[kernel]
                 runtime = task["evaluator"]["runtime"]
+                self.assertTrue(task["evaluator"]["persistent_process"])
+                self.assertEqual(task["evaluator"]["worker_max_requests"], 32)
                 self.assertEqual(task["workload"]["factory_arguments"], expected)
                 self.assertEqual(task["budget"]["rounds"], 128)
                 self.assertEqual(runtime["measurement_repeats"], 3)

@@ -67,6 +67,8 @@ class GenericEvaluatorTests(unittest.TestCase):
             arguments = set(task.workload["factory_arguments"])
             self.assertTrue(arguments.isdisjoint(schedule_arguments))
             self.assertFalse(task.evaluator["runtime"]["model_collect_ptxas"])
+            self.assertTrue(task.evaluator["persistent_process"])
+            self.assertEqual(task.evaluator["worker_max_requests"], 32)
 
     def test_held_out_cases_are_not_in_generation_prompt(self) -> None:
         task = TaskSpec.from_json_file(

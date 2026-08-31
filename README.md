@@ -431,7 +431,12 @@ so it does not invoke PTXAS for every generated candidate. Exact register and
 hardware evidence is refreshed by seed and milestone NCU profiles. Each promoted
 candidate is compiled once and all CUDA Event timing repeats reuse that compiled
 kernel; `measurement_repeats=3` therefore means three measurements, not three
-compilations.
+compilations. The bundled TileLang tasks also use a bounded persistent evaluator
+worker. Torch, TileLang, TVM, and TileSight are imported once and reused across
+model, measurement, and profile requests, while every request still receives its
+own source, request, response, stdout, and attempt artifacts. The worker restarts
+after 32 requests to bound retained compiler/GPU state; set
+`evaluator.persistent_process` to `false` for strict process-per-stage isolation.
 At the first safe checkpoint after the deadline, the controller exports the best
 verified incumbent and records `termination_reason=time-budget`. The full 30-cell
 matrix therefore has a configured search budget of 15 GPU-hours plus bounded

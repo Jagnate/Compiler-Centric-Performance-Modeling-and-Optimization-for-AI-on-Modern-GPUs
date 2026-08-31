@@ -31,6 +31,8 @@ def create_backend(
             if not working_directory.is_absolute():
                 working_directory = base_directory / working_directory
         timeout = float(configuration.pop("timeout_seconds", 300.0))
+        persistent_process = bool(configuration.pop("persistent_process", False))
+        worker_max_requests = int(configuration.pop("worker_max_requests", 32))
         environment = {
             str(name): str(value)
             for name, value in dict(
@@ -67,6 +69,8 @@ def create_backend(
             working_directory=working_directory,
             environment=environment,
             artifact_directory=artifact_directory,
+            persistent_process=persistent_process,
+            worker_max_requests=worker_max_requests,
         )
     raise ValueError(
         "unsupported evaluator type %r; source optimization requires a command evaluator"

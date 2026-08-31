@@ -502,6 +502,17 @@ class OptimizationController:
             raise
         finally:
             self.incumbent_recorder.stop()
+            close_backend = getattr(self.backend, "close", None)
+            if callable(close_backend):
+                try:
+                    close_backend()
+                except Exception as error:
+                    self.progress.emit(
+                        "backend_close_failed",
+                        "Evaluator cleanup failed after the run completed.",
+                        error_type=type(error).__name__,
+                        error_message=str(error),
+                    )
 
     def _search_elapsed_seconds(self) -> float:
         if self._time_budget_started_at is None:

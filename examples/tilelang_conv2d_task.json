@@ -64,6 +64,8 @@
     "command": ["python3", "examples/tilesight_kernel_evaluator.py"],
     "working_directory": "..",
     "timeout_seconds": 1800,
+    "persistent_process": true,
+    "worker_max_requests": 32,
     "environment": {
       "PYTHONPATH": "../TileSight"
     },

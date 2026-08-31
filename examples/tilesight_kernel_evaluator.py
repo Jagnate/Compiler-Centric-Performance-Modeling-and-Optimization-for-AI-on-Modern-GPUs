@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import gc
 import hashlib
 import importlib.util
 import inspect
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
@@ -16,20 +19,31 @@ import statistics
 import subprocess
 import sys
 import time
+import traceback
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+_WORKER_RESPONSE_PREFIX = "KERNEL_OPT_WORKER_RESPONSE "
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--persistent-worker", action="store_true")
     parser.add_argument(
         "--stage", choices=("model", "measure", "profile", "final")
     )
-    parser.add_argument("--request", type=Path, required=True)
+    parser.add_argument("--request", type=Path)
     parser.add_argument("--response", type=Path)
     parser.add_argument("--run-once", action="store_true")
     args = parser.parse_args()
+    if args.persistent_worker:
+        if args.run_once or args.stage or args.request or args.response:
+            parser.error("--persistent-worker cannot be combined with stage arguments")
+        return args
     if args.run_once == bool(args.stage):
         parser.error("select exactly one of --run-once or --stage")
+    if args.request is None:
+        parser.error("--request is required")
     if args.stage and args.response is None:
         parser.error("--response is required with --stage")
     return args
@@ -615,6 +629,124 @@ def write_response(path: Path, value: Mapping[str, Any]) -> None:
     )
 
 
+def evaluate_stage(stage: str, request: Mapping[str, Any]) -> Dict[str, Any]:
+    """Evaluate one request using the same dispatch in one-shot and worker modes."""
+
+    if stage == "model":
+        return model_response(request)
+    if stage == "measure":
+        return measure_response(request, final=False)
+    if stage == "final":
+        return measure_response(request, final=True)
+    if stage == "profile":
+        return profile_response(request)
+    raise ValueError("unsupported evaluator stage %r" % stage)
+
+
+@contextmanager
+def _capture_worker_output(path: Path):
+    """Redirect Python and native stdout/stderr while preserving protocol stdout."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", buffering=1) as stream:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        stdout_fd = os.dup(1)
+        stderr_fd = os.dup(2)
+        previous_stdout = sys.stdout
+        previous_stderr = sys.stderr
+        try:
+            os.dup2(stream.fileno(), 1)
+            os.dup2(stream.fileno(), 2)
+            sys.stdout = stream
+            sys.stderr = stream
+            yield
+        finally:
+            stream.flush()
+            sys.stdout = previous_stdout
+            sys.stderr = previous_stderr
+            os.dup2(stdout_fd, 1)
+            os.dup2(stderr_fd, 2)
+            os.close(stdout_fd)
+            os.close(stderr_fd)
+
+
+def _cleanup_worker_request() -> None:
+    """Release request-scoped Python and CUDA caches without reimporting runtimes."""
+
+    gc.collect()
+    torch_module = sys.modules.get("torch")
+    cuda = getattr(torch_module, "cuda", None) if torch_module is not None else None
+    if cuda is not None:
+        try:
+            if cuda.is_available():
+                cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def persistent_worker() -> None:
+    """Serve path-only JSON requests while keeping compiler imports warm."""
+
+    protocol_stdout = sys.stdout
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except Exception as error:
+            acknowledgement = {
+                "request_id": None,
+                "status": "error",
+                "error": {"type": type(error).__name__, "message": str(error)},
+            }
+            protocol_stdout.write(
+                _WORKER_RESPONSE_PREFIX
+                + json.dumps(acknowledgement, sort_keys=True)
+                + "\n"
+            )
+            protocol_stdout.flush()
+            continue
+        if message.get("action") == "shutdown":
+            protocol_stdout.flush()
+            os._exit(0)
+
+        request_id = str(message.get("request_id") or "")
+        output_path = Path(str(message.get("stdout")))
+        acknowledgement = {"request_id": request_id, "status": "ok"}
+        try:
+            with _capture_worker_output(output_path):
+                request_path = Path(str(message["request"]))
+                response_path = Path(str(message["response"]))
+                stage = str(message["stage"])
+                request = load_request(request_path)
+                request["_request_path"] = str(request_path)
+                response = evaluate_stage(stage, request)
+                write_response(response_path, response)
+                _cleanup_worker_request()
+        except BaseException as error:
+            try:
+                with _capture_worker_output(output_path):
+                    traceback.print_exc()
+                    _cleanup_worker_request()
+            except Exception:
+                pass
+            acknowledgement = {
+                "request_id": request_id,
+                "status": "error",
+                "error": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                },
+            }
+        protocol_stdout.write(
+            _WORKER_RESPONSE_PREFIX
+            + json.dumps(acknowledgement, sort_keys=True)
+            + "\n"
+        )
+        protocol_stdout.flush()
+    protocol_stdout.flush()
+    os._exit(0)
+
+
 def _merge_cases(
     workload: Mapping[str, Any], raw_cases: Any, kind: str
 ) -> List[Dict[str, Any]]:
@@ -752,19 +884,15 @@ def _accepts_keyword_argument(function: Callable[..., Any], name: str) -> bool:
 
 def main() -> int:
     args = parse_args()
+    if args.persistent_worker:
+        persistent_worker()
+        return 0
     request = load_request(args.request)
     request["_request_path"] = str(args.request)
     if args.run_once:
         run_once(request)
         return 0
-    if args.stage == "model":
-        response = model_response(request)
-    elif args.stage == "measure":
-        response = measure_response(request, final=False)
-    elif args.stage == "final":
-        response = measure_response(request, final=True)
-    else:
-        response = profile_response(request)
+    response = evaluate_stage(args.stage, request)
     write_response(args.response, response)
     return 0
 

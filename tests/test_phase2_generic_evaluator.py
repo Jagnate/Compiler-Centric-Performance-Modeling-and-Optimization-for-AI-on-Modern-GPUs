@@ -261,7 +261,7 @@ class FreshFinalGateTests(unittest.TestCase):
         self.assertEqual(summary.final_validation_calls, 3)
         self.assertEqual(summary.final_validation_passes, 2)
         self.assertIn("VALUE = 2", best_source)
-        self.assertIn("passed process-isolated final validation", report)
+        self.assertIn("passed separate final validation", report)
 
 
 @dataclass

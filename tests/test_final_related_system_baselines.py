@@ -109,7 +109,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
     def test_basic_suite_materializes_fixed_shapes_and_equal_measurement_budget(
         self,
     ) -> None:
-        workload_suite = suite._load_workload_suite(suite.DEFAULT_WORKLOAD_SUITE)
+        workload_suite = suite._builtin_workload_suite("basic")
         treatments = suite.selected_treatments(only_styles=["kernelagent"])
         expected_shapes = {
             "matmul": {"m": 1024, "n": 1024, "k": 1024},
@@ -210,19 +210,139 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
 
     def test_default_output_and_time_cap_are_bounded(self) -> None:
         args = suite.build_parser().parse_args([])
+        workload_suite = suite._builtin_workload_suite(args.shape_config)
         self.assertEqual(
-            args.output_root.parts[-2:],
+            suite._default_output_root(workload_suite).parts[-2:],
             ("final_eval", "related_system_baselines_30m_basic"),
         )
+        self.assertIsNone(args.output_root)
         self.assertEqual(args.max_search_seconds, 1800.0)
         self.assertEqual(args.budget_mode, "fixed-time")
         self.assertEqual(args.measurement_repeats, 3)
         self.assertEqual(args.time_budget_round_ceiling, 128)
-        self.assertEqual(args.workload_suite, suite.DEFAULT_WORKLOAD_SUITE)
+        self.assertEqual(args.shape_config, "basic")
+        self.assertIsNone(args.workload_suite)
         self.assertTrue(args.include_native)
         self.assertFalse(
             suite.build_parser().parse_args(["--exclude-native"]).include_native
         )
+
+    def test_three_named_shape_configs_have_distinct_outputs(self) -> None:
+        self.assertEqual(tuple(suite.SHAPE_CONFIGS), ("basic", "standard", "shape1"))
+        outputs = {
+            suite._default_output_root(suite._builtin_workload_suite(name)).name
+            for name in suite.SHAPE_CONFIGS
+        }
+        self.assertEqual(
+            outputs,
+            {
+                "related_system_baselines_30m_basic",
+                "related_system_baselines_30m_standard",
+                "related_system_baselines_30m_shape1",
+            },
+        )
+
+    def test_all_named_shape_cases_satisfy_kernel_contracts(self) -> None:
+        treatments = suite.selected_treatments(
+            only_styles=["native"], include_native=True
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for config_name in suite.SHAPE_CONFIGS:
+                workload_suite = suite._builtin_workload_suite(config_name)
+                _paths, payloads = suite._prepare_treatment_tasks(
+                    REPOSITORY_ROOT,
+                    Path(temporary) / config_name,
+                    treatments,
+                    workload_suite,
+                    dry_run=True,
+                    measurement_repeats=3,
+                    round_ceiling=128,
+                )
+                for kernel in suite.KERNELS:
+                    task = payloads[kernel.key]
+                    runtime = task["evaluator"]["runtime"]
+                    plugin = importlib.import_module(
+                        runtime["plugin"][:-3].replace("/", ".")
+                    )
+                    primary = dict(task["workload"]["factory_arguments"])
+                    for raw_case in (
+                        list(runtime["search_cases"])
+                        + list(runtime["final_cases"])
+                    ):
+                        case = dict(raw_case)
+                        arguments = dict(primary)
+                        arguments.update(dict(case.get("factory_arguments") or {}))
+                        case["factory_arguments"] = arguments
+                        plugin.validate_case(case, task)
+
+    def test_current_fixed_time_summary_requires_separate_timing_fields(self) -> None:
+        legacy = {
+            "elapsed_seconds": 1801.0,
+            "termination_reason": "time-budget",
+            "time_budget_exhausted": True,
+            "final_validation_calls": 0,
+        }
+        current = {
+            **legacy,
+            "search_elapsed_seconds": 1801.0,
+            "final_validation_seconds": 12.0,
+            "total_elapsed_seconds": 1813.0,
+            "final_validation_calls": 2,
+        }
+
+        self.assertFalse(
+            suite._summary_uses_current_timing_protocol(
+                legacy,
+                budget_mode="fixed-time",
+                expected_final_validations=1,
+            )
+        )
+        self.assertTrue(
+            suite._summary_uses_current_timing_protocol(
+                current,
+                budget_mode="fixed-time",
+                expected_final_validations=1,
+            )
+        )
+
+    def test_builtin_basic_can_resume_legacy_json_provenance(self) -> None:
+        treatment = suite.selected_treatments(
+            only_kernels=["matmul"], only_styles=["native"]
+        )
+        legacy_suite = suite._load_workload_suite(
+            REPOSITORY_ROOT / "examples" / "related_system_basic_shapes.json"
+        )
+        builtin_suite = suite._builtin_workload_suite("basic")
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            paths, _payloads = suite._prepare_treatment_tasks(
+                REPOSITORY_ROOT,
+                output_root,
+                treatment,
+                legacy_suite,
+                dry_run=False,
+                measurement_repeats=3,
+                round_ceiling=128,
+            )
+            archived_task = json.loads(
+                paths[("matmul", "native")].read_text(encoding="utf-8")
+            )
+
+            suite._prepare_treatment_tasks(
+                REPOSITORY_ROOT,
+                output_root,
+                treatment,
+                builtin_suite,
+                dry_run=False,
+                measurement_repeats=3,
+                round_ceiling=128,
+            )
+            changed = json.loads(json.dumps(archived_task))
+            changed["workload"]["factory_arguments"]["m"] = 2048
+            with self.assertRaisesRegex(SystemExit, "choose a fresh output root"):
+                suite._write_immutable_json(
+                    paths[("matmul", "native")], changed
+                )
 
     def test_fixed_time_completion_requires_time_budget_termination(self) -> None:
         valid = {

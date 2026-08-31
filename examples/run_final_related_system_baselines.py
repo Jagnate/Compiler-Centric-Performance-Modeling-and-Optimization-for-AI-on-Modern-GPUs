@@ -18,15 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_ROOT = (
-    REPOSITORY_ROOT
-    / "results"
-    / "final_eval"
-    / "related_system_baselines_30m_basic"
-)
-DEFAULT_WORKLOAD_SUITE = (
-    REPOSITORY_ROOT / "examples" / "related_system_basic_shapes.json"
-)
+DEFAULT_SHAPE_CONFIG = "basic"
 DEFAULT_MAX_SEARCH_SECONDS = 1800.0
 DEFAULT_MEASUREMENT_REPEATS = 3
 DEFAULT_TIME_BUDGET_ROUND_CEILING = 128
@@ -89,6 +81,458 @@ KERNELS: Tuple[KernelWorkload, ...] = (
     ),
 )
 
+# Canonical workload families live beside the runner so one command controls the
+# complete experiment matrix. Custom JSON suites remain available through
+# --workload-suite, but published runs should use one of these named snapshots.
+SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "basic": {
+        "suite_id": "related_system_basic_shapes",
+        "title": "Related-System Baselines: Basic Fixed Shapes",
+        "description": (
+            "One representative RTX 3090 shape per kernel. Search and final "
+            "validation use the same shape."
+        ),
+        "output_directory": "related_system_baselines_30m_basic",
+        "workloads": {
+            "matmul": {
+                "task_id": "tilelang_matmul_m1024_n1024_k1024_rtx3090_basic",
+                "rationale": "Square 1024 GEMM for the fixed-time comparison.",
+                "factory_arguments": {"m": 1024, "n": 1024, "k": 1024},
+                "search_cases": [
+                    {"case_id": "primary-m1024-n1024-k1024"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-m1024-n1024-k1024"}
+                ],
+            },
+            "rms_norm": {
+                "task_id": "tilelang_rms_norm_r4096_h4096_rtx3090_basic",
+                "rationale": "Standard 4096-wide normalization with 4096 rows.",
+                "factory_arguments": {
+                    "rows": 4096,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [{"case_id": "primary-r4096-h4096"}],
+                "final_cases": [{"case_id": "final-r4096-h4096"}],
+            },
+            "conv2d": {
+                "task_id": (
+                    "tilelang_conv2d_n16_h56_w56_c64_f128_k3_rtx3090_basic"
+                ),
+                "rationale": "Moderate-batch ResNet-like 3x3 NHWC convolution.",
+                "factory_arguments": {
+                    "batch": 16,
+                    "in_height": 56,
+                    "in_width": 56,
+                    "in_channels": 64,
+                    "out_channels": 128,
+                    "kernel_size": 3,
+                    "stride": 1,
+                    "dilation": 1,
+                    "padding": 1,
+                },
+                "search_cases": [
+                    {"case_id": "primary-n16-h56-w56-c64-f128-k3-s1"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-n16-h56-w56-c64-f128-k3-s1"}
+                ],
+            },
+            "flash_attention": {
+                "task_id": (
+                    "tilelang_flash_attention_b1_h8_s1024_d64_rtx3090_basic"
+                ),
+                "rationale": "Basic B1 H8 S1024 D64 non-causal attention.",
+                "factory_arguments": {
+                    "batch": 1,
+                    "heads": 8,
+                    "seq_len": 1024,
+                    "dim": 64,
+                    "is_causal": False,
+                },
+                "search_cases": [
+                    {"case_id": "primary-b1-h8-s1024-d64"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-b1-h8-s1024-d64"}
+                ],
+            },
+            "fused_add_rms_norm": {
+                "task_id": (
+                    "tilelang_fused_add_rms_norm_r4096_h4096_rtx3090_basic"
+                ),
+                "rationale": "Fused residual-add normalization at 4096 by 4096.",
+                "factory_arguments": {
+                    "rows": 4096,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [{"case_id": "primary-r4096-h4096"}],
+                "final_cases": [{"case_id": "final-r4096-h4096"}],
+            },
+        },
+    },
+    "standard": {
+        "suite_id": "related_system_standard_shapes",
+        "title": "Related-System Baselines: Standard Task Shapes",
+        "description": (
+            "The canonical primary, public, and held-out shapes from the five "
+            "standalone TileLang task definitions."
+        ),
+        "output_directory": "related_system_baselines_30m_standard",
+        "workloads": {
+            "matmul": {
+                "task_id": "tilelang_matmul_2048_rtx3090_standard",
+                "rationale": "Canonical 2048 square GEMM plus scale and aspect-ratio checks.",
+                "factory_arguments": {"m": 2048, "n": 2048, "k": 2048},
+                "search_cases": [
+                    {"case_id": "primary-m2048-n2048-k2048"},
+                    {
+                        "case_id": "public-m1024-n1024-k1024",
+                        "factory_arguments": {"m": 1024, "n": 1024, "k": 1024},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-m1536-n1536-k1536",
+                        "factory_arguments": {"m": 1536, "n": 1536, "k": 1536},
+                    },
+                    {
+                        "case_id": "heldout-m3072-n1024-k2048",
+                        "factory_arguments": {"m": 3072, "n": 1024, "k": 2048},
+                    },
+                ],
+            },
+            "rms_norm": {
+                "task_id": "tilelang_rms_norm_r8192_h4096_rtx3090_standard",
+                "rationale": "Canonical weighted RMSNorm workload and width variants.",
+                "factory_arguments": {
+                    "rows": 8192,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r8192-h4096"},
+                    {
+                        "case_id": "public-r2048-h4096",
+                        "factory_arguments": {"rows": 2048, "hidden_size": 4096},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-r4096-h8192",
+                        "factory_arguments": {"rows": 4096, "hidden_size": 8192},
+                    },
+                    {
+                        "case_id": "heldout-r16384-h1024",
+                        "factory_arguments": {"rows": 16384, "hidden_size": 1024},
+                    },
+                ],
+            },
+            "conv2d": {
+                "task_id": (
+                    "tilelang_conv2d_n32_h56_w56_c64_f128_k3_rtx3090_standard"
+                ),
+                "rationale": "Canonical spatial Conv2D plus stride and 1x1 held-out cases.",
+                "factory_arguments": {
+                    "batch": 32,
+                    "in_height": 56,
+                    "in_width": 56,
+                    "in_channels": 64,
+                    "out_channels": 128,
+                    "kernel_size": 3,
+                    "stride": 1,
+                    "dilation": 1,
+                    "padding": 1,
+                },
+                "search_cases": [
+                    {"case_id": "primary-n32-h56-w56-c64-f128-k3-s1"},
+                    {
+                        "case_id": "public-n8-h28-w28-c64-f128-k3-s1",
+                        "factory_arguments": {
+                            "batch": 8,
+                            "in_height": 28,
+                            "in_width": 28,
+                        },
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-n16-h56-w56-c64-f128-k3-s2",
+                        "factory_arguments": {"batch": 16, "stride": 2},
+                    },
+                    {
+                        "case_id": "heldout-n16-h28-w28-c128-f256-k1-s1",
+                        "factory_arguments": {
+                            "batch": 16,
+                            "in_height": 28,
+                            "in_width": 28,
+                            "in_channels": 128,
+                            "out_channels": 256,
+                            "kernel_size": 1,
+                            "stride": 1,
+                            "dilation": 1,
+                            "padding": 0,
+                        },
+                    },
+                ],
+            },
+            "flash_attention": {
+                "task_id": (
+                    "tilelang_flash_attention_b1_h32_s1024_d64_rtx3090_standard"
+                ),
+                "rationale": "Canonical H32 S1024 attention plus causal held-out cases.",
+                "factory_arguments": {
+                    "batch": 1,
+                    "heads": 32,
+                    "seq_len": 1024,
+                    "dim": 64,
+                    "is_causal": False,
+                },
+                "search_cases": [
+                    {"case_id": "primary-b1-h32-s1024-d64"},
+                    {
+                        "case_id": "public-b1-h2-s256-d64",
+                        "factory_arguments": {
+                            "batch": 1,
+                            "heads": 2,
+                            "seq_len": 256,
+                            "dim": 64,
+                            "is_causal": False,
+                        },
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-causal-b1-h4-s512-d64",
+                        "factory_arguments": {
+                            "batch": 1,
+                            "heads": 4,
+                            "seq_len": 512,
+                            "dim": 64,
+                            "is_causal": True,
+                        },
+                    },
+                    {
+                        "case_id": "heldout-b2-h8-s256-d64",
+                        "factory_arguments": {
+                            "batch": 2,
+                            "heads": 8,
+                            "seq_len": 256,
+                            "dim": 64,
+                            "is_causal": False,
+                        },
+                    },
+                ],
+            },
+            "fused_add_rms_norm": {
+                "task_id": (
+                    "tilelang_fused_add_rms_norm_r8192_h4096_rtx3090_standard"
+                ),
+                "rationale": "Canonical fused residual-add RMSNorm and width variants.",
+                "factory_arguments": {
+                    "rows": 8192,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r8192-h4096"},
+                    {
+                        "case_id": "public-r2048-h4096",
+                        "factory_arguments": {"rows": 2048, "hidden_size": 4096},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-r4096-h8192",
+                        "factory_arguments": {"rows": 4096, "hidden_size": 8192},
+                    },
+                    {
+                        "case_id": "heldout-r16384-h1024",
+                        "factory_arguments": {"rows": 16384, "hidden_size": 1024},
+                    },
+                ],
+            },
+        },
+    },
+    "shape1": {
+        "suite_id": "related_system_shape_1",
+        "title": "Related-System Baselines: Shape Family 1",
+        "description": (
+            "Rectangular GEMM, narrower normalization, channel-heavy Conv2D, "
+            "and longer causal attention for RTX 3090."
+        ),
+        "output_directory": "related_system_baselines_30m_shape1",
+        "workloads": {
+            "matmul": {
+                "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_shape1",
+                "rationale": "Tall rectangular GEMM with held-out aspect ratios.",
+                "factory_arguments": {"m": 4096, "n": 1024, "k": 4096},
+                "search_cases": [
+                    {"case_id": "primary-m4096-n1024-k4096"},
+                    {
+                        "case_id": "public-m2048-n1024-k4096",
+                        "factory_arguments": {"m": 2048, "n": 1024, "k": 4096},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-m1024-n4096-k2048",
+                        "factory_arguments": {"m": 1024, "n": 4096, "k": 2048},
+                    },
+                    {
+                        "case_id": "heldout-m3072-n1536-k4096",
+                        "factory_arguments": {"m": 3072, "n": 1536, "k": 4096},
+                    },
+                ],
+            },
+            "rms_norm": {
+                "task_id": "tilelang_rms_norm_r16384_h2048_rtx3090_shape1",
+                "rationale": "Constant element count with narrower reduction width.",
+                "factory_arguments": {
+                    "rows": 16384,
+                    "hidden_size": 2048,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r16384-h2048"},
+                    {
+                        "case_id": "public-r4096-h2048",
+                        "factory_arguments": {"rows": 4096, "hidden_size": 2048},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-r12288-h4096",
+                        "factory_arguments": {"rows": 12288, "hidden_size": 4096},
+                    },
+                    {
+                        "case_id": "heldout-r32768-h1024",
+                        "factory_arguments": {"rows": 32768, "hidden_size": 1024},
+                    },
+                ],
+            },
+            "conv2d": {
+                "task_id": (
+                    "tilelang_conv2d_n32_h28_w28_c128_f256_k3_rtx3090_shape1"
+                ),
+                "rationale": "Later-stage channel-heavy 3x3 convolution.",
+                "factory_arguments": {
+                    "batch": 32,
+                    "in_height": 28,
+                    "in_width": 28,
+                    "in_channels": 128,
+                    "out_channels": 256,
+                    "kernel_size": 3,
+                    "stride": 1,
+                    "dilation": 1,
+                    "padding": 1,
+                },
+                "search_cases": [
+                    {"case_id": "primary-n32-h28-w28-c128-f256-k3-s1"},
+                    {
+                        "case_id": "public-n8-h28-w28-c128-f256-k3-s1",
+                        "factory_arguments": {"batch": 8},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-n16-h28-w28-c128-f256-k3-s2",
+                        "factory_arguments": {"batch": 16, "stride": 2},
+                    },
+                    {
+                        "case_id": "heldout-n32-h14-w14-c256-f512-k3-s1",
+                        "factory_arguments": {
+                            "batch": 32,
+                            "in_height": 14,
+                            "in_width": 14,
+                            "in_channels": 256,
+                            "out_channels": 512,
+                        },
+                    },
+                ],
+            },
+            "flash_attention": {
+                "task_id": (
+                    "tilelang_flash_attention_b1_h32_s2048_d64_causal_rtx3090_shape1"
+                ),
+                "rationale": "Longer causal attention with non-causal held-out coverage.",
+                "factory_arguments": {
+                    "batch": 1,
+                    "heads": 32,
+                    "seq_len": 2048,
+                    "dim": 64,
+                    "is_causal": True,
+                },
+                "search_cases": [
+                    {"case_id": "primary-b1-h32-s2048-d64-causal"},
+                    {
+                        "case_id": "public-b1-h8-s1024-d64-causal",
+                        "factory_arguments": {
+                            "batch": 1,
+                            "heads": 8,
+                            "seq_len": 1024,
+                            "dim": 64,
+                            "is_causal": True,
+                        },
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-b1-h16-s2048-d64-noncausal",
+                        "factory_arguments": {
+                            "batch": 1,
+                            "heads": 16,
+                            "seq_len": 2048,
+                            "dim": 64,
+                            "is_causal": False,
+                        },
+                    },
+                    {
+                        "case_id": "heldout-b2-h8-s1536-d64-causal",
+                        "factory_arguments": {
+                            "batch": 2,
+                            "heads": 8,
+                            "seq_len": 1536,
+                            "dim": 64,
+                            "is_causal": True,
+                        },
+                    },
+                ],
+            },
+            "fused_add_rms_norm": {
+                "task_id": (
+                    "tilelang_fused_add_rms_norm_r16384_h2048_rtx3090_shape1"
+                ),
+                "rationale": "Fused norm at the narrower shape-family-1 reduction width.",
+                "factory_arguments": {
+                    "rows": 16384,
+                    "hidden_size": 2048,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r16384-h2048"},
+                    {
+                        "case_id": "public-r4096-h2048",
+                        "factory_arguments": {"rows": 4096, "hidden_size": 2048},
+                    },
+                ],
+                "final_cases": [
+                    {
+                        "case_id": "heldout-r12288-h4096",
+                        "factory_arguments": {"rows": 12288, "hidden_size": 4096},
+                    },
+                    {
+                        "case_id": "heldout-r32768-h1024",
+                        "factory_arguments": {"rows": 32768, "hidden_size": 1024},
+                    },
+                ],
+            },
+        },
+    },
+}
+
 RELATED_STYLES: Tuple[RelatedStyle, ...] = (
     RelatedStyle("kernelagent", "KernelAgent style"),
     RelatedStyle("kernelevolve", "KernelEvolve style"),
@@ -109,7 +553,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
-        "--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT
+        "--output-root",
+        type=Path,
+        help=(
+            "Result directory. By default each named shape configuration uses "
+            "its own directory under results/final_eval."
+        ),
     )
     parser.add_argument(
         "--only-kernel",
@@ -140,14 +589,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only the five related-system proxy styles (25 treatments).",
     )
     parser.set_defaults(include_native=True)
-    parser.add_argument(
+    shape_group = parser.add_mutually_exclusive_group()
+    shape_group.add_argument(
+        "--shape-config",
+        choices=tuple(SHAPE_CONFIGS),
+        default=DEFAULT_SHAPE_CONFIG,
+        help=(
+            "Built-in workload family: basic (default fixed shapes), standard "
+            "(canonical task shapes), or shape1 (alternate stress shapes)."
+        ),
+    )
+    shape_group.add_argument(
         "--workload-suite",
         type=Path,
-        default=DEFAULT_WORKLOAD_SUITE,
         help=(
-            "JSON workload-family overrides. Defaults to the checked-in basic "
-            "fixed-shape suite; effective tasks are materialized under the output "
-            "root without changing base tasks."
+            "Custom JSON workload-family overrides. This is an escape hatch for "
+            "new shapes; named experiments should use --shape-config."
         ),
     )
     parser.add_argument(
@@ -324,7 +781,19 @@ def build_command(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     _validate_arguments(args)
-    output_root = args.output_root.expanduser().resolve()
+    workload_suite = (
+        _load_workload_suite(args.workload_suite)
+        if args.workload_suite is not None
+        else _builtin_workload_suite(args.shape_config)
+    )
+    shape_config_name = (
+        "custom" if args.workload_suite is not None else args.shape_config
+    )
+    output_root = (
+        args.output_root.expanduser().resolve()
+        if args.output_root is not None
+        else _default_output_root(workload_suite)
+    )
     treatments = selected_treatments(
         args.only_kernel,
         args.only_style,
@@ -332,11 +801,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if not treatments:
         raise SystemExit("No treatments matched the requested filters")
-    workload_suite = (
-        _load_workload_suite(args.workload_suite)
-        if args.workload_suite is not None
-        else None
-    )
     if not args.dry_run:
         output_root.mkdir(parents=True, exist_ok=True)
     task_paths, task_payloads = _prepare_treatment_tasks(
@@ -378,6 +842,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         % (args.budget_mode, args.measurement_repeats),
         flush=True,
     )
+    print(
+        "Shape config: %s (%s)"
+        % (shape_config_name, workload_suite["suite_id"]),
+        flush=True,
+    )
+    print("Output root: %s" % output_root, flush=True)
     print("Candidate graph upper bound: %d nodes" % graph_bound, flush=True)
     if args.max_search_seconds > 0:
         print(
@@ -407,25 +877,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         summary_path = output / "summary.json"
         if summary_path.is_file():
             summary = _read_json(summary_path)
-            status = _completed_treatment_status(
-                summary, budget_mode=args.budget_mode, reused=True
+            expected_final_validations = int(
+                task_payloads[treatment.kernel.key]
+                .get("budget", {})
+                .get("final_validation_candidates", 0)
+                or 0
             )
+            if _summary_uses_current_timing_protocol(
+                summary,
+                budget_mode=args.budget_mode,
+                expected_final_validations=expected_final_validations,
+            ):
+                status = _completed_treatment_status(
+                    summary, budget_mode=args.budget_mode, reused=True
+                )
+                print(
+                    "\n[%d/%d] %s / %s already complete (%s); reusing %s"
+                    % (
+                        index,
+                        len(treatments),
+                        treatment.kernel.title,
+                        treatment.style.title,
+                        status,
+                        summary_path,
+                    ),
+                    flush=True,
+                )
+                rows.append(_summary_row(treatment, summary, status))
+                if status == "ended-early":
+                    failure_code = failure_code or 1
+                continue
             print(
-                "\n[%d/%d] %s / %s already complete (%s); reusing %s"
+                "\n[%d/%d] %s / %s has a legacy summary without "
+                "post-budget final validation; resuming it once to finalize."
                 % (
                     index,
                     len(treatments),
                     treatment.kernel.title,
                     treatment.style.title,
-                    status,
-                    summary_path,
                 ),
                 flush=True,
             )
-            rows.append(_summary_row(treatment, summary, status))
-            if status == "ended-early":
-                failure_code = failure_code or 1
-            continue
 
         resume = output.is_dir() and any(output.iterdir())
         command = build_command(
@@ -598,9 +1090,25 @@ def _validate_arguments(args: argparse.Namespace) -> None:
                 raise SystemExit("Required example file does not exist: %s" % path)
 
 
+def _builtin_workload_suite(name: str) -> Dict[str, Any]:
+    if name not in SHAPE_CONFIGS:
+        raise SystemExit("Unknown shape configuration: %s" % name)
+    value = copy.deepcopy(SHAPE_CONFIGS[name])
+    value["config_name"] = name
+    return _validate_workload_suite(value, config_path="builtin:%s" % name)
+
+
 def _load_workload_suite(path: Path) -> Dict[str, Any]:
     resolved = path.expanduser().resolve()
     value = _read_json(resolved)
+    value["config_name"] = "custom"
+    return _validate_workload_suite(value, config_path=str(resolved))
+
+
+def _validate_workload_suite(
+    value: Mapping[str, Any], *, config_path: str
+) -> Dict[str, Any]:
+    value = copy.deepcopy(dict(value))
     suite_id = value.get("suite_id")
     workloads = value.get("workloads")
     if not isinstance(suite_id, str) or not suite_id.strip():
@@ -650,9 +1158,26 @@ def _load_workload_suite(path: Path) -> Dict[str, Any]:
         ]
         if len(case_ids) != len(set(case_ids)):
             raise SystemExit("Workload override %s has duplicate case IDs" % kernel_key)
-    value = dict(value)
-    value["config_path"] = str(resolved)
+    output_directory = value.get("output_directory")
+    if output_directory is not None:
+        output_path = Path(str(output_directory))
+        if (
+            output_path.is_absolute()
+            or len(output_path.parts) != 1
+            or output_path.name in ("", ".", "..")
+        ):
+            raise SystemExit(
+                "Workload suite output_directory must be one directory name"
+            )
+    value["config_path"] = config_path
     return value
+
+
+def _default_output_root(workload_suite: Mapping[str, Any]) -> Path:
+    directory = workload_suite.get("output_directory") or workload_suite["suite_id"]
+    return (
+        REPOSITORY_ROOT / "results" / "final_eval" / str(directory)
+    ).resolve()
 
 
 def _prepare_treatment_tasks(
@@ -764,7 +1289,10 @@ def _derive_task(
 
 def _write_immutable_json(path: Path, value: Mapping[str, Any]) -> None:
     if path.is_file():
-        if _read_json(path) != value:
+        archived = _read_json(path)
+        if archived != value and not _tasks_differ_only_in_suite_provenance(
+            archived, value
+        ):
             raise SystemExit(
                 "Existing effective task differs from the requested workload "
                 "suite; choose a fresh output root: %s" % path
@@ -775,6 +1303,22 @@ def _write_immutable_json(path: Path, value: Mapping[str, Any]) -> None:
         json.dumps(dict(value), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _tasks_differ_only_in_suite_provenance(
+    archived: Mapping[str, Any], requested: Mapping[str, Any]
+) -> bool:
+    def without_provenance(value: Mapping[str, Any]) -> Dict[str, Any]:
+        normalized = copy.deepcopy(dict(value))
+        metadata = dict(normalized.get("metadata") or {})
+        shape_suite = dict(metadata.get("shape_suite") or {})
+        for name in ("config_path", "rationale", "suite_title"):
+            shape_suite.pop(name, None)
+        metadata["shape_suite"] = shape_suite
+        normalized["metadata"] = metadata
+        return normalized
+
+    return without_provenance(archived) == without_provenance(requested)
 
 
 def _load_workload_metadata(
@@ -841,6 +1385,9 @@ def _summary_row(
     ledger = dict(summary.get("cost_ledger") or {})
     api = dict(ledger.get("api") or {})
     evaluator = dict(ledger.get("evaluator") or {})
+    legacy_elapsed = summary.get("elapsed_seconds")
+    search_elapsed = summary.get("search_elapsed_seconds")
+    total_elapsed = summary.get("total_elapsed_seconds")
     return {
         "kernel": treatment.kernel.key,
         "kernel_title": treatment.kernel.title,
@@ -856,7 +1403,14 @@ def _summary_row(
         "measured_candidates": summary.get("measured_candidates"),
         "profile_calls": summary.get("profile_calls"),
         "final_validation_calls": summary.get("final_validation_calls"),
-        "elapsed_seconds": summary.get("elapsed_seconds"),
+        "search_elapsed_seconds": (
+            legacy_elapsed if search_elapsed is None else search_elapsed
+        ),
+        "final_validation_seconds": summary.get("final_validation_seconds", 0.0),
+        "total_elapsed_seconds": (
+            legacy_elapsed if total_elapsed is None else total_elapsed
+        ),
+        "elapsed_seconds": legacy_elapsed,
         "termination_reason": summary.get("termination_reason"),
         "time_budget_exhausted": summary.get("time_budget_exhausted"),
         "candidate_graph_upper_bound": summary.get("candidate_graph_upper_bound"),
@@ -878,6 +1432,28 @@ def _completed_treatment_status(
     ):
         return "ended-early"
     return "reused" if reused else "completed"
+
+
+def _summary_uses_current_timing_protocol(
+    summary: Mapping[str, Any],
+    *,
+    budget_mode: str,
+    expected_final_validations: int,
+) -> bool:
+    if budget_mode != "fixed-time":
+        return True
+    required_timing_fields = (
+        "search_elapsed_seconds",
+        "final_validation_seconds",
+        "total_elapsed_seconds",
+    )
+    if any(summary.get(name) is None for name in required_timing_fields):
+        return False
+    if expected_final_validations > 0 and int(
+        summary.get("final_validation_calls", 0) or 0
+    ) <= 0:
+        return False
+    return True
 
 
 def _write_reports(
@@ -905,6 +1481,7 @@ def _write_reports(
     if workload_suite is not None:
         suite_metadata = {
             "suite_id": workload_suite.get("suite_id"),
+            "config_name": workload_suite.get("config_name"),
             "title": workload_suite.get("title"),
             "description": workload_suite.get("description"),
             "config_path": workload_suite.get("config_path"),
@@ -983,6 +1560,8 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
     if workload_suite:
         lines.extend(
             [
+                "| Shape config | `%s` |"
+                % workload_suite.get("config_name"),
                 "| Workload suite | `%s` |" % workload_suite.get("suite_id"),
                 "| Workload config | `%s` |" % workload_suite.get("config_path"),
             ]
@@ -1035,15 +1614,16 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| Kernel | Style | Status | Seed (ms) | Search best (ms) | Exported best (ms) | Speedup | Rounds | Generated | Measured | NCU | Final checks | Elapsed (s) | Termination |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Kernel | Style | Status | Seed (ms) | Search best (ms) | Exported best (ms) | Speedup | Rounds | Generated | Measured | NCU | Final checks | Search (s) | Final (s) | Total (s) | Termination |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for row in payload["runs"]:
         lines.append(
             "| {kernel_title} | {style_title} | {status} | {seed} | "
             "{search_best} | {best} | {speedup} | {rounds} | {generated} | "
-            "{measured} | {ncu} | {final_checks} | {elapsed} | {termination} |".format(
+            "{measured} | {ncu} | {final_checks} | {search_elapsed} | "
+            "{final_elapsed} | {total_elapsed} | {termination} |".format(
                 kernel_title=row["kernel_title"],
                 style_title=row["style_title"],
                 status=row["status"],
@@ -1056,7 +1636,9 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
                 measured=_format_value(row.get("measured_candidates")),
                 ncu=_format_value(row.get("profile_calls")),
                 final_checks=_format_value(row.get("final_validation_calls")),
-                elapsed=_format_value(row.get("elapsed_seconds")),
+                search_elapsed=_format_value(row.get("search_elapsed_seconds")),
+                final_elapsed=_format_value(row.get("final_validation_seconds")),
+                total_elapsed=_format_value(row.get("total_elapsed_seconds")),
                 termination=row.get("termination_reason") or row.get("error") or "-",
             )
         )
@@ -1074,10 +1656,11 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             "",
             "For `fixed-time` runs, only a `time-budget` termination is a valid "
             "equal-budget result. The controller exports the best verified "
-            "incumbent at its safe stopping checkpoint. `Final checks` is zero when "
-            "the deadline is reached before a separate held-out validation stage; "
-            "in that case `Exported best` is the search-stage measurement. Rerunning the suite "
-            "reuses valid completed rows and resumes an interrupted row.",
+            "incumbent at its safe stopping checkpoint, freezes `Search (s)`, then "
+            "runs separate final validation outside the search budget. `Final (s)` "
+            "and `Total (s)` expose that additional verification cost. Rerunning the "
+            "suite reuses current completed rows, upgrades legacy fixed-time rows, "
+            "and resumes interrupted rows.",
             "",
         ]
     )

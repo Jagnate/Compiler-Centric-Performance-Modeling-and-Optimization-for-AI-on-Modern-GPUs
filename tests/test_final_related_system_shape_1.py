@@ -42,17 +42,19 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            args.output_root.parts[-2:],
-            ("final_eval", "related_system_baselines_shape_1"),
+            baseline_driver._default_output_root(
+                baseline_driver._builtin_workload_suite(args.shape_config)
+            ).parts[-2:],
+            ("final_eval", "related_system_baselines_30m_shape1"),
         )
-        self.assertEqual(args.workload_suite, shape_driver.DEFAULT_WORKLOAD_SUITE)
-        self.assertEqual(args.budget_mode, "rounds")
-        self.assertEqual(args.measurement_repeats, 2)
+        self.assertIsNone(args.output_root)
+        self.assertEqual(args.shape_config, "shape1")
+        self.assertIsNone(args.workload_suite)
+        self.assertEqual(args.budget_mode, "fixed-time")
+        self.assertEqual(args.measurement_repeats, 3)
 
     def test_every_shape_one_case_differs_from_first_suite(self) -> None:
-        suite = baseline_driver._load_workload_suite(
-            shape_driver.DEFAULT_WORKLOAD_SUITE
-        )
+        suite = baseline_driver._builtin_workload_suite("shape1")
         for kernel in baseline_driver.KERNELS:
             base_task = _read_json(kernel.task_path(REPOSITORY_ROOT))
             override = suite["workloads"][kernel.key]
@@ -72,9 +74,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             )
 
     def test_materialized_tasks_validate_and_isolate_profile_directories(self) -> None:
-        suite = baseline_driver._load_workload_suite(
-            shape_driver.DEFAULT_WORKLOAD_SUITE
-        )
+        suite = baseline_driver._builtin_workload_suite("shape1")
         treatments = baseline_driver.selected_treatments(
             only_kernels=["matmul"],
             only_styles=["native", "kernelagent"],
@@ -114,9 +114,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertEqual(base_path.read_text(encoding="utf-8"), original)
 
     def test_all_materialized_cases_pass_workload_contract_validation(self) -> None:
-        suite = baseline_driver._load_workload_suite(
-            shape_driver.DEFAULT_WORKLOAD_SUITE
-        )
+        suite = baseline_driver._builtin_workload_suite("shape1")
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary) / "shape-one"
             treatments = baseline_driver.selected_treatments(
@@ -175,9 +173,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertIn("_tasks/flash_attention/native.json", rendered)
 
     def test_shape_suite_report_records_native_and_all_configured_cases(self) -> None:
-        suite = baseline_driver._load_workload_suite(
-            shape_driver.DEFAULT_WORKLOAD_SUITE
-        )
+        suite = baseline_driver._builtin_workload_suite("shape1")
         treatments = baseline_driver.selected_treatments(include_native=True)
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
@@ -218,6 +214,9 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertIn("heldout-b2-h8-s1536-d64-causal", markdown)
             self.assertIn("Exported best (ms)", markdown)
             self.assertIn("Final checks", markdown)
+            self.assertIn("Search (s)", markdown)
+            self.assertIn("Final (s)", markdown)
+            self.assertIn("Total (s)", markdown)
 
 
 def _resolved_shapes(primary, cases):

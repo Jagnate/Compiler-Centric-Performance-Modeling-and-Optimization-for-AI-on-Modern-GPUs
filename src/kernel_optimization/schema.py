@@ -533,6 +533,9 @@ class SearchSummary:
     elapsed_seconds: float
     trust: JsonDict
     output_directory: str
+    search_elapsed_seconds: Optional[float] = None
+    final_validation_seconds: float = 0.0
+    total_elapsed_seconds: Optional[float] = None
     preflight_calls: int = 0
     resumed: bool = False
     stage_timings: JsonDict = field(default_factory=dict)

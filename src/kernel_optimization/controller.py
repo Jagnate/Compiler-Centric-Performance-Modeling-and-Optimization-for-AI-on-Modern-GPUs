@@ -251,6 +251,7 @@ class OptimizationController:
         self._time_budget_clock = time_budget_clock
         self._time_budget_started_at: Optional[float] = None
         self._prior_search_elapsed_seconds = 0.0
+        self._frozen_search_elapsed_seconds: Optional[float] = None
         self._time_budget_context: Optional[Dict[str, Any]] = None
         self.termination_reason: Optional[str] = None
         self.strategy_portfolio = StructuralStrategyPortfolio()
@@ -307,6 +308,7 @@ class OptimizationController:
     def run(self) -> SearchSummary:
         started_at = time.perf_counter()
         self._time_budget_started_at = self._time_budget_clock()
+        self._frozen_search_elapsed_seconds = None
         self._time_budget_context = None
         self.termination_reason = None
         try:
@@ -392,19 +394,16 @@ class OptimizationController:
                         else "search-stopped"
                     )
 
+            search_elapsed_seconds = self._search_elapsed_seconds()
+            self._frozen_search_elapsed_seconds = search_elapsed_seconds
             if self._search_best_id is None:
                 self._search_best_id = self.beam[0].candidate.candidate_id
             search_best = self.records[self._search_best_id]
             final_seed = seed
-            should_finalize = (
-                self.task.budget.final_validation_candidates > 0
-                and self.termination_reason != "time-budget"
-            )
-            if should_finalize and self._time_budget_exhausted(
-                completed_rounds + 1, "before-final-validation"
-            ):
-                should_finalize = False
+            should_finalize = self.task.budget.final_validation_candidates > 0
+            final_validation_seconds = 0.0
             if should_finalize:
+                final_validation_started_at = self._controller_elapsed_seconds()
                 final_best, final_seed = self._finalize_candidates(
                     seed, completed_rounds
                 )
@@ -436,6 +435,12 @@ class OptimizationController:
                 self.incumbent_recorder.record_if_changed(
                     "final-incumbent-updated"
                 )
+                final_validation_seconds = max(
+                    0.0,
+                    self._controller_elapsed_seconds()
+                    - final_validation_started_at,
+                )
+            total_elapsed_seconds = self._controller_elapsed_seconds()
             best_source_path = self.store.save_best(self.beam[0])
             summary = self._summary(
                 completed_rounds,
@@ -443,7 +448,9 @@ class OptimizationController:
                 search_best,
                 final_seed,
                 best_source_path,
-                elapsed_seconds=self._search_elapsed_seconds(),
+                elapsed_seconds=total_elapsed_seconds,
+                search_elapsed_seconds=search_elapsed_seconds,
+                final_validation_seconds=final_validation_seconds,
             )
             self.store.save_summary(summary)
             write_research_artifacts(
@@ -461,7 +468,9 @@ class OptimizationController:
                 self.progress.emit(
                     "time_budget_stopped",
                     "Search time budget reached; exported the current incumbent.",
-                    elapsed_seconds=round(self._search_elapsed_seconds(), 3),
+                    search_elapsed_seconds=round(search_elapsed_seconds, 3),
+                    final_validation_seconds=round(final_validation_seconds, 3),
+                    total_elapsed_seconds=round(total_elapsed_seconds, 3),
                     max_search_seconds=self.max_search_seconds,
                     best_candidate_id=summary.best_candidate_id,
                     best_latency_ms=summary.best_latency_ms,
@@ -515,6 +524,11 @@ class OptimizationController:
                     )
 
     def _search_elapsed_seconds(self) -> float:
+        if self._frozen_search_elapsed_seconds is not None:
+            return self._frozen_search_elapsed_seconds
+        return self._controller_elapsed_seconds()
+
+    def _controller_elapsed_seconds(self) -> float:
         if self._time_budget_started_at is None:
             return self._prior_search_elapsed_seconds
         return self._prior_search_elapsed_seconds + max(
@@ -2251,10 +2265,6 @@ class OptimizationController:
             candidates=len(unique_candidates),
         )
         for index, record in enumerate(unique_candidates, start=1):
-            if index > 1 and self._time_budget_exhausted(
-                completed_rounds + 1, "final-validation"
-            ):
-                break
             if record.final_measurement is None:
                 self.progress.emit(
                     "final_progress",
@@ -3256,6 +3266,8 @@ class OptimizationController:
         final_seed: CandidateRecord,
         best_source_path: Path,
         elapsed_seconds: float,
+        search_elapsed_seconds: float,
+        final_validation_seconds: float,
     ) -> SearchSummary:
         best = self.beam[0]
         final_enabled = self.task.budget.final_validation_candidates > 0
@@ -3305,6 +3317,9 @@ class OptimizationController:
             elapsed_seconds=elapsed_seconds,
             trust=self.trust.to_dict(),
             output_directory=str(self.store.root),
+            search_elapsed_seconds=search_elapsed_seconds,
+            final_validation_seconds=final_validation_seconds,
+            total_elapsed_seconds=elapsed_seconds,
             preflight_calls=self.preflight_calls,
             resumed=self.was_resumed,
             stage_timings=self.stage_timings,

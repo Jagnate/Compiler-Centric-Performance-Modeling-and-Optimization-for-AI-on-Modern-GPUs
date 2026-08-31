@@ -1,37 +1,25 @@
 #!/usr/bin/env python3
-"""Run native plus five related-system styles on shape family 1."""
+"""Compatibility wrapper for the unified shape-family runner."""
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 from typing import Optional, Sequence
 
 import run_final_related_system_baselines as baseline_driver
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_ROOT = (
-    REPOSITORY_ROOT
-    / "results"
-    / "final_eval"
-    / "related_system_baselines_shape_1"
-)
-DEFAULT_WORKLOAD_SUITE = REPOSITORY_ROOT / "examples" / "related_system_shape_1.json"
+DEFAULT_SHAPE_CONFIG = "shape1"
 
 
 def build_forwarded_arguments(arguments: Sequence[str]) -> list[str]:
-    defaults = [
-        "--include-native",
-        "--budget-mode",
-        "rounds",
-        "--measurement-repeats",
-        "2",
-        "--workload-suite",
-        str(DEFAULT_WORKLOAD_SUITE),
-        "--output-root",
-        str(DEFAULT_OUTPUT_ROOT),
-    ]
+    has_shape_selection = any(
+        argument in ("--shape-config", "--workload-suite")
+        or argument.startswith("--shape-config=")
+        or argument.startswith("--workload-suite=")
+        for argument in arguments
+    )
+    defaults = [] if has_shape_selection else ["--shape-config", DEFAULT_SHAPE_CONFIG]
     return defaults + list(arguments)
 
 

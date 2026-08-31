@@ -408,14 +408,14 @@ records the preset and any explicit overrides in its manifest and Markdown repor
 Run the complete 5 x 6 related-system comparison with one command:
 
 ```bash
-PYTHONPATH=src python3 examples/run_final_related_system_baselines.py
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config basic
 ```
 
 The runner executes 30 treatments sequentially on one GPU: GEMM, RMSNorm,
 Conv2D, Flash Attention, and fused Add + RMSNorm times this project's native
 full system and the five non-native styles. It uses each preset's canonical
-single-agent mode and materializes the checked-in
-`examples/related_system_basic_shapes.json` workload family. The fixed
+single-agent mode and materializes the built-in `basic` workload family. The fixed
 primary/final shapes are GEMM `1024 x 1024 x 1024`, RMSNorm and fused norm
 `4096 x 4096`, Conv2D `N16 H56 W56 C64 F128 K3`, and Flash Attention
 `B1 H8 S1024 D64`. Base task files are not modified. Results go to
@@ -438,52 +438,65 @@ own source, request, response, stdout, and attempt artifacts. The worker restart
 after 32 requests to bound retained compiler/GPU state; set
 `evaluator.persistent_process` to `false` for strict process-per-stage isolation.
 Final validation always bypasses the warmed worker and runs in a one-shot process.
-At the first safe checkpoint after the deadline, the controller exports the best
-search-stage verified incumbent and records `termination_reason=time-budget`.
-Fixed-time runs do not start a separate held-out final stage after the deadline;
-the suite report exposes this explicitly as `Final checks = 0` and labels the
-selected measurement `Exported best`. The full 30-cell
+At the first safe checkpoint after the deadline, the controller freezes the
+search result and records `termination_reason=time-budget`. It then runs held-out
+final validation outside the 1,800-second search budget and exports the best
+final-validated candidate. Reports keep `Search (s)`, `Final (s)`, and `Total (s)`
+separate, so equal-time comparisons use only the search column. The full 30-cell
 matrix therefore has a configured search budget of 15 GPU-hours plus bounded
-in-flight-call overshoot. A result that ends at the round ceiling or any other
-early condition is marked `ended-early`, not silently accepted as fair.
+in-flight-call overshoot and final-validation overhead. A result that ends at the
+round ceiling or any other early condition is marked `ended-early`, not silently
+accepted as fair.
 
 Re-running the command reuses valid completed directories and resumes the first
 partial one. Useful controls are:
 
 ```bash
 # Inspect all 30 commands without API or GPU work.
-PYTHONPATH=src python3 examples/run_final_related_system_baselines.py --dry-run
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config basic --dry-run
 
 # Debug one matrix cell before starting the full suite.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --only-kernel matmul --only-style kernelagent
+  --shape-config basic --only-kernel matmul --only-style kernelagent
 
 # Run only the five related-system proxy styles for the old 5 x 5 matrix.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --exclude-native
+  --shape-config basic --exclude-native
 
 # Reproduce the old round-budget semantics explicitly.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --budget-mode rounds
+  --shape-config basic --budget-mode rounds
 ```
 
 The default fail-fast behavior prevents one API or profiler outage from cascading
 through the matrix. Add `--continue-on-error` to collect independent failures and
 continue; the suite still exits nonzero when any cell failed.
 
-Run the second workload family, including the native full system, with:
+The same runner contains all three canonical shape configurations. Choose one
+with `--shape-config`; each has a distinct default output directory:
 
 ```bash
-PYTHONPATH=src python3 examples/run_final_related_system_shape_1.py
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config basic
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config standard
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config shape1
 ```
 
-This executes 30 treatments: five kernels times `native` plus the five proxy
-styles. The checked-in `examples/related_system_shape_1.json` changes the complete
-primary/public/held-out workload family without modifying any base task. Effective
-tasks and per-treatment NCU reports are materialized below
-`results/final_eval/related_system_baselines_shape_1/`. All cases are distinct
-from the first suite. The shape rationale and first-suite findings are documented
-in [SHAPE_1_EXPERIMENT.md](SHAPE_1_EXPERIMENT.md).
+| Config | Primary GEMM | Primary norm | Primary Conv2D | Primary attention | Default result directory |
+| --- | --- | --- | --- | --- | --- |
+| `basic` | `1024 x 1024 x 1024` | `4096 x 4096` | `N16 H56 W56 C64 F128 K3` | `B1 H8 S1024 D64` | `related_system_baselines_30m_basic` |
+| `standard` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_30m_standard` |
+| `shape1` | `4096 x 1024 x 4096` | `16384 x 2048` | `N32 H28 W28 C128 F256 K3` | `B1 H32 S2048 D64 causal` | `related_system_baselines_30m_shape1` |
+
+Norm shapes apply to both RMSNorm and fused Add + RMSNorm. `standard` and
+`shape1` also include public search cases and two held-out final cases per kernel;
+the generated suite report records every resolved case. Base task files remain
+unchanged. `examples/run_final_related_system_shape_1.py` remains as a compatibility
+wrapper for `--shape-config shape1`, and `--workload-suite PATH` remains available
+for custom JSON suites.
 
 ### Cost and graph bounds
 
@@ -505,13 +518,14 @@ Add a soft controller wall-clock limit when experiments must stop automatically:
 ```
 
 The default is `0`, which disables the limit and preserves previous behavior.
-The timer includes seed evaluation, generation, modeling, correctness, timing,
-profiling, repairs, and final validation after the controller starts. It does not
-kill an API, compiler, CUDA Event, or NCU call in flight; that atomic operation
-finishes, then the controller writes a resumable checkpoint and exports the best
-correctness-verified incumbent available at that point. Consequently, wall time
-can exceed the limit by one in-flight operation. `summary.json` and the Markdown
-report record the limit, termination reason, graph upper bound, and whether the
+The search timer includes seed evaluation, generation, modeling, correctness,
+timing, profiling, and repairs after the controller starts. It does not kill an
+API, compiler, CUDA Event, or NCU call in flight; that atomic operation finishes,
+then the controller writes a resumable search checkpoint. Consequently, search
+time can exceed the limit by one in-flight operation. The timer is then frozen and
+held-out final validation runs separately, outside the search budget. `summary.json`
+and the Markdown report record search elapsed time, final-validation time, total
+controller time, the termination reason, graph upper bound, and whether the search
 budget was exhausted.
 
 `--evaluation-policy tilesight` preserves the adaptive-fidelity pipeline:

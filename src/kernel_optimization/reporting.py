@@ -265,6 +265,12 @@ def _experiment_markdown(
         "| Termination reason | `%s` |" % summary.termination_reason,
         "| Time budget exhausted | %s |"
         % ("yes" if summary.time_budget_exhausted else "no"),
+        "| Search elapsed | %s s |"
+        % _format(summary.search_elapsed_seconds),
+        "| Final validation elapsed | %s s |"
+        % _format(summary.final_validation_seconds),
+        "| Total controller elapsed | %s s |"
+        % _format(summary.total_elapsed_seconds),
         "| Search-best latency | %s ms |"
         % _format(summary.search_best_latency_ms),
         "| Generated candidates | %d |" % summary.generated_candidates,
@@ -334,7 +340,7 @@ def _experiment_markdown(
         lines.append("No explicit strategy plans were recorded.")
     if summary.final_validation_calls > 0:
         interpretation = (
-            "The exported kernel passed process-isolated final validation. Model "
+            "The exported kernel passed separate final validation. Model "
             "predictions are used only for allocation of the hardware budget; CUDA "
             "Event measurements rank the search beam, and held-out final measurements "
             "choose the export."

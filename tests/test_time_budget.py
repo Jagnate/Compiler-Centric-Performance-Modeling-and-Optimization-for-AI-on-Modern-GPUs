@@ -108,6 +108,45 @@ class SearchTimeBudgetTests(unittest.TestCase):
         self.assertIn("No separate held-out final validation", report)
         self.assertNotIn("passed fresh final validation", report)
 
+    def test_final_validation_runs_outside_the_search_budget(self) -> None:
+        task = _budget_task("post-budget-final", final_validation_candidates=1)
+        clock = _Clock()
+        backend = _DelayedFinalBackend(clock)
+        with tempfile.TemporaryDirectory(prefix="post-budget-final-") as directory:
+            root = Path(directory)
+            controller = OptimizationController(
+                task=task,
+                source_code=SOURCE,
+                source_name="kernel.py",
+                generator=_SlowGenerator(clock, delay_seconds=0),
+                backend=backend,
+                store=ArtifactStore(root),
+                structural_search_policy="off",
+                strategy_allocation_policy="unconstrained",
+                incumbent_snapshot_interval_seconds=0,
+                max_search_seconds=5,
+                time_budget_clock=clock,
+            )
+
+            summary = controller.run()
+            state = ArtifactStore(root).load_state()
+            report = (root / "experiment_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(summary.termination_reason, "time-budget")
+        self.assertEqual(summary.search_elapsed_seconds, 6.0)
+        self.assertEqual(summary.final_validation_seconds, 8.0)
+        self.assertEqual(summary.total_elapsed_seconds, 14.0)
+        self.assertEqual(summary.elapsed_seconds, 14.0)
+        self.assertEqual(summary.final_validation_calls, 2)
+        self.assertEqual(summary.final_validation_passes, 2)
+        self.assertEqual(backend.finalize_calls, 2)
+        self.assertEqual(summary.best_latency_ms, 1.2)
+        self.assertEqual(state["search_elapsed_seconds"], 6.0)
+        self.assertIn("Search elapsed | 6 s", report)
+        self.assertIn("Final validation elapsed | 8 s", report)
+        self.assertIn("Total controller elapsed | 14 s", report)
+        self.assertIn("passed separate final validation", report)
+
     def test_fixed_time_mode_continues_after_an_empty_candidate_round(self) -> None:
         task = _budget_task("fixed-time-empty-round")
         clock = _Clock()
@@ -264,6 +303,19 @@ class _DelayedMeasurementBackend(_Backend):
         return Measurement(correct=True, latency_ms=latency, samples_ms=[latency])
 
 
+class _DelayedFinalBackend(_DelayedMeasurementBackend):
+    def __init__(self, clock: _Clock) -> None:
+        super().__init__(clock)
+        self.finalize_calls = 0
+
+    def finalize(self, task, candidate):
+        del task
+        self.finalize_calls += 1
+        self.clock.advance(4.0)
+        latency = 1.2 if "TILE = 2" in candidate.source_code else 3.0
+        return Measurement(correct=True, latency_ms=latency, samples_ms=[latency])
+
+
 def _minimal_task() -> TaskSpec:
     return TaskSpec(
         task_id="time-budget-validation",
@@ -273,7 +325,9 @@ def _minimal_task() -> TaskSpec:
     )
 
 
-def _budget_task(task_id: str) -> TaskSpec:
+def _budget_task(
+    task_id: str, final_validation_candidates: int = 0
+) -> TaskSpec:
     return TaskSpec(
         task_id=task_id,
         description="Exercise a soft controller deadline.",
@@ -286,6 +340,7 @@ def _budget_task(task_id: str) -> TaskSpec:
             min_promotions_per_round=1,
             max_promotions_per_round=1,
             max_repairs_per_round=0,
+            final_validation_candidates=final_validation_candidates,
         ),
     )
 

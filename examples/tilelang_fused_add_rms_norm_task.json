@@ -65,7 +65,7 @@
       "plugin": "examples/workloads/fused_add_rms_norm.py",
       "architecture_profile": "ncu",
       "require_target_match": true,
-      "model_collect_ptxas": true,
+      "model_collect_ptxas": false,
       "measurement_repeats": 2,
       "final_repeats": 5,
       "search_cases": [

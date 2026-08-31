@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 from pathlib import Path
@@ -249,6 +250,8 @@ def model_response(
         "shared_memory_per_block": float(metrics.smem_footprint),
     }
     ptxas = program.metadata.get("model_enrichment", {}).get("ptxas", {})
+    resource_provenance = dict(getattr(model_input, "provenance", {}) or {})
+    register_source = str(resource_provenance.get("registers", "unknown"))
     response_metrics = {
         "ddr_util": float(metrics.ddr_util),
         "l2_hit_rate": float(metrics.l2_hit_rate),
@@ -282,8 +285,14 @@ def model_response(
             else None
         ),
         "compiled_identity": compiled_identity,
-        "resource_provenance": dict(model_input.provenance),
+        "resource_provenance": resource_provenance,
         "ptxas": ptxas,
+        "model_collect_ptxas": collect_ptxas,
+        "register_source": register_source,
+        "resource_fidelity": (
+            "compiled" if register_source in {"compiled-ptxas", "external-ptxas"}
+            else "fast-screening"
+        ),
         "captured_passes": {
             "before": sorted(getattr(snapshots, "before", {})),
             "after": sorted(getattr(snapshots, "after", {})),
@@ -293,7 +302,12 @@ def model_response(
         "valid": True,
         "predicted_latency_ms": float(metrics.latency) * 1000.0,
         "bottleneck": infer_model_bottleneck(metrics),
-        "confidence": "high" if not diagnostics else "medium",
+        "confidence": (
+            "high"
+            if not diagnostics
+            and register_source in {"compiled-ptxas", "external-ptxas"}
+            else "medium"
+        ),
         "metrics": _json_safe(response_metrics),
         "diagnostics": diagnostics,
     }
@@ -324,10 +338,19 @@ def measure_response(
 
         case_results = []
         samples: List[float] = []
+        supports_benchmark_repeats = _accepts_keyword_argument(
+            validation_runner, "benchmark_repeats"
+        )
         for case in cases:
             identifier = str(case["case_id"])
             program = build_program(request, candidate_module, plugin, case)
             reference = plugin.reference_program(dict(case), request["task"])
+            validation_options = _validation_options(case, configuration)
+            if (
+                identifier == str(primary["case_id"])
+                and supports_benchmark_repeats
+            ):
+                validation_options["benchmark_repeats"] = repeats
             first = validation_runner(
                 program,
                 target,
@@ -335,7 +358,7 @@ def measure_response(
                 reference_program=reference,
                 check_correctness=True,
                 benchmark=identifier == str(primary["case_id"]),
-                **_validation_options(case, configuration),
+                **validation_options,
             )
             if first.correctness != "passed":
                 raise RuntimeError(
@@ -344,8 +367,20 @@ def measure_response(
             if identifier == str(primary["case_id"]):
                 if first.benchmark_latency_ms is None:
                     raise RuntimeError("primary case did not return benchmark latency")
-                samples.append(float(first.benchmark_latency_ms))
-                for _ in range(1, repeats):
+                batched_samples = list(
+                    getattr(first, "benchmark_samples_ms", None) or []
+                )
+                if batched_samples:
+                    if len(batched_samples) != repeats:
+                        raise RuntimeError(
+                            "primary benchmark returned %d samples; expected %d"
+                            % (len(batched_samples), repeats)
+                        )
+                    samples.extend(float(item) for item in batched_samples)
+                else:
+                    samples.append(float(first.benchmark_latency_ms))
+                remaining_repeats = 0 if batched_samples else repeats - 1
+                for _ in range(remaining_repeats):
                     repeat_program = build_program(
                         request, candidate_module, plugin, case
                     )
@@ -414,7 +449,7 @@ def profile_response(request: Mapping[str, Any]) -> Dict[str, Any]:
             _target,
             _environment,
             _primary,
-        ) = model_candidate(request, collect_ptxas=True)
+        ) = model_candidate(request, collect_ptxas=False)
         report_path, csv_path = run_ncu(request)
         from tilesight.tir_interface.validation import load_ncu_metrics
 
@@ -698,6 +733,21 @@ def _json_safe(value: Any) -> Any:
     if callable(converter):
         return _json_safe(converter())
     return str(value)
+
+
+def _accepts_keyword_argument(function: Callable[..., Any], name: str) -> bool:
+    """Return whether a validation runner supports one optional keyword."""
+
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def main() -> int:

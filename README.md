@@ -426,6 +426,12 @@ Each treatment uses exactly the same fixed-time protocol: one agent,
 `measurement_repeats=3`, a 1,800-second controller budget, and a 128-round safety
 ceiling that is intentionally unreachable during a normal 30-minute hosted-model
 run. `--search-until-time-budget` keeps searching after an empty candidate round.
+The native system uses TIR-estimated registers during broad TileSight screening,
+so it does not invoke PTXAS for every generated candidate. Exact register and
+hardware evidence is refreshed by seed and milestone NCU profiles. Each promoted
+candidate is compiled once and all CUDA Event timing repeats reuse that compiled
+kernel; `measurement_repeats=3` therefore means three measurements, not three
+compilations.
 At the first safe checkpoint after the deadline, the controller exports the best
 verified incumbent and records `termination_reason=time-budget`. The full 30-cell
 matrix therefore has a configured search budget of 15 GPU-hours plus bounded

@@ -66,7 +66,7 @@ class GenericEvaluatorTests(unittest.TestCase):
             )
             arguments = set(task.workload["factory_arguments"])
             self.assertTrue(arguments.isdisjoint(schedule_arguments))
-            self.assertTrue(task.evaluator["runtime"]["model_collect_ptxas"])
+            self.assertFalse(task.evaluator["runtime"]["model_collect_ptxas"])
 
     def test_held_out_cases_are_not_in_generation_prompt(self) -> None:
         task = TaskSpec.from_json_file(
@@ -130,9 +130,15 @@ class GenericEvaluatorTests(unittest.TestCase):
             source_path = Path(directory) / "candidate.py"
             source_path.write_text(source, encoding="utf-8")
             request = _runtime_request(source_path, source)
+            model_options = {}
+
+            def modeler(program, arch, **kwargs):
+                model_options.update(kwargs)
+                return _fake_modeler(program, arch, **kwargs)
+
             response = evaluator.model_response(
                 request,
-                modeler=_fake_modeler,
+                modeler=modeler,
                 environment_resolver=_fake_environment,
             )
 
@@ -141,11 +147,40 @@ class GenericEvaluatorTests(unittest.TestCase):
         self.assertEqual(response["bottleneck"], "tensor-core")
         self.assertEqual(response["metrics"]["registers_per_thread"], 72.0)
         self.assertEqual(response["metrics"]["threads_per_block"], 128)
+        self.assertFalse(model_options["collect_ptxas"])
+        self.assertFalse(response["metrics"]["model_collect_ptxas"])
+        self.assertEqual(response["metrics"]["register_source"], "tir-estimate")
+        self.assertEqual(response["metrics"]["resource_fidelity"], "fast-screening")
+        self.assertEqual(response["confidence"], "medium")
         self.assertEqual(
             response["metrics"]["compiled_source_sha256"],
             hashlib.sha256(b"compiled cuda source").hexdigest(),
         )
         self.assertIsNotNone(response["metrics"]["compiled_identity_sha256"])
+
+    def test_measurement_uses_one_compile_for_all_benchmark_repeats(self) -> None:
+        source = (
+            "def make_kernel(m=1, n=1, k=1):\n"
+            "    return {'m': m, 'n': n, 'k': k}\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="generic-evaluator-") as directory:
+            source_path = Path(directory) / "candidate.py"
+            source_path.write_text(source, encoding="utf-8")
+            request = _runtime_request(source_path, source, measurement_repeats=3)
+            runner = _BatchedValidationRunner([1.2, 1.0, 1.1])
+            response = evaluator.measure_response(
+                request,
+                final=False,
+                validation_runner=runner,
+                environment_resolver=_fake_environment,
+            )
+
+        self.assertTrue(response["correct"])
+        self.assertEqual(response["samples_ms"], [1.2, 1.0, 1.1])
+        self.assertEqual(response["latency_ms"], 1.1)
+        benchmark_calls = [item for item in runner.calls if item["benchmark"]]
+        self.assertEqual(len(benchmark_calls), 1)
+        self.assertEqual(benchmark_calls[0]["benchmark_repeats"], 3)
 
     def test_final_stage_adds_held_out_case_and_fresh_statistics(self) -> None:
         source = (
@@ -224,12 +259,14 @@ class FreshFinalGateTests(unittest.TestCase):
 class _FakeRuntimeResult:
     correctness: str
     benchmark_latency_ms: float | None
+    benchmark_samples_ms: list[float] | None = None
     kernel_name: str = "fake"
 
     def to_dict(self):
         return {
             "correctness": self.correctness,
             "benchmark_latency_ms": self.benchmark_latency_ms,
+            "benchmark_samples_ms": self.benchmark_samples_ms or [],
             "kernel_name": self.kernel_name,
         }
 
@@ -246,6 +283,25 @@ class _FakeValidationRunner:
         return _FakeRuntimeResult(
             correctness="passed" if kwargs["check_correctness"] else "not-run",
             benchmark_latency_ms=latency,
+        )
+
+
+class _BatchedValidationRunner:
+    def __init__(self, samples):
+        self.samples = [float(item) for item in samples]
+        self.calls = []
+
+    def __call__(self, program, target, **kwargs):
+        del program, target
+        self.calls.append(dict(kwargs))
+        if not kwargs["benchmark"]:
+            return _FakeRuntimeResult("passed", None)
+        repeats = int(kwargs.get("benchmark_repeats", 1))
+        samples = self.samples[:repeats]
+        return _FakeRuntimeResult(
+            correctness="passed" if kwargs["check_correctness"] else "not-run",
+            benchmark_latency_ms=sorted(samples)[len(samples) // 2],
+            benchmark_samples_ms=samples,
         )
 
 

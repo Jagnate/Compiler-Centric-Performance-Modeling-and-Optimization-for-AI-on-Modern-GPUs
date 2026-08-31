@@ -45,36 +45,34 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             baseline_driver._default_output_root(
                 baseline_driver._builtin_workload_suite(args.shape_config)
             ).parts[-2:],
-            ("final_eval", "related_system_baselines_30m_shape1"),
+            ("final_eval", "related_system_baselines_30m_special"),
         )
         self.assertIsNone(args.output_root)
-        self.assertEqual(args.shape_config, "shape1")
+        self.assertEqual(args.shape_config, "special")
         self.assertIsNone(args.workload_suite)
         self.assertEqual(args.budget_mode, "fixed-time")
         self.assertEqual(args.measurement_repeats, 3)
 
-    def test_every_shape_one_case_differs_from_first_suite(self) -> None:
-        suite = baseline_driver._builtin_workload_suite("shape1")
+    def test_special_primary_shape_differs_from_basic_and_large(self) -> None:
+        configs = [
+            baseline_driver._builtin_workload_suite(name)
+            for name in ("basic", "large", "special")
+        ]
         for kernel in baseline_driver.KERNELS:
-            base_task = _read_json(kernel.task_path(REPOSITORY_ROOT))
-            override = suite["workloads"][kernel.key]
-            original_shapes = _resolved_shapes(
-                base_task["workload"]["factory_arguments"],
-                list(base_task["evaluator"]["runtime"]["search_cases"])
-                + list(base_task["evaluator"]["runtime"]["final_cases"]),
-            )
-            new_shapes = _resolved_shapes(
-                override["factory_arguments"],
-                list(override["search_cases"]) + list(override["final_cases"]),
-            )
-            self.assertTrue(new_shapes)
-            self.assertTrue(
-                original_shapes.isdisjoint(new_shapes),
-                "%s repeats a first-suite shape" % kernel.key,
+            shapes = {
+                json.dumps(
+                    config["workloads"][kernel.key]["factory_arguments"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for config in configs
+            }
+            self.assertEqual(
+                len(shapes), 3, "%s repeats a configured shape" % kernel.key
             )
 
     def test_materialized_tasks_validate_and_isolate_profile_directories(self) -> None:
-        suite = baseline_driver._builtin_workload_suite("shape1")
+        suite = baseline_driver._builtin_workload_suite("special")
         treatments = baseline_driver.selected_treatments(
             only_kernels=["matmul"],
             only_styles=["native", "kernelagent"],
@@ -114,7 +112,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertEqual(base_path.read_text(encoding="utf-8"), original)
 
     def test_all_materialized_cases_pass_workload_contract_validation(self) -> None:
-        suite = baseline_driver._builtin_workload_suite("shape1")
+        suite = baseline_driver._builtin_workload_suite("special")
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary) / "shape-one"
             treatments = baseline_driver.selected_treatments(
@@ -173,7 +171,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertIn("_tasks/flash_attention/native.json", rendered)
 
     def test_shape_suite_report_records_native_and_all_configured_cases(self) -> None:
-        suite = baseline_driver._builtin_workload_suite("shape1")
+        suite = baseline_driver._builtin_workload_suite("special")
         treatments = baseline_driver.selected_treatments(include_native=True)
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
@@ -208,24 +206,15 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             self.assertEqual(report["styles"][0], "native")
             self.assertEqual(
                 report["workload_suite"]["suite_id"],
-                "related_system_shape_1",
+                "related_system_special_shapes",
             )
             self.assertIn("Configured Shape Family", markdown)
-            self.assertIn("final-b1-h32-s2048-d64-causal", markdown)
+            self.assertIn("final-b1-h16-s3072-d64-causal", markdown)
             self.assertIn("Exported best (ms)", markdown)
             self.assertIn("Final checks", markdown)
             self.assertIn("Search (s)", markdown)
             self.assertIn("Final (s)", markdown)
             self.assertIn("Total (s)", markdown)
-
-
-def _resolved_shapes(primary, cases):
-    shapes = set()
-    for case in cases:
-        arguments = dict(primary)
-        arguments.update(dict(case.get("factory_arguments") or {}))
-        shapes.add(json.dumps(arguments, sort_keys=True, separators=(",", ":")))
-    return shapes
 
 
 def _read_json(path: Path):

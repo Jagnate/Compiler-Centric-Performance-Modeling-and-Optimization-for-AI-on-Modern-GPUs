@@ -416,10 +416,10 @@ The runner executes 30 treatments sequentially on one GPU: GEMM, RMSNorm,
 Conv2D, Flash Attention, and fused Add + RMSNorm times this project's native
 full system and the five non-native styles. It uses each preset's canonical
 single-agent mode and materializes the built-in `basic` workload family. The fixed
-primary/final shapes are GEMM `1024 x 1024 x 1024`, RMSNorm and fused norm
-`4096 x 4096`, Conv2D `N16 H56 W56 C64 F128 K3`, and Flash Attention
-`B1 H8 S1024 D64`. Base task files are not modified. Results go to
-`results/final_eval/related_system_baselines_30m_basic/<kernel>/<style>/`; aggregate
+primary/final shapes are GEMM `2048 x 2048 x 2048`, RMSNorm and fused norm
+`8192 x 4096`, Conv2D `N32 H56 W56 C64 F128 K3`, and Flash Attention
+`B1 H32 S1024 D64`. Base task files are not modified. Results go to
+`results/final_eval/related_system_baselines_30m_basic_2048/<kernel>/<style>/`; aggregate
 `suite_summary.json` and `suite_summary.md` files are updated after every run.
 
 Each treatment uses exactly the same fixed-time protocol: one agent,
@@ -480,23 +480,23 @@ with `--shape-config`; each has a distinct default output directory:
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
   --shape-config basic
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --shape-config standard
+  --shape-config large
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
-  --shape-config shape1
+  --shape-config special
 ```
 
 | Config | Primary GEMM | Primary norm | Primary Conv2D | Primary attention | Default result directory |
 | --- | --- | --- | --- | --- | --- |
-| `basic` | `1024 x 1024 x 1024` | `4096 x 4096` | `N16 H56 W56 C64 F128 K3` | `B1 H8 S1024 D64` | `related_system_baselines_30m_basic` |
-| `standard` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_30m_standard` |
-| `shape1` | `4096 x 1024 x 4096` | `16384 x 2048` | `N32 H28 W28 C128 F256 K3` | `B1 H32 S2048 D64 causal` | `related_system_baselines_30m_shape1` |
+| `basic` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_30m_basic_2048` |
+| `large` | `4096 x 4096 x 4096` | `16384 x 4096` | `N64 H56 W56 C64 F128 K3` | `B1 H32 S2048 D64` | `related_system_baselines_30m_large` |
+| `special` | `4096 x 1024 x 4096` | `4096 x 8192` | `N32 H28 W28 C128 F256 K3` | `B1 H16 S3072 D64 causal` | `related_system_baselines_30m_special` |
 
 Norm shapes apply to both RMSNorm and fused Add + RMSNorm. Every configuration
 contains exactly one search case and one same-shape final case. The final case
 reruns correctness and robust timing in a fresh process; it does not introduce a
 second input shape. Base task files remain unchanged.
 `examples/run_final_related_system_shape_1.py` remains as a compatibility wrapper
-for `--shape-config shape1`, and `--workload-suite PATH` remains available for
+for `--shape-config special`, and `--workload-suite PATH` remains available for
 custom JSON suites.
 
 ### Cost and graph bounds

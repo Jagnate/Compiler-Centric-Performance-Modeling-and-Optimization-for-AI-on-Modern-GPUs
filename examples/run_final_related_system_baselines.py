@@ -86,105 +86,17 @@ KERNELS: Tuple[KernelWorkload, ...] = (
 # --workload-suite, but published runs should use one of these named snapshots.
 SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
     "basic": {
-        "suite_id": "related_system_basic_shapes",
-        "title": "Related-System Baselines: Basic Fixed Shapes",
+        "suite_id": "related_system_basic_2048_shapes",
+        "title": "Related-System Baselines: Basic 2048-Class Shapes",
         "description": (
-            "One representative RTX 3090 shape per kernel. Search and final "
-            "validation use the same shape."
+            "One stable RTX 3090 shape per kernel, anchored by 2048 square "
+            "GEMM. Search and final validation use the same shape."
         ),
-        "output_directory": "related_system_baselines_30m_basic",
+        "output_directory": "related_system_baselines_30m_basic_2048",
         "workloads": {
             "matmul": {
-                "task_id": "tilelang_matmul_m1024_n1024_k1024_rtx3090_basic",
-                "rationale": "Square 1024 GEMM for the fixed-time comparison.",
-                "factory_arguments": {"m": 1024, "n": 1024, "k": 1024},
-                "search_cases": [
-                    {"case_id": "primary-m1024-n1024-k1024"}
-                ],
-                "final_cases": [
-                    {"case_id": "final-m1024-n1024-k1024"}
-                ],
-            },
-            "rms_norm": {
-                "task_id": "tilelang_rms_norm_r4096_h4096_rtx3090_basic",
-                "rationale": "Standard 4096-wide normalization with 4096 rows.",
-                "factory_arguments": {
-                    "rows": 4096,
-                    "hidden_size": 4096,
-                    "epsilon": 1e-6,
-                },
-                "search_cases": [{"case_id": "primary-r4096-h4096"}],
-                "final_cases": [{"case_id": "final-r4096-h4096"}],
-            },
-            "conv2d": {
-                "task_id": (
-                    "tilelang_conv2d_n16_h56_w56_c64_f128_k3_rtx3090_basic"
-                ),
-                "rationale": "Moderate-batch ResNet-like 3x3 NHWC convolution.",
-                "factory_arguments": {
-                    "batch": 16,
-                    "in_height": 56,
-                    "in_width": 56,
-                    "in_channels": 64,
-                    "out_channels": 128,
-                    "kernel_size": 3,
-                    "stride": 1,
-                    "dilation": 1,
-                    "padding": 1,
-                },
-                "search_cases": [
-                    {"case_id": "primary-n16-h56-w56-c64-f128-k3-s1"}
-                ],
-                "final_cases": [
-                    {"case_id": "final-n16-h56-w56-c64-f128-k3-s1"}
-                ],
-            },
-            "flash_attention": {
-                "task_id": (
-                    "tilelang_flash_attention_b1_h8_s1024_d64_rtx3090_basic"
-                ),
-                "rationale": "Basic B1 H8 S1024 D64 non-causal attention.",
-                "factory_arguments": {
-                    "batch": 1,
-                    "heads": 8,
-                    "seq_len": 1024,
-                    "dim": 64,
-                    "is_causal": False,
-                },
-                "search_cases": [
-                    {"case_id": "primary-b1-h8-s1024-d64"}
-                ],
-                "final_cases": [
-                    {"case_id": "final-b1-h8-s1024-d64"}
-                ],
-            },
-            "fused_add_rms_norm": {
-                "task_id": (
-                    "tilelang_fused_add_rms_norm_r4096_h4096_rtx3090_basic"
-                ),
-                "rationale": "Fused residual-add normalization at 4096 by 4096.",
-                "factory_arguments": {
-                    "rows": 4096,
-                    "hidden_size": 4096,
-                    "epsilon": 1e-6,
-                },
-                "search_cases": [{"case_id": "primary-r4096-h4096"}],
-                "final_cases": [{"case_id": "final-r4096-h4096"}],
-            },
-        },
-    },
-    "standard": {
-        "suite_id": "related_system_standard_shapes",
-        "title": "Related-System Baselines: Standard Single Shapes",
-        "description": (
-            "One canonical primary shape per TileLang task. Search and final "
-            "validation use the same shape."
-        ),
-        "output_directory": "related_system_baselines_30m_standard",
-        "workloads": {
-            "matmul": {
-                "task_id": "tilelang_matmul_2048_rtx3090_standard",
-                "rationale": "Canonical 2048 square GEMM.",
+                "task_id": "tilelang_matmul_m2048_n2048_k2048_rtx3090_basic",
+                "rationale": "Square 2048 GEMM with stable sub-millisecond timing.",
                 "factory_arguments": {"m": 2048, "n": 2048, "k": 2048},
                 "search_cases": [
                     {"case_id": "primary-m2048-n2048-k2048"}
@@ -194,25 +106,21 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                 ],
             },
             "rms_norm": {
-                "task_id": "tilelang_rms_norm_r8192_h4096_rtx3090_standard",
-                "rationale": "Canonical weighted RMSNorm workload.",
+                "task_id": "tilelang_rms_norm_r8192_h4096_rtx3090_basic",
+                "rationale": "Observed optimizable 4096-wide normalization workload.",
                 "factory_arguments": {
                     "rows": 8192,
                     "hidden_size": 4096,
                     "epsilon": 1e-6,
                 },
-                "search_cases": [
-                    {"case_id": "primary-r8192-h4096"}
-                ],
-                "final_cases": [
-                    {"case_id": "final-r8192-h4096"}
-                ],
+                "search_cases": [{"case_id": "primary-r8192-h4096"}],
+                "final_cases": [{"case_id": "final-r8192-h4096"}],
             },
             "conv2d": {
                 "task_id": (
-                    "tilelang_conv2d_n32_h56_w56_c64_f128_k3_rtx3090_standard"
+                    "tilelang_conv2d_n32_h56_w56_c64_f128_k3_rtx3090_basic"
                 ),
-                "rationale": "Canonical spatial 3x3 Conv2D workload.",
+                "rationale": "Observed optimizable ResNet-like 3x3 convolution.",
                 "factory_arguments": {
                     "batch": 32,
                     "in_height": 56,
@@ -233,9 +141,9 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             },
             "flash_attention": {
                 "task_id": (
-                    "tilelang_flash_attention_b1_h32_s1024_d64_rtx3090_standard"
+                    "tilelang_flash_attention_b1_h32_s1024_d64_rtx3090_basic"
                 ),
-                "rationale": "Canonical H32 S1024 non-causal attention.",
+                "rationale": "Standard H32 S1024 non-causal attention.",
                 "factory_arguments": {
                     "batch": 1,
                     "heads": 32,
@@ -252,35 +160,127 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             },
             "fused_add_rms_norm": {
                 "task_id": (
-                    "tilelang_fused_add_rms_norm_r8192_h4096_rtx3090_standard"
+                    "tilelang_fused_add_rms_norm_r8192_h4096_rtx3090_basic"
                 ),
-                "rationale": "Canonical fused residual-add RMSNorm workload.",
+                "rationale": "Observed optimizable fused residual-add normalization.",
                 "factory_arguments": {
                     "rows": 8192,
                     "hidden_size": 4096,
                     "epsilon": 1e-6,
                 },
+                "search_cases": [{"case_id": "primary-r8192-h4096"}],
+                "final_cases": [{"case_id": "final-r8192-h4096"}],
+            },
+        },
+    },
+    "large": {
+        "suite_id": "related_system_large_shapes",
+        "title": "Related-System Baselines: Large Stable Shapes",
+        "description": (
+            "Larger single-shape workloads for stable RTX 3090 timing. Search "
+            "and final validation use the same shape."
+        ),
+        "output_directory": "related_system_baselines_30m_large",
+        "workloads": {
+            "matmul": {
+                "task_id": "tilelang_matmul_4096_rtx3090_large",
+                "rationale": "Square 4096 GEMM with eight times the 2048 FLOPs.",
+                "factory_arguments": {"m": 4096, "n": 4096, "k": 4096},
                 "search_cases": [
-                    {"case_id": "primary-r8192-h4096"}
+                    {"case_id": "primary-m4096-n4096-k4096"}
                 ],
                 "final_cases": [
-                    {"case_id": "final-r8192-h4096"}
+                    {"case_id": "final-m4096-n4096-k4096"}
+                ],
+            },
+            "rms_norm": {
+                "task_id": "tilelang_rms_norm_r16384_h4096_rtx3090_large",
+                "rationale": "Double-row 4096-wide normalization for stable timing.",
+                "factory_arguments": {
+                    "rows": 16384,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r16384-h4096"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-r16384-h4096"}
+                ],
+            },
+            "conv2d": {
+                "task_id": (
+                    "tilelang_conv2d_n64_h56_w56_c64_f128_k3_rtx3090_large"
+                ),
+                "rationale": "Double-batch spatial 3x3 Conv2D workload.",
+                "factory_arguments": {
+                    "batch": 64,
+                    "in_height": 56,
+                    "in_width": 56,
+                    "in_channels": 64,
+                    "out_channels": 128,
+                    "kernel_size": 3,
+                    "stride": 1,
+                    "dilation": 1,
+                    "padding": 1,
+                },
+                "search_cases": [
+                    {"case_id": "primary-n64-h56-w56-c64-f128-k3-s1"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-n64-h56-w56-c64-f128-k3-s1"}
+                ],
+            },
+            "flash_attention": {
+                "task_id": (
+                    "tilelang_flash_attention_b1_h32_s2048_d64_rtx3090_large"
+                ),
+                "rationale": "Longer non-causal attention with four times the pairs.",
+                "factory_arguments": {
+                    "batch": 1,
+                    "heads": 32,
+                    "seq_len": 2048,
+                    "dim": 64,
+                    "is_causal": False,
+                },
+                "search_cases": [
+                    {"case_id": "primary-b1-h32-s2048-d64"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-b1-h32-s2048-d64"}
+                ],
+            },
+            "fused_add_rms_norm": {
+                "task_id": (
+                    "tilelang_fused_add_rms_norm_r16384_h4096_rtx3090_large"
+                ),
+                "rationale": "Double-row fused residual-add RMSNorm workload.",
+                "factory_arguments": {
+                    "rows": 16384,
+                    "hidden_size": 4096,
+                    "epsilon": 1e-6,
+                },
+                "search_cases": [
+                    {"case_id": "primary-r16384-h4096"}
+                ],
+                "final_cases": [
+                    {"case_id": "final-r16384-h4096"}
                 ],
             },
         },
     },
-    "shape1": {
-        "suite_id": "related_system_shape_1",
-        "title": "Related-System Baselines: Shape Family 1",
+    "special": {
+        "suite_id": "related_system_special_shapes",
+        "title": "Related-System Baselines: Special Schedule-Sensitive Shapes",
         "description": (
-            "Rectangular GEMM, narrower normalization, channel-heavy Conv2D, "
-            "and longer causal attention. Search and final validation use the "
-            "same shape."
+            "Rectangular GEMM, wider normalization, channel-heavy Conv2D, and "
+            "longer causal attention. Search and final validation use the same "
+            "shape."
         ),
-        "output_directory": "related_system_baselines_30m_shape1",
+        "output_directory": "related_system_baselines_30m_special",
         "workloads": {
             "matmul": {
-                "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_shape1",
+                "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_special",
                 "rationale": "Tall rectangular GEMM with a different aspect ratio.",
                 "factory_arguments": {"m": 4096, "n": 1024, "k": 4096},
                 "search_cases": [
@@ -291,23 +291,23 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                 ],
             },
             "rms_norm": {
-                "task_id": "tilelang_rms_norm_r16384_h2048_rtx3090_shape1",
-                "rationale": "Constant element count with narrower reduction width.",
+                "task_id": "tilelang_rms_norm_r4096_h8192_rtx3090_special",
+                "rationale": "Wider reduction makes block and thread choices visible.",
                 "factory_arguments": {
-                    "rows": 16384,
-                    "hidden_size": 2048,
+                    "rows": 4096,
+                    "hidden_size": 8192,
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r16384-h2048"}
+                    {"case_id": "primary-r4096-h8192"}
                 ],
                 "final_cases": [
-                    {"case_id": "final-r16384-h2048"}
+                    {"case_id": "final-r4096-h8192"}
                 ],
             },
             "conv2d": {
                 "task_id": (
-                    "tilelang_conv2d_n32_h28_w28_c128_f256_k3_rtx3090_shape1"
+                    "tilelang_conv2d_n32_h28_w28_c128_f256_k3_rtx3090_special"
                 ),
                 "rationale": "Later-stage channel-heavy 3x3 convolution.",
                 "factory_arguments": {
@@ -330,38 +330,38 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             },
             "flash_attention": {
                 "task_id": (
-                    "tilelang_flash_attention_b1_h32_s2048_d64_causal_rtx3090_shape1"
+                    "tilelang_flash_attention_b1_h16_s3072_d64_causal_rtx3090_special"
                 ),
-                "rationale": "Longer causal attention workload.",
+                "rationale": "Long causal sequence stresses tiling and pipeline depth.",
                 "factory_arguments": {
                     "batch": 1,
-                    "heads": 32,
-                    "seq_len": 2048,
+                    "heads": 16,
+                    "seq_len": 3072,
                     "dim": 64,
                     "is_causal": True,
                 },
                 "search_cases": [
-                    {"case_id": "primary-b1-h32-s2048-d64-causal"}
+                    {"case_id": "primary-b1-h16-s3072-d64-causal"}
                 ],
                 "final_cases": [
-                    {"case_id": "final-b1-h32-s2048-d64-causal"}
+                    {"case_id": "final-b1-h16-s3072-d64-causal"}
                 ],
             },
             "fused_add_rms_norm": {
                 "task_id": (
-                    "tilelang_fused_add_rms_norm_r16384_h2048_rtx3090_shape1"
+                    "tilelang_fused_add_rms_norm_r4096_h8192_rtx3090_special"
                 ),
-                "rationale": "Fused norm at the narrower shape-family-1 reduction width.",
+                "rationale": "Wider fused reduction preserves retention headroom.",
                 "factory_arguments": {
-                    "rows": 16384,
-                    "hidden_size": 2048,
+                    "rows": 4096,
+                    "hidden_size": 8192,
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r16384-h2048"}
+                    {"case_id": "primary-r4096-h8192"}
                 ],
                 "final_cases": [
-                    {"case_id": "final-r16384-h2048"}
+                    {"case_id": "final-r4096-h8192"}
                 ],
             },
         },
@@ -430,8 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(SHAPE_CONFIGS),
         default=DEFAULT_SHAPE_CONFIG,
         help=(
-            "Built-in workload family: basic (default fixed shapes), standard "
-            "(canonical task shapes), or shape1 (alternate stress shapes)."
+            "Built-in workload family: basic (2048-class defaults), large "
+            "(longer stable timings), or special (schedule-sensitive shapes)."
         ),
     )
     shape_group.add_argument(

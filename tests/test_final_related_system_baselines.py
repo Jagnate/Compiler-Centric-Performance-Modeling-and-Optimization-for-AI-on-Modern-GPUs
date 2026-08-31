@@ -112,14 +112,14 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         workload_suite = suite._builtin_workload_suite("basic")
         treatments = suite.selected_treatments(only_styles=["kernelagent"])
         expected_shapes = {
-            "matmul": {"m": 1024, "n": 1024, "k": 1024},
+            "matmul": {"m": 2048, "n": 2048, "k": 2048},
             "rms_norm": {
-                "rows": 4096,
+                "rows": 8192,
                 "hidden_size": 4096,
                 "epsilon": 1e-06,
             },
             "conv2d": {
-                "batch": 16,
+                "batch": 32,
                 "in_height": 56,
                 "in_width": 56,
                 "in_channels": 64,
@@ -131,13 +131,13 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             },
             "flash_attention": {
                 "batch": 1,
-                "heads": 8,
+                "heads": 32,
                 "seq_len": 1024,
                 "dim": 64,
                 "is_causal": False,
             },
             "fused_add_rms_norm": {
-                "rows": 4096,
+                "rows": 8192,
                 "hidden_size": 4096,
                 "epsilon": 1e-06,
             },
@@ -213,7 +213,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         workload_suite = suite._builtin_workload_suite(args.shape_config)
         self.assertEqual(
             suite._default_output_root(workload_suite).parts[-2:],
-            ("final_eval", "related_system_baselines_30m_basic"),
+            ("final_eval", "related_system_baselines_30m_basic_2048"),
         )
         self.assertIsNone(args.output_root)
         self.assertEqual(args.max_search_seconds, 1800.0)
@@ -228,7 +228,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         )
 
     def test_three_named_shape_configs_have_distinct_outputs(self) -> None:
-        self.assertEqual(tuple(suite.SHAPE_CONFIGS), ("basic", "standard", "shape1"))
+        self.assertEqual(tuple(suite.SHAPE_CONFIGS), ("basic", "large", "special"))
         outputs = {
             suite._default_output_root(suite._builtin_workload_suite(name)).name
             for name in suite.SHAPE_CONFIGS
@@ -236,9 +236,9 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         self.assertEqual(
             outputs,
             {
-                "related_system_baselines_30m_basic",
-                "related_system_baselines_30m_standard",
-                "related_system_baselines_30m_shape1",
+                "related_system_baselines_30m_basic_2048",
+                "related_system_baselines_30m_large",
+                "related_system_baselines_30m_special",
             },
         )
 
@@ -328,7 +328,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             )
         )
 
-    def test_builtin_basic_can_resume_legacy_json_provenance(self) -> None:
+    def test_new_basic_shape_rejects_legacy_1024_task(self) -> None:
         treatment = suite.selected_treatments(
             only_kernels=["matmul"], only_styles=["native"]
         )
@@ -338,7 +338,7 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         builtin_suite = suite._builtin_workload_suite("basic")
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
-            paths, _payloads = suite._prepare_treatment_tasks(
+            _paths, _payloads = suite._prepare_treatment_tasks(
                 REPOSITORY_ROOT,
                 output_root,
                 treatment,
@@ -347,24 +347,15 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
                 measurement_repeats=3,
                 round_ceiling=128,
             )
-            archived_task = json.loads(
-                paths[("matmul", "native")].read_text(encoding="utf-8")
-            )
-
-            suite._prepare_treatment_tasks(
-                REPOSITORY_ROOT,
-                output_root,
-                treatment,
-                builtin_suite,
-                dry_run=False,
-                measurement_repeats=3,
-                round_ceiling=128,
-            )
-            changed = json.loads(json.dumps(archived_task))
-            changed["workload"]["factory_arguments"]["m"] = 2048
             with self.assertRaisesRegex(SystemExit, "choose a fresh output root"):
-                suite._write_immutable_json(
-                    paths[("matmul", "native")], changed
+                suite._prepare_treatment_tasks(
+                    REPOSITORY_ROOT,
+                    output_root,
+                    treatment,
+                    builtin_suite,
+                    dry_run=False,
+                    measurement_repeats=3,
+                    round_ceiling=128,
                 )
 
     def test_fixed_time_completion_requires_time_budget_termination(self) -> None:

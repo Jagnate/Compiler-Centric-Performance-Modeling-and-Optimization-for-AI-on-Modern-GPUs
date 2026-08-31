@@ -9,7 +9,7 @@ from typing import Optional, Sequence
 import run_final_related_system_baselines as baseline_driver
 
 
-DEFAULT_SHAPE_CONFIG = "shape1"
+DEFAULT_SHAPE_CONFIG = "special"
 
 
 def build_forwarded_arguments(arguments: Sequence[str]) -> list[str]:

@@ -242,6 +242,29 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             },
         )
 
+    def test_each_named_config_uses_one_shape_for_search_and_final(self) -> None:
+        for config_name in suite.SHAPE_CONFIGS:
+            workload_suite = suite._builtin_workload_suite(config_name)
+            for kernel in suite.KERNELS:
+                workload = workload_suite["workloads"][kernel.key]
+                search_cases = workload["search_cases"]
+                final_cases = workload["final_cases"]
+                self.assertEqual(len(search_cases), 1)
+                self.assertEqual(len(final_cases), 1)
+                self.assertNotEqual(
+                    search_cases[0]["case_id"], final_cases[0]["case_id"]
+                )
+                primary = dict(workload["factory_arguments"])
+                search_shape = dict(primary)
+                search_shape.update(
+                    dict(search_cases[0].get("factory_arguments") or {})
+                )
+                final_shape = dict(primary)
+                final_shape.update(
+                    dict(final_cases[0].get("factory_arguments") or {})
+                )
+                self.assertEqual(search_shape, final_shape)
+
     def test_all_named_shape_cases_satisfy_kernel_contracts(self) -> None:
         treatments = suite.selected_treatments(
             only_styles=["native"], include_native=True

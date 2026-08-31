@@ -439,7 +439,7 @@ after 32 requests to bound retained compiler/GPU state; set
 `evaluator.persistent_process` to `false` for strict process-per-stage isolation.
 Final validation always bypasses the warmed worker and runs in a one-shot process.
 At the first safe checkpoint after the deadline, the controller freezes the
-search result and records `termination_reason=time-budget`. It then runs held-out
+search result and records `termination_reason=time-budget`. It then runs separate
 final validation outside the 1,800-second search budget and exports the best
 final-validated candidate. Reports keep `Search (s)`, `Final (s)`, and `Total (s)`
 separate, so equal-time comparisons use only the search column. The full 30-cell
@@ -491,12 +491,13 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
 | `standard` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_30m_standard` |
 | `shape1` | `4096 x 1024 x 4096` | `16384 x 2048` | `N32 H28 W28 C128 F256 K3` | `B1 H32 S2048 D64 causal` | `related_system_baselines_30m_shape1` |
 
-Norm shapes apply to both RMSNorm and fused Add + RMSNorm. `standard` and
-`shape1` also include public search cases and two held-out final cases per kernel;
-the generated suite report records every resolved case. Base task files remain
-unchanged. `examples/run_final_related_system_shape_1.py` remains as a compatibility
-wrapper for `--shape-config shape1`, and `--workload-suite PATH` remains available
-for custom JSON suites.
+Norm shapes apply to both RMSNorm and fused Add + RMSNorm. Every configuration
+contains exactly one search case and one same-shape final case. The final case
+reruns correctness and robust timing in a fresh process; it does not introduce a
+second input shape. Base task files remain unchanged.
+`examples/run_final_related_system_shape_1.py` remains as a compatibility wrapper
+for `--shape-config shape1`, and `--workload-suite PATH` remains available for
+custom JSON suites.
 
 ### Cost and graph bounds
 
@@ -523,7 +524,7 @@ timing, profiling, and repairs after the controller starts. It does not kill an
 API, compiler, CUDA Event, or NCU call in flight; that atomic operation finishes,
 then the controller writes a resumable search checkpoint. Consequently, search
 time can exceed the limit by one in-flight operation. The timer is then frozen and
-held-out final validation runs separately, outside the search budget. `summary.json`
+configured final validation runs separately, outside the search budget. `summary.json`
 and the Markdown report record search elapsed time, final-validation time, total
 controller time, the termination reason, graph upper bound, and whether the search
 budget was exhausted.

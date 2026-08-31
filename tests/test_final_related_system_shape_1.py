@@ -211,7 +211,7 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
                 "related_system_shape_1",
             )
             self.assertIn("Configured Shape Family", markdown)
-            self.assertIn("heldout-b2-h8-s1536-d64-causal", markdown)
+            self.assertIn("final-b1-h32-s2048-d64-causal", markdown)
             self.assertIn("Exported best (ms)", markdown)
             self.assertIn("Final checks", markdown)
             self.assertIn("Search (s)", markdown)

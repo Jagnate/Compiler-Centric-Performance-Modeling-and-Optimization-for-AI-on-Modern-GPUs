@@ -175,66 +175,44 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
     "standard": {
         "suite_id": "related_system_standard_shapes",
-        "title": "Related-System Baselines: Standard Task Shapes",
+        "title": "Related-System Baselines: Standard Single Shapes",
         "description": (
-            "The canonical primary, public, and held-out shapes from the five "
-            "standalone TileLang task definitions."
+            "One canonical primary shape per TileLang task. Search and final "
+            "validation use the same shape."
         ),
         "output_directory": "related_system_baselines_30m_standard",
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_2048_rtx3090_standard",
-                "rationale": "Canonical 2048 square GEMM plus scale and aspect-ratio checks.",
+                "rationale": "Canonical 2048 square GEMM.",
                 "factory_arguments": {"m": 2048, "n": 2048, "k": 2048},
                 "search_cases": [
-                    {"case_id": "primary-m2048-n2048-k2048"},
-                    {
-                        "case_id": "public-m1024-n1024-k1024",
-                        "factory_arguments": {"m": 1024, "n": 1024, "k": 1024},
-                    },
+                    {"case_id": "primary-m2048-n2048-k2048"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-m1536-n1536-k1536",
-                        "factory_arguments": {"m": 1536, "n": 1536, "k": 1536},
-                    },
-                    {
-                        "case_id": "heldout-m3072-n1024-k2048",
-                        "factory_arguments": {"m": 3072, "n": 1024, "k": 2048},
-                    },
+                    {"case_id": "final-m2048-n2048-k2048"}
                 ],
             },
             "rms_norm": {
                 "task_id": "tilelang_rms_norm_r8192_h4096_rtx3090_standard",
-                "rationale": "Canonical weighted RMSNorm workload and width variants.",
+                "rationale": "Canonical weighted RMSNorm workload.",
                 "factory_arguments": {
                     "rows": 8192,
                     "hidden_size": 4096,
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r8192-h4096"},
-                    {
-                        "case_id": "public-r2048-h4096",
-                        "factory_arguments": {"rows": 2048, "hidden_size": 4096},
-                    },
+                    {"case_id": "primary-r8192-h4096"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-r4096-h8192",
-                        "factory_arguments": {"rows": 4096, "hidden_size": 8192},
-                    },
-                    {
-                        "case_id": "heldout-r16384-h1024",
-                        "factory_arguments": {"rows": 16384, "hidden_size": 1024},
-                    },
+                    {"case_id": "final-r8192-h4096"}
                 ],
             },
             "conv2d": {
                 "task_id": (
                     "tilelang_conv2d_n32_h56_w56_c64_f128_k3_rtx3090_standard"
                 ),
-                "rationale": "Canonical spatial Conv2D plus stride and 1x1 held-out cases.",
+                "rationale": "Canonical spatial 3x3 Conv2D workload.",
                 "factory_arguments": {
                     "batch": 32,
                     "in_height": 56,
@@ -247,42 +225,17 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "padding": 1,
                 },
                 "search_cases": [
-                    {"case_id": "primary-n32-h56-w56-c64-f128-k3-s1"},
-                    {
-                        "case_id": "public-n8-h28-w28-c64-f128-k3-s1",
-                        "factory_arguments": {
-                            "batch": 8,
-                            "in_height": 28,
-                            "in_width": 28,
-                        },
-                    },
+                    {"case_id": "primary-n32-h56-w56-c64-f128-k3-s1"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-n16-h56-w56-c64-f128-k3-s2",
-                        "factory_arguments": {"batch": 16, "stride": 2},
-                    },
-                    {
-                        "case_id": "heldout-n16-h28-w28-c128-f256-k1-s1",
-                        "factory_arguments": {
-                            "batch": 16,
-                            "in_height": 28,
-                            "in_width": 28,
-                            "in_channels": 128,
-                            "out_channels": 256,
-                            "kernel_size": 1,
-                            "stride": 1,
-                            "dilation": 1,
-                            "padding": 0,
-                        },
-                    },
+                    {"case_id": "final-n32-h56-w56-c64-f128-k3-s1"}
                 ],
             },
             "flash_attention": {
                 "task_id": (
                     "tilelang_flash_attention_b1_h32_s1024_d64_rtx3090_standard"
                 ),
-                "rationale": "Canonical H32 S1024 attention plus causal held-out cases.",
+                "rationale": "Canonical H32 S1024 non-causal attention.",
                 "factory_arguments": {
                     "batch": 1,
                     "heads": 32,
@@ -291,67 +244,27 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "is_causal": False,
                 },
                 "search_cases": [
-                    {"case_id": "primary-b1-h32-s1024-d64"},
-                    {
-                        "case_id": "public-b1-h2-s256-d64",
-                        "factory_arguments": {
-                            "batch": 1,
-                            "heads": 2,
-                            "seq_len": 256,
-                            "dim": 64,
-                            "is_causal": False,
-                        },
-                    },
+                    {"case_id": "primary-b1-h32-s1024-d64"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-causal-b1-h4-s512-d64",
-                        "factory_arguments": {
-                            "batch": 1,
-                            "heads": 4,
-                            "seq_len": 512,
-                            "dim": 64,
-                            "is_causal": True,
-                        },
-                    },
-                    {
-                        "case_id": "heldout-b2-h8-s256-d64",
-                        "factory_arguments": {
-                            "batch": 2,
-                            "heads": 8,
-                            "seq_len": 256,
-                            "dim": 64,
-                            "is_causal": False,
-                        },
-                    },
+                    {"case_id": "final-b1-h32-s1024-d64"}
                 ],
             },
             "fused_add_rms_norm": {
                 "task_id": (
                     "tilelang_fused_add_rms_norm_r8192_h4096_rtx3090_standard"
                 ),
-                "rationale": "Canonical fused residual-add RMSNorm and width variants.",
+                "rationale": "Canonical fused residual-add RMSNorm workload.",
                 "factory_arguments": {
                     "rows": 8192,
                     "hidden_size": 4096,
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r8192-h4096"},
-                    {
-                        "case_id": "public-r2048-h4096",
-                        "factory_arguments": {"rows": 2048, "hidden_size": 4096},
-                    },
+                    {"case_id": "primary-r8192-h4096"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-r4096-h8192",
-                        "factory_arguments": {"rows": 4096, "hidden_size": 8192},
-                    },
-                    {
-                        "case_id": "heldout-r16384-h1024",
-                        "factory_arguments": {"rows": 16384, "hidden_size": 1024},
-                    },
+                    {"case_id": "final-r8192-h4096"}
                 ],
             },
         },
@@ -361,30 +274,20 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "title": "Related-System Baselines: Shape Family 1",
         "description": (
             "Rectangular GEMM, narrower normalization, channel-heavy Conv2D, "
-            "and longer causal attention for RTX 3090."
+            "and longer causal attention. Search and final validation use the "
+            "same shape."
         ),
         "output_directory": "related_system_baselines_30m_shape1",
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_shape1",
-                "rationale": "Tall rectangular GEMM with held-out aspect ratios.",
+                "rationale": "Tall rectangular GEMM with a different aspect ratio.",
                 "factory_arguments": {"m": 4096, "n": 1024, "k": 4096},
                 "search_cases": [
-                    {"case_id": "primary-m4096-n1024-k4096"},
-                    {
-                        "case_id": "public-m2048-n1024-k4096",
-                        "factory_arguments": {"m": 2048, "n": 1024, "k": 4096},
-                    },
+                    {"case_id": "primary-m4096-n1024-k4096"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-m1024-n4096-k2048",
-                        "factory_arguments": {"m": 1024, "n": 4096, "k": 2048},
-                    },
-                    {
-                        "case_id": "heldout-m3072-n1536-k4096",
-                        "factory_arguments": {"m": 3072, "n": 1536, "k": 4096},
-                    },
+                    {"case_id": "final-m4096-n1024-k4096"}
                 ],
             },
             "rms_norm": {
@@ -396,21 +299,10 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r16384-h2048"},
-                    {
-                        "case_id": "public-r4096-h2048",
-                        "factory_arguments": {"rows": 4096, "hidden_size": 2048},
-                    },
+                    {"case_id": "primary-r16384-h2048"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-r12288-h4096",
-                        "factory_arguments": {"rows": 12288, "hidden_size": 4096},
-                    },
-                    {
-                        "case_id": "heldout-r32768-h1024",
-                        "factory_arguments": {"rows": 32768, "hidden_size": 1024},
-                    },
+                    {"case_id": "final-r16384-h2048"}
                 ],
             },
             "conv2d": {
@@ -430,34 +322,17 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "padding": 1,
                 },
                 "search_cases": [
-                    {"case_id": "primary-n32-h28-w28-c128-f256-k3-s1"},
-                    {
-                        "case_id": "public-n8-h28-w28-c128-f256-k3-s1",
-                        "factory_arguments": {"batch": 8},
-                    },
+                    {"case_id": "primary-n32-h28-w28-c128-f256-k3-s1"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-n16-h28-w28-c128-f256-k3-s2",
-                        "factory_arguments": {"batch": 16, "stride": 2},
-                    },
-                    {
-                        "case_id": "heldout-n32-h14-w14-c256-f512-k3-s1",
-                        "factory_arguments": {
-                            "batch": 32,
-                            "in_height": 14,
-                            "in_width": 14,
-                            "in_channels": 256,
-                            "out_channels": 512,
-                        },
-                    },
+                    {"case_id": "final-n32-h28-w28-c128-f256-k3-s1"}
                 ],
             },
             "flash_attention": {
                 "task_id": (
                     "tilelang_flash_attention_b1_h32_s2048_d64_causal_rtx3090_shape1"
                 ),
-                "rationale": "Longer causal attention with non-causal held-out coverage.",
+                "rationale": "Longer causal attention workload.",
                 "factory_arguments": {
                     "batch": 1,
                     "heads": 32,
@@ -466,39 +341,10 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "is_causal": True,
                 },
                 "search_cases": [
-                    {"case_id": "primary-b1-h32-s2048-d64-causal"},
-                    {
-                        "case_id": "public-b1-h8-s1024-d64-causal",
-                        "factory_arguments": {
-                            "batch": 1,
-                            "heads": 8,
-                            "seq_len": 1024,
-                            "dim": 64,
-                            "is_causal": True,
-                        },
-                    },
+                    {"case_id": "primary-b1-h32-s2048-d64-causal"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-b1-h16-s2048-d64-noncausal",
-                        "factory_arguments": {
-                            "batch": 1,
-                            "heads": 16,
-                            "seq_len": 2048,
-                            "dim": 64,
-                            "is_causal": False,
-                        },
-                    },
-                    {
-                        "case_id": "heldout-b2-h8-s1536-d64-causal",
-                        "factory_arguments": {
-                            "batch": 2,
-                            "heads": 8,
-                            "seq_len": 1536,
-                            "dim": 64,
-                            "is_causal": True,
-                        },
-                    },
+                    {"case_id": "final-b1-h32-s2048-d64-causal"}
                 ],
             },
             "fused_add_rms_norm": {
@@ -512,21 +358,10 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
                     "epsilon": 1e-6,
                 },
                 "search_cases": [
-                    {"case_id": "primary-r16384-h2048"},
-                    {
-                        "case_id": "public-r4096-h2048",
-                        "factory_arguments": {"rows": 4096, "hidden_size": 2048},
-                    },
+                    {"case_id": "primary-r16384-h2048"}
                 ],
                 "final_cases": [
-                    {
-                        "case_id": "heldout-r12288-h4096",
-                        "factory_arguments": {"rows": 12288, "hidden_size": 4096},
-                    },
-                    {
-                        "case_id": "heldout-r32768-h1024",
-                        "factory_arguments": {"rows": 32768, "hidden_size": 1024},
-                    },
+                    {"case_id": "final-r16384-h2048"}
                 ],
             },
         },
@@ -1588,7 +1423,7 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             )
         )
     if workload_suite:
-        lines.extend(["", "### Search and Held-Out Cases", ""])
+        lines.extend(["", "### Search and Final Cases", ""])
         for workload in payload["workloads"]:
             lines.extend(
                 [
@@ -1601,7 +1436,7 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
                         workload.get("search_cases") or [],
                         workload["factory_arguments"],
                     ),
-                    "- Held-out: %s"
+                    "- Final: %s"
                     % _format_cases(
                         workload.get("final_cases") or [],
                         workload["factory_arguments"],

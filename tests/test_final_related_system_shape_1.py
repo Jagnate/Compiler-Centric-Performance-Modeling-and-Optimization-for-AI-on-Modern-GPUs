@@ -216,6 +216,8 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             )
             self.assertIn("Configured Shape Family", markdown)
             self.assertIn("heldout-b2-h8-s1536-d64-causal", markdown)
+            self.assertIn("Exported best (ms)", markdown)
+            self.assertIn("Final checks", markdown)
 
 
 def _resolved_shapes(primary, cases):

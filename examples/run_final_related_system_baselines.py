@@ -855,6 +855,7 @@ def _summary_row(
         "generated_candidates": summary.get("generated_candidates"),
         "measured_candidates": summary.get("measured_candidates"),
         "profile_calls": summary.get("profile_calls"),
+        "final_validation_calls": summary.get("final_validation_calls"),
         "elapsed_seconds": summary.get("elapsed_seconds"),
         "termination_reason": summary.get("termination_reason"),
         "time_budget_exhausted": summary.get("time_budget_exhausted"),
@@ -1034,15 +1035,15 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             "",
             "## Results",
             "",
-            "| Kernel | Style | Status | Seed (ms) | Search best (ms) | Final best (ms) | Speedup | Rounds | Generated | Measured | NCU | Elapsed (s) | Termination |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Kernel | Style | Status | Seed (ms) | Search best (ms) | Exported best (ms) | Speedup | Rounds | Generated | Measured | NCU | Final checks | Elapsed (s) | Termination |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for row in payload["runs"]:
         lines.append(
             "| {kernel_title} | {style_title} | {status} | {seed} | "
             "{search_best} | {best} | {speedup} | {rounds} | {generated} | "
-            "{measured} | {ncu} | {elapsed} | {termination} |".format(
+            "{measured} | {ncu} | {final_checks} | {elapsed} | {termination} |".format(
                 kernel_title=row["kernel_title"],
                 style_title=row["style_title"],
                 status=row["status"],
@@ -1054,6 +1055,7 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
                 generated=_format_value(row.get("generated_candidates")),
                 measured=_format_value(row.get("measured_candidates")),
                 ncu=_format_value(row.get("profile_calls")),
+                final_checks=_format_value(row.get("final_validation_calls")),
                 elapsed=_format_value(row.get("elapsed_seconds")),
                 termination=row.get("termination_reason") or row.get("error") or "-",
             )
@@ -1072,7 +1074,9 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
             "",
             "For `fixed-time` runs, only a `time-budget` termination is a valid "
             "equal-budget result. The controller exports the best verified "
-            "incumbent at its safe stopping checkpoint. Rerunning the suite "
+            "incumbent at its safe stopping checkpoint. `Final checks` is zero when "
+            "the deadline is reached before a separate held-out validation stage; "
+            "in that case `Exported best` is the search-stage measurement. Rerunning the suite "
             "reuses valid completed rows and resumes an interrupted row.",
             "",
         ]

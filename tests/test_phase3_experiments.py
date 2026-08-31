@@ -165,6 +165,9 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             report = (output / "experiment_report.md").read_text(encoding="utf-8")
             self.assertIn("Incumbent snapshot interval", report)
             self.assertIn("incumbent_history.csv", report)
+            self.assertIn("Exported best latency", report)
+            self.assertIn("Separate held-out final validation was not run", report)
+            self.assertNotIn("passed fresh final validation", report)
             self.assertAlmostEqual(
                 summary.cost_ledger["api"]["estimated_cost_usd"], 11e-6
             )

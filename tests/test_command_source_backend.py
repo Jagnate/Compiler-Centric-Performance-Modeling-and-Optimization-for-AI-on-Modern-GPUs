@@ -83,6 +83,7 @@ class CommandSourceBackendTests(unittest.TestCase):
                 modeled = backend.model(task, candidate)
                 measured = backend.measure(task, candidate)
                 profiled = backend.profile(task, candidate)
+                finalized = backend.finalize(task, candidate)
             finally:
                 backend.close()
 
@@ -95,13 +96,29 @@ class CommandSourceBackendTests(unittest.TestCase):
             self.assertEqual(modeled.metrics["worker_request_index"], 1)
             self.assertEqual(measured.metrics["worker_request_index"], 2)
             self.assertEqual(profiled.metrics["worker_request_index"], 3)
+            self.assertEqual(finalized.metrics["stage"], "final")
+            self.assertIsNone(backend._worker)
             attempts = sorted(Path(directory).glob("*/*/attempt.json"))
-            self.assertEqual(len(attempts), 3)
+            self.assertEqual(len(attempts), 4)
             metadata = [json.loads(path.read_text()) for path in attempts]
-            self.assertTrue(
-                all(item["execution_mode"] == "persistent-worker" for item in metadata)
+            self.assertEqual(
+                [item["execution_mode"] for item in metadata].count(
+                    "persistent-worker"
+                ),
+                3,
             )
-            self.assertTrue(all(item["worker_start_count"] == 1 for item in metadata))
+            self.assertEqual(
+                [item["execution_mode"] for item in metadata].count("one-shot"),
+                1,
+            )
+            persistent_metadata = [
+                item
+                for item in metadata
+                if item["execution_mode"] == "persistent-worker"
+            ]
+            self.assertTrue(
+                all(item["worker_start_count"] == 1 for item in persistent_metadata)
+            )
 
     def test_persistent_worker_restarts_at_the_request_bound(self) -> None:
         task = TaskSpec(

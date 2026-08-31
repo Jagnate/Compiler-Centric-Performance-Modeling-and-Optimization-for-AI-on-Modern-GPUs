@@ -136,17 +136,23 @@ class CommandBackend:
             ]
             environment, removed = self._build_environment()
             if self.persistent_process:
-                return self._run_persistent(
-                    stage=stage,
-                    candidate=candidate,
-                    request_path=request_path,
-                    response_path=response_path,
-                    stdout_path=stdout_path,
-                    result_path=result_path,
-                    root=root,
-                    environment=environment,
-                    removed=removed,
-                )
+                if stage != "final":
+                    return self._run_persistent(
+                        stage=stage,
+                        candidate=candidate,
+                        request_path=request_path,
+                        response_path=response_path,
+                        stdout_path=stdout_path,
+                        result_path=result_path,
+                        root=root,
+                        environment=environment,
+                        removed=removed,
+                    )
+                # Final validation is deliberately process-isolated. Stop the
+                # warmed search worker before launching the regular one-shot
+                # command so compiler and CUDA state cannot leak into the gate.
+                with self._worker_lock:
+                    self._stop_worker()
             started_at = time.perf_counter()
             try:
                 completed = subprocess.run(
@@ -172,6 +178,7 @@ class CommandBackend:
                     "candidate_id": candidate.candidate_id,
                     "elapsed_seconds": elapsed,
                     "status": "timeout",
+                    "execution_mode": "one-shot",
                     "artifact_directory": str(root),
                     "removed_sensitive_environment_names": sorted(removed),
                 }
@@ -193,6 +200,7 @@ class CommandBackend:
                 "elapsed_seconds": elapsed,
                 "status": "completed" if completed.returncode == 0 else "failed",
                 "exit_code": completed.returncode,
+                "execution_mode": "one-shot",
                 "artifact_directory": str(root),
                 "removed_sensitive_environment_names": sorted(removed),
             }

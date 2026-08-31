@@ -169,6 +169,7 @@ class GenericEvaluatorTests(unittest.TestCase):
             source_path = Path(directory) / "candidate.py"
             source_path.write_text(source, encoding="utf-8")
             request = _runtime_request(source_path, source, measurement_repeats=3)
+            request["_persistent_worker"] = True
             runner = _BatchedValidationRunner([1.2, 1.0, 1.1])
             response = evaluator.measure_response(
                 request,
@@ -180,6 +181,7 @@ class GenericEvaluatorTests(unittest.TestCase):
         self.assertTrue(response["correct"])
         self.assertEqual(response["samples_ms"], [1.2, 1.0, 1.1])
         self.assertEqual(response["latency_ms"], 1.1)
+        self.assertFalse(response["metrics"]["fresh_process"])
         benchmark_calls = [item for item in runner.calls if item["benchmark"]]
         self.assertEqual(len(benchmark_calls), 1)
         self.assertEqual(benchmark_calls[0]["benchmark_repeats"], 3)
@@ -203,6 +205,7 @@ class GenericEvaluatorTests(unittest.TestCase):
 
         self.assertTrue(response["correct"])
         self.assertEqual(response["metrics"]["stage"], "final")
+        self.assertTrue(response["metrics"]["fresh_process"])
         self.assertEqual(response["metrics"]["case_count"], 3)
         self.assertEqual(response["metrics"]["held_out_case_count"], 1)
         self.assertEqual(response["metrics"]["statistics"]["sample_count"], 4)
@@ -247,6 +250,9 @@ class FreshFinalGateTests(unittest.TestCase):
             summary = controller.run()
 
             best_source = Path(summary.best_source_path).read_text(encoding="utf-8")
+            report = (Path(directory) / "experiment_report.md").read_text(
+                encoding="utf-8"
+            )
 
         self.assertNotEqual(summary.search_best_candidate_id, summary.best_candidate_id)
         self.assertEqual(summary.search_best_latency_ms, 0.5)
@@ -255,6 +261,7 @@ class FreshFinalGateTests(unittest.TestCase):
         self.assertEqual(summary.final_validation_calls, 3)
         self.assertEqual(summary.final_validation_passes, 2)
         self.assertIn("VALUE = 2", best_source)
+        self.assertIn("passed process-isolated final validation", report)
 
 
 @dataclass

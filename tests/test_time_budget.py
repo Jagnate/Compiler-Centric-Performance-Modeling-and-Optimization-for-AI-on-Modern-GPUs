@@ -97,11 +97,16 @@ class SearchTimeBudgetTests(unittest.TestCase):
 
             summary = controller.run()
             best_source = Path(summary.best_source_path).read_text(encoding="utf-8")
+            report = (Path(directory) / "experiment_report.md").read_text(
+                encoding="utf-8"
+            )
 
         self.assertEqual(summary.termination_reason, "time-budget")
         self.assertEqual(summary.completed_rounds, 0)
         self.assertEqual(summary.best_latency_ms, 1.0)
         self.assertIn("TILE = 2", best_source)
+        self.assertIn("No separate held-out final validation", report)
+        self.assertNotIn("passed fresh final validation", report)
 
     def test_fixed_time_mode_continues_after_an_empty_candidate_round(self) -> None:
         task = _budget_task("fixed-time-empty-round")

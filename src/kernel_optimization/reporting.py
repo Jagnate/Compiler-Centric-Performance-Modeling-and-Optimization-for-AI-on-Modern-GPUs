@@ -260,7 +260,7 @@ def _experiment_markdown(
         "| Metric | Value |",
         "| --- | ---: |",
         "| Seed latency | %s ms |" % _format(summary.seed_latency_ms),
-        "| Best final latency | %s ms |" % _format(summary.best_latency_ms),
+        "| Exported best latency | %s ms |" % _format(summary.best_latency_ms),
         "| Speedup over seed | %sx |" % _format(summary.speedup_over_seed),
         "| Termination reason | `%s` |" % summary.termination_reason,
         "| Time budget exhausted | %s |"
@@ -332,6 +332,26 @@ def _experiment_markdown(
             )
     else:
         lines.append("No explicit strategy plans were recorded.")
+    if summary.final_validation_calls > 0:
+        interpretation = (
+            "The exported kernel passed process-isolated final validation. Model "
+            "predictions are used only for allocation of the hardware budget; CUDA "
+            "Event measurements rank the search beam, and held-out final measurements "
+            "choose the export."
+        )
+    elif summary.time_budget_exhausted:
+        interpretation = (
+            "The fixed-time run exported the best search-stage incumbent after "
+            "correctness and CUDA Event measurement. No separate held-out final "
+            "validation was launched after the search deadline; the exported latency "
+            "is therefore the search measurement."
+        )
+    else:
+        interpretation = (
+            "The exported kernel passed search-stage correctness and CUDA Event "
+            "measurement. Separate held-out final validation was not run for this "
+            "configuration."
+        )
     lines.extend(
         [
         "",
@@ -405,9 +425,7 @@ def _experiment_markdown(
             "",
             "## Interpretation",
             "",
-            "The exported kernel passed fresh final validation. Model predictions are "
-            "used only for allocation of the hardware budget; CUDA Event measurements "
-            "rank the search beam, and held-out final measurements choose the export.",
+            interpretation,
             "",
             "Detailed per-candidate evidence is available in `trajectory.csv`, "
             "`trajectory.json`, and `candidate_graph.json`. Fixed wall-clock "

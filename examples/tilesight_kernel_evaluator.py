@@ -339,6 +339,7 @@ def measure_response(
 
         validation_runner = run_tilelang_validation
     stage = "final" if final else "measure"
+    fresh_process = not bool(request.get("_persistent_worker", False))
     try:
         plugin = load_workload_plugin(request)
         candidate_module = load_candidate_module(request)
@@ -431,7 +432,7 @@ def measure_response(
             "metrics": {
                 "measurement_source": "cuda-events",
                 "stage": stage,
-                "fresh_process": True,
+                "fresh_process": fresh_process,
                 "primary_case_id": primary["case_id"],
                 "case_count": len(cases),
                 "held_out_case_count": sum(
@@ -448,7 +449,7 @@ def measure_response(
             "correct": False,
             "latency_ms": None,
             "samples_ms": [],
-            "metrics": {"stage": stage, "fresh_process": True},
+            "metrics": {"stage": stage, "fresh_process": fresh_process},
             "error": "%s: %s" % (type(error).__name__, error),
         }
 
@@ -719,6 +720,7 @@ def persistent_worker() -> None:
                 stage = str(message["stage"])
                 request = load_request(request_path)
                 request["_request_path"] = str(request_path)
+                request["_persistent_worker"] = True
                 response = evaluate_stage(stage, request)
                 write_response(response_path, response)
                 _cleanup_worker_request()

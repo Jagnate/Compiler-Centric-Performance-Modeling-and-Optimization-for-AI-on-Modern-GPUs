@@ -437,8 +437,12 @@ model, measurement, and profile requests, while every request still receives its
 own source, request, response, stdout, and attempt artifacts. The worker restarts
 after 32 requests to bound retained compiler/GPU state; set
 `evaluator.persistent_process` to `false` for strict process-per-stage isolation.
+Final validation always bypasses the warmed worker and runs in a one-shot process.
 At the first safe checkpoint after the deadline, the controller exports the best
-verified incumbent and records `termination_reason=time-budget`. The full 30-cell
+search-stage verified incumbent and records `termination_reason=time-budget`.
+Fixed-time runs do not start a separate held-out final stage after the deadline;
+the suite report exposes this explicitly as `Final checks = 0` and labels the
+selected measurement `Exported best`. The full 30-cell
 matrix therefore has a configured search budget of 15 GPU-hours plus bounded
 in-flight-call overshoot. A result that ends at the round ceiling or any other
 early condition is marked `ended-early`, not silently accepted as fair.

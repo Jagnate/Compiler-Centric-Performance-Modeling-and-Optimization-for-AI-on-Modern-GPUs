@@ -83,6 +83,50 @@ class TrustTracker:
             return 0.4 * absolute_score
         return max(0.0, min(1.0, 0.7 * direction + 0.3 * absolute_score))
 
+    @property
+    def screening_failure_reasons(self) -> List[str]:
+        """Explain when model-only pruning is not supported by observations.
+
+        A large raw scale error is useful as an early warning, but it does not
+        permanently condemn a model whose ordering later agrees with hardware.
+        Conversely, repeatedly choosing the wrong optimization direction is a
+        direct reason to stop pruning candidates with the model.
+        """
+
+        reasons: List[str] = []
+        samples = len(self.relative_errors)
+        direction = self.direction_accuracy
+        calibrated_error = self.mean_absolute_relative_error
+        raw_error = self.raw_mean_absolute_relative_error
+        direction_unverified = self.direction_total < 4
+
+        if samples >= 3 and direction_unverified and raw_error is not None and raw_error > 4.0:
+            reasons.append("extreme-raw-scale-error-before-direction-validation")
+        if (
+            samples >= 3
+            and calibrated_error is not None
+            and calibrated_error > 1.0
+            and (direction is None or direction < 0.65)
+        ):
+            reasons.append("high-ranking-latency-error")
+        if self.direction_total >= 4 and direction is not None and direction < 0.55:
+            reasons.append("poor-hardware-direction-agreement")
+        return reasons
+
+    @property
+    def screening_reliable(self) -> bool:
+        """Whether the current evidence supports dropping model-ranked candidates."""
+
+        return not self.screening_failure_reasons
+
+    @property
+    def screening_mode(self) -> str:
+        if self.screening_failure_reasons:
+            return "measure-all-fallback"
+        if len(self.relative_errors) < 3 or self.direction_total < 2:
+            return "evidence-warmup"
+        return "adaptive-screening"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "measured_samples": len(self.relative_errors),
@@ -93,6 +137,9 @@ class TrustTracker:
             "direction_total": self.direction_total,
             "direction_accuracy": self.direction_accuracy,
             "score": self.score,
+            "screening_mode": self.screening_mode,
+            "screening_reliable": self.screening_reliable,
+            "screening_failure_reasons": self.screening_failure_reasons,
         }
 
     def snapshot(self) -> Dict[str, Any]:

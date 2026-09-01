@@ -28,6 +28,36 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class GenericEvaluatorTests(unittest.TestCase):
+    def test_targeted_ncu_profile_avoids_the_full_metric_set(self) -> None:
+        arguments = evaluator._ncu_collection_arguments(
+            {"ncu_set": "tilesight-targeted"}, {}
+        )
+
+        self.assertEqual(arguments[0], "--metrics")
+        metrics = arguments[1].split(",")
+        self.assertIn("gpu__time_duration.sum", metrics)
+        self.assertIn("launch__registers_per_thread", metrics)
+        self.assertIn(
+            "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum", metrics
+        )
+        self.assertIn(
+            "sm__inst_executed_pipe_xu.avg.pct_of_peak_sustained_elapsed",
+            metrics,
+        )
+        self.assertNotIn("--set", arguments)
+
+    def test_explicit_ncu_set_and_metric_overrides_remain_supported(self) -> None:
+        self.assertEqual(
+            evaluator._ncu_collection_arguments({"ncu_set": "full"}, {}),
+            ["--set", "full"],
+        )
+        self.assertEqual(
+            evaluator._ncu_collection_arguments(
+                {"ncu_metrics": ["metric.a", "metric.a", "metric.b"]}, {}
+            ),
+            ["--metrics", "metric.a,metric.b"],
+        )
+
     def test_all_workloads_share_one_evaluator_runtime(self) -> None:
         tasks = {
             name: TaskSpec.from_json_file(
@@ -69,6 +99,10 @@ class GenericEvaluatorTests(unittest.TestCase):
             self.assertFalse(task.evaluator["runtime"]["model_collect_ptxas"])
             self.assertTrue(task.evaluator["persistent_process"])
             self.assertEqual(task.evaluator["worker_max_requests"], 32)
+            self.assertEqual(
+                task.evaluator["runtime"]["ncu_set"],
+                "tilesight-targeted",
+            )
 
     def test_held_out_cases_are_not_in_generation_prompt(self) -> None:
         task = TaskSpec.from_json_file(

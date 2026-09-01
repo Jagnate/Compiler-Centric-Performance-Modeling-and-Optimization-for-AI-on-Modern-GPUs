@@ -47,6 +47,8 @@ class BudgetConfig:
     min_promotions_per_round: int = 2
     max_promotions_per_round: int = 4
     ncu_improvement_threshold: float = 0.05
+    ncu_breakthrough_threshold: float = 0.15
+    ncu_min_interval_rounds: int = 3
     ncu_max_staleness_rounds: int = 3
     ncu_plateau_rounds: int = 2
     max_repairs_per_round: int = 2
@@ -71,6 +73,17 @@ class BudgetConfig:
             )
         _require_nonnegative_float(
             "ncu_improvement_threshold", self.ncu_improvement_threshold
+        )
+        _require_nonnegative_float(
+            "ncu_breakthrough_threshold", self.ncu_breakthrough_threshold
+        )
+        if self.ncu_breakthrough_threshold < self.ncu_improvement_threshold:
+            raise ValueError(
+                "ncu_breakthrough_threshold cannot be smaller than "
+                "ncu_improvement_threshold"
+            )
+        _require_positive_int(
+            "ncu_min_interval_rounds", self.ncu_min_interval_rounds
         )
         _require_positive_int(
             "ncu_max_staleness_rounds", self.ncu_max_staleness_rounds

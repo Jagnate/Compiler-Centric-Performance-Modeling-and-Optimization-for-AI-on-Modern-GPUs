@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+import statistics
 import subprocess
 import sys
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -19,7 +20,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHAPE_CONFIG = "basic"
-DEFAULT_MAX_SEARCH_SECONDS = 1800.0
+DEFAULT_MAX_SEARCH_SECONDS = 900.0
 DEFAULT_MEASUREMENT_REPEATS = 3
 DEFAULT_TIME_BUDGET_ROUND_CEILING = 128
 
@@ -92,7 +93,7 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "One stable RTX 3090 shape per kernel, anchored by 2048 square "
             "GEMM. Search and final validation use the same shape."
         ),
-        "output_directory": "related_system_baselines_30m_basic_2048",
+        "output_directory": "related_system_baselines_{budget}_basic_2048",
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_m2048_n2048_k2048_rtx3090_basic",
@@ -180,7 +181,7 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "Larger single-shape workloads for stable RTX 3090 timing. Search "
             "and final validation use the same shape."
         ),
-        "output_directory": "related_system_baselines_30m_large",
+        "output_directory": "related_system_baselines_{budget}_large",
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_4096_rtx3090_large",
@@ -277,7 +278,7 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "longer causal attention. Search and final validation use the same "
             "shape."
         ),
-        "output_directory": "related_system_baselines_30m_special",
+        "output_directory": "related_system_baselines_{budget}_special",
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_special",
@@ -446,7 +447,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-search-seconds",
         type=float,
         default=DEFAULT_MAX_SEARCH_SECONDS,
-        help="Controller search budget per treatment; default 1800 seconds.",
+        help=(
+            "Controller search budget per treatment; default 900 seconds "
+            "(15 minutes). Final validation runs after this deadline."
+        ),
     )
     parser.add_argument(
         "--budget-mode",
@@ -627,7 +631,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_root = (
         args.output_root.expanduser().resolve()
         if args.output_root is not None
-        else _default_output_root(workload_suite)
+        else _default_output_root(
+            workload_suite,
+            args.max_search_seconds if args.budget_mode == "fixed-time" else 0.0,
+        )
     )
     treatments = selected_treatments(
         args.only_kernel,
@@ -722,6 +729,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 summary,
                 budget_mode=args.budget_mode,
                 expected_final_validations=expected_final_validations,
+                expected_max_search_seconds=args.max_search_seconds,
             ):
                 status = _completed_treatment_status(
                     summary, budget_mode=args.budget_mode, reused=True
@@ -1008,10 +1016,25 @@ def _validate_workload_suite(
     return value
 
 
-def _default_output_root(workload_suite: Mapping[str, Any]) -> Path:
+def _search_budget_label(max_search_seconds: float) -> str:
+    if max_search_seconds <= 0:
+        return "rounds"
+    minutes = max_search_seconds / 60.0
+    if minutes.is_integer():
+        return "%dm" % int(minutes)
+    return "%ds" % int(round(max_search_seconds))
+
+
+def _default_output_root(
+    workload_suite: Mapping[str, Any],
+    max_search_seconds: float = DEFAULT_MAX_SEARCH_SECONDS,
+) -> Path:
     directory = workload_suite.get("output_directory") or workload_suite["suite_id"]
+    directory = str(directory).replace(
+        "{budget}", _search_budget_label(max_search_seconds)
+    )
     return (
-        REPOSITORY_ROOT / "results" / "final_eval" / str(directory)
+        REPOSITORY_ROOT / "results" / "final_eval" / directory
     ).resolve()
 
 
@@ -1230,6 +1253,7 @@ def _summary_row(
         "style_title": treatment.style.title,
         "status": status,
         "seed_latency_ms": summary.get("seed_latency_ms"),
+        "final_seed_latency_ms": summary.get("final_seed_latency_ms"),
         "search_best_latency_ms": summary.get("search_best_latency_ms"),
         "best_latency_ms": summary.get("best_latency_ms"),
         "speedup_over_seed": summary.get("speedup_over_seed"),
@@ -1274,6 +1298,7 @@ def _summary_uses_current_timing_protocol(
     *,
     budget_mode: str,
     expected_final_validations: int,
+    expected_max_search_seconds: Optional[float] = None,
 ) -> bool:
     if budget_mode != "fixed-time":
         return True
@@ -1288,7 +1313,75 @@ def _summary_uses_current_timing_protocol(
         summary.get("final_validation_calls", 0) or 0
     ) <= 0:
         return False
+    if expected_max_search_seconds is not None:
+        archived_budget = summary.get("max_search_seconds")
+        if not isinstance(archived_budget, (int, float)) or not math.isclose(
+            float(archived_budget),
+            float(expected_max_search_seconds),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            return False
     return True
+
+
+def _apply_shared_seed_references(
+    rows: Sequence[Mapping[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Use one robust final-seed latency for every style of each kernel."""
+
+    grouped: Dict[str, List[Tuple[str, float]]] = {}
+    for row in rows:
+        if row.get("status") == "failed":
+            continue
+        value = row.get("final_seed_latency_ms")
+        if value is None:
+            value = row.get("seed_latency_ms")
+        if (
+            isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0
+        ):
+            grouped.setdefault(str(row["kernel"]), []).append(
+                (str(row["style"]), float(value))
+            )
+
+    references: Dict[str, Dict[str, Any]] = {}
+    for kernel, samples in grouped.items():
+        latency = float(statistics.median(value for _style, value in samples))
+        references[kernel] = {
+            "policy": "median-of-final-seed-latencies",
+            "latency_ms": latency,
+            "sample_count": len(samples),
+            "styles": [style for style, _value in samples],
+            "treatment_seed_latencies_ms": {
+                style: value for style, value in samples
+            },
+        }
+
+    normalized: List[Dict[str, Any]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        row["treatment_seed_latency_ms"] = row.get("seed_latency_ms")
+        row["treatment_speedup_over_seed"] = row.get("speedup_over_seed")
+        reference = references.get(str(row.get("kernel")))
+        best = row.get("best_latency_ms")
+        if reference is not None:
+            shared = float(reference["latency_ms"])
+            row["shared_seed_latency_ms"] = shared
+            row["shared_seed_sample_count"] = int(reference["sample_count"])
+            row["seed_latency_ms"] = shared
+            row["speedup_over_seed"] = (
+                shared / float(best)
+                if isinstance(best, (int, float)) and float(best) > 0
+                else None
+            )
+        else:
+            row["shared_seed_latency_ms"] = None
+            row["shared_seed_sample_count"] = 0
+            row["speedup_over_seed"] = None
+        normalized.append(row)
+    return normalized, references
 
 
 def _write_reports(
@@ -1302,8 +1395,9 @@ def _write_reports(
     budget_mode: str = "rounds",
     measurement_repeats: Optional[int] = None,
 ) -> None:
+    normalized_rows, shared_seed_references = _apply_shared_seed_references(rows)
     status_counts: Dict[str, int] = {}
-    for row in rows:
+    for row in normalized_rows:
         status = str(row.get("status"))
         status_counts[status] = status_counts.get(status, 0) + 1
     graph_bound = sum(
@@ -1338,6 +1432,8 @@ def _write_reports(
         "agent_workers": 1,
         "budget_mode": budget_mode,
         "measurement_repeats": measurement_repeats,
+        "shared_seed_policy": "median-of-final-seed-latencies",
+        "shared_seed_references": shared_seed_references,
         "time_budget_round_ceiling": (
             max(
                 int(item.get("round_ceiling") or 0)
@@ -1355,7 +1451,7 @@ def _write_reports(
         "styles": style_names,
         "workload_suite": suite_metadata,
         "workloads": [dict(workloads[key]) for key in workloads],
-        "runs": list(rows),
+        "runs": normalized_rows,
     }
     (output_root / "suite_summary.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1385,6 +1481,7 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
         "| Budget mode | `%s` |" % payload.get("budget_mode"),
         "| Measurement repeats | %s |"
         % _format_value(payload.get("measurement_repeats")),
+        "| Shared seed policy | `%s` |" % payload.get("shared_seed_policy"),
         "| Time-budget round ceiling | %s |"
         % _format_value(payload.get("time_budget_round_ceiling")),
         "| Search cap per treatment | %s seconds |"
@@ -1447,9 +1544,28 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Shared Seed References",
+            "",
+            "| Kernel | Shared seed (ms) | Final-seed measurements |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    references = dict(payload.get("shared_seed_references") or {})
+    for workload in payload["workloads"]:
+        reference = dict(references.get(workload["kernel"]) or {})
+        lines.append(
+            "| {title} | {latency} | {samples} |".format(
+                title=workload["title"],
+                latency=_format_value(reference.get("latency_ms")),
+                samples=_format_value(reference.get("sample_count")),
+            )
+        )
+    lines.extend(
+        [
+            "",
             "## Results",
             "",
-            "| Kernel | Style | Status | Seed (ms) | Search best (ms) | Exported best (ms) | Speedup | Rounds | Generated | Measured | NCU | Final checks | Search (s) | Final (s) | Total (s) | Termination |",
+            "| Kernel | Style | Status | Shared seed (ms) | Search best (ms) | Exported best (ms) | Speedup | Rounds | Generated | Measured | NCU | Final checks | Search (s) | Final (s) | Total (s) | Termination |",
             "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
@@ -1488,6 +1604,12 @@ def _suite_markdown(payload: Mapping[str, Any]) -> str:
         [
             "",
             source_note,
+            "",
+            "Every style for a kernel uses the same shared seed latency: the "
+            "median of all available fresh final-seed measurements for that "
+            "kernel. Per-treatment seed latency and speedup remain available "
+            "in `suite_summary.json` as diagnostic fields, but the displayed "
+            "speedup always uses the shared reference.",
             "",
             "For `fixed-time` runs, only a `time-budget` termination is a valid "
             "equal-budget result. The controller exports the best verified "

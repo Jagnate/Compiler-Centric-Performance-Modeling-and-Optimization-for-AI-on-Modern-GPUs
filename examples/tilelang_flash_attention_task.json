@@ -110,7 +110,7 @@
         }
       ],
       "profile_directory": "results/ncu_profiles/flash_attention",
-      "ncu_set": "full",
+      "ncu_set": "tilesight-targeted",
       "ncu_cache_control": "all"
     }
   },

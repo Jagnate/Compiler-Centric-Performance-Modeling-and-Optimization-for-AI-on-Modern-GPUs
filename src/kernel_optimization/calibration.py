@@ -79,13 +79,18 @@ class LatencyCalibrator:
                 },
             )
 
-        scale = max(0.25, min(4.0, statistics.median(ratios)))
+        median_scale = statistics.median(ratios)
+        # Regime calibration exists specifically to repair analytical-model
+        # scale mismatch. Clipping that correction to [0.25, 4] left models
+        # that were off by thousands of times effectively uncalibrated.
+        scale = max(1e-9, min(1e9, median_scale))
         deviations = [abs(item - scale) for item in ratios]
         mad = statistics.median(deviations) if deviations else 0.0
         relative_mad = mad / scale if scale > 0 else 1.0
         calibrated = float(model.predicted_latency_ms) * scale
         confidence = model.confidence
-        if relative_mad > 0.25:
+        extreme_scale = median_scale < 0.25 or median_scale > 4.0
+        if extreme_scale or relative_mad > 0.25:
             confidence = "low"
         elif len(ratios) < max(4, self.min_samples + 1) and confidence == "high":
             confidence = "medium"
@@ -97,6 +102,8 @@ class LatencyCalibrator:
                 "applied": True,
                 "source": source,
                 "scale": scale,
+                "median_scale": median_scale,
+                "extreme_scale": extreme_scale,
                 "median_absolute_deviation": mad,
                 "relative_median_absolute_deviation": relative_mad,
                 "samples": len(ratios),

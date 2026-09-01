@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import unittest
 
 from kernel_optimization.baseline_styles import (
@@ -55,7 +56,11 @@ class BaselineStyleTests(unittest.TestCase):
         self.assertFalse(resolved.emulated)
 
     def test_kernelagent_uses_single_agent_ncu_guided_beam(self) -> None:
-        resolved = _resolve("kernelagent", _task())
+        task = replace(
+            _task(),
+            evaluator={"runtime": {"ncu_set": "tilesight-targeted"}},
+        )
+        resolved = _resolve("kernelagent", task)
 
         self.assertEqual(resolved.agent_workers, 1)
         self.assertEqual(resolved.evaluation_policy, "ncu")
@@ -63,6 +68,7 @@ class BaselineStyleTests(unittest.TestCase):
         self.assertEqual(resolved.strategy_allocation_policy, "ai-planned")
         self.assertEqual(resolved.structural_search_policy, "observe")
         self.assertEqual(resolved.task.budget.beam_width, 3)
+        self.assertEqual(resolved.task.evaluator["runtime"]["ncu_set"], "full")
         self.assertTrue(resolved.canonical)
 
     def test_persistent_and_single_incumbent_topologies_are_distinct(self) -> None:

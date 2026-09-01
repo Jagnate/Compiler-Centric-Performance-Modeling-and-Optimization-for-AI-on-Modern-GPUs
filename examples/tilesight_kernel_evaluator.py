@@ -25,6 +25,34 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 _WORKER_RESPONSE_PREFIX = "KERNEL_OPT_WORKER_RESPONSE "
 
+# Keep milestone profiles focused on evidence used by the controller. Nsight
+# Compute's full set collects thousands of counters and can replay the kernel
+# many times; these counters cover latency, memory hierarchy, occupancy,
+# resource footprint, compute pipes, and shared-memory conflict diagnosis.
+TILESIGHT_TARGETED_NCU_METRICS = (
+    "gpu__time_duration.sum",
+    "dram__bytes_read.sum.pct_of_peak_sustained_elapsed",
+    "dram__bytes_write.sum.pct_of_peak_sustained_elapsed",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "lts__t_sector_hit_rate.pct",
+    "lts__t_sectors.avg.pct_of_peak_sustained_elapsed",
+    "lts__t_sectors_srcunit_tex_op_read_lookup_hit.sum",
+    "lts__t_sectors_srcunit_tex_op_read_lookup_miss.sum",
+    "lts__t_sectors_srcunit_tex_op_write.sum",
+    "launch__shared_mem_per_block_static",
+    "launch__shared_mem_per_block_dynamic",
+    "launch__registers_per_thread",
+    "l1tex__data_pipe_lsu_wavefronts.avg.pct_of_peak_sustained_elapsed",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum",
+    "l1tex__data_pipe_lsu_wavefronts_mem_shared.sum",
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed",
+    "sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_elapsed",
+    "sm__pipe_alu_cycles_active.avg.pct_of_peak_sustained_elapsed",
+    "sm__inst_executed_pipe_xu.avg.pct_of_peak_sustained_elapsed",
+    "sm__warps_active.avg.pct_of_peak_sustained_active",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -531,8 +559,10 @@ def run_ncu(request: Mapping[str, Any]) -> Tuple[Path, Path]:
         "-f",
         "-o",
         str(report_stem),
-        "--set",
-        str(configuration.get("ncu_set") or metadata.get("ncu_set", "full")),
+    ]
+    command.extend(_ncu_collection_arguments(configuration, metadata))
+    command.extend(
+        [
         "--cache-control",
         str(configuration.get("ncu_cache_control", "all")),
         sys.executable,
@@ -540,7 +570,8 @@ def run_ncu(request: Mapping[str, Any]) -> Tuple[Path, Path]:
         "--run-once",
         "--request",
         str(Path(request["_request_path"]).resolve()),
-    ]
+        ]
+    )
     completed = subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -561,6 +592,32 @@ def run_ncu(request: Mapping[str, Any]) -> Tuple[Path, Path]:
         raise RuntimeError("NCU export failed: %s" % exported.stdout[-4000:])
     csv_path.write_text(exported.stdout, encoding="utf-8")
     return report_path, csv_path
+
+
+def _ncu_collection_arguments(
+    configuration: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> List[str]:
+    requested = configuration.get("ncu_metrics")
+    if requested is None:
+        requested = metadata.get("ncu_metrics")
+    if requested is not None:
+        if isinstance(requested, str):
+            metrics = [item.strip() for item in requested.split(",") if item.strip()]
+        elif isinstance(requested, Sequence):
+            metrics = [str(item).strip() for item in requested if str(item).strip()]
+        else:
+            raise ValueError("ncu_metrics must be a list or comma-separated string")
+        if not metrics:
+            raise ValueError("ncu_metrics cannot be empty")
+        return ["--metrics", ",".join(dict.fromkeys(metrics))]
+
+    requested_set = str(
+        configuration.get("ncu_set")
+        or metadata.get("ncu_set", "tilesight-targeted")
+    )
+    if requested_set == "tilesight-targeted":
+        return ["--metrics", ",".join(TILESIGHT_TARGETED_NCU_METRICS)]
+    return ["--set", requested_set]
 
 
 def robust_statistics(samples: Sequence[float]) -> Dict[str, Any]:

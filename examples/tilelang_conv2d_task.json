@@ -115,7 +115,7 @@
         }
       ],
       "profile_directory": "results/ncu_profiles/conv2d",
-      "ncu_set": "full",
+      "ncu_set": "tilesight-targeted",
       "ncu_cache_control": "all"
     }
   },

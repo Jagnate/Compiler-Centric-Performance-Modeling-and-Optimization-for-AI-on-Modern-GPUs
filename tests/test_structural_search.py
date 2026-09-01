@@ -15,6 +15,7 @@ from kernel_optimization.schema import (
     BudgetConfig,
     Candidate,
     CandidateProposal,
+    CandidateRecord,
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
@@ -427,6 +428,145 @@ class StructuralSearchTests(unittest.TestCase):
         self.assertIn("realized_outcomes", plans["rounds"][0])
         self.assertEqual(plans["rounds"][0]["source"], "hosted-ai-planner")
 
+    def test_evidence_stable_strategy_plan_is_reused_for_three_round_window(self) -> None:
+        source = (
+            "def make_kernel(block_m: int = 64):\n"
+            "    values = [0] * block_m\n"
+            "    return values\n"
+        )
+        task = _task(
+            "ai-plan-reuse",
+            proposals=2,
+            entrypoint="make_kernel",
+            rounds=3,
+        )
+        generator = _AiPlanningGenerator(source)
+
+        with tempfile.TemporaryDirectory(prefix="ai-plan-reuse-") as directory:
+            output = Path(directory)
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=generator,
+                backend=_StablePlanningBackend(),
+                store=ArtifactStore(output),
+                selection_policy="measure-all",
+                profile_policy="none",
+                structural_search_policy="off",
+                strategy_allocation_policy="ai-planned",
+                strategy_plan_interval_rounds=3,
+            )
+            summary = controller.run()
+            plans = json.loads((output / "strategy_plans.json").read_text())
+
+        self.assertEqual(summary.planner_calls, 1)
+        self.assertEqual(len(generator.planning_requests), 1)
+        self.assertEqual(
+            [item["source"] for item in plans["rounds"]],
+            ["hosted-ai-planner", "reused-ai-plan", "reused-ai-plan"],
+        )
+        self.assertEqual(
+            [item["raw_plan"]["planned_round"] for item in plans["rounds"]],
+            [1, 1, 1],
+        )
+
+    def test_unmeasured_strategy_outcomes_are_explicitly_unknown(self) -> None:
+        source = "def make_kernel():\n    return 1\n"
+        task = _task("unmeasured-outcome", proposals=1)
+        seed = Candidate.seed(task, source, "kernel.py")
+        proposal = Candidate.from_proposal(
+            task,
+            seed,
+            CandidateProposal(
+                "Try a layout.",
+                source + "\nLAYOUT = 1\n",
+                metadata={"strategy_id": "memory-layout"},
+            ),
+            generation=1,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="unmeasured-outcome-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=_ParameterOnlyGenerator(source),
+                backend=_SimpleBackend(),
+                store=ArtifactStore(Path(directory)),
+                profile_policy="none",
+            )
+            controller.records = {
+                seed.candidate_id: CandidateRecord(
+                    candidate=seed,
+                    model=ModelEvaluation(valid=True, predicted_latency_ms=1.0),
+                    measurement=Measurement(correct=True, latency_ms=1.0),
+                ),
+                proposal.candidate_id: CandidateRecord(
+                    candidate=proposal,
+                    model=ModelEvaluation(valid=True, predicted_latency_ms=0.5),
+                    state="modeled-not-promoted",
+                ),
+            }
+
+            outcome = controller._strategy_outcome_summary()["memory-layout"]
+
+        self.assertEqual(outcome["unmeasured_compiled"], 1)
+        self.assertEqual(outcome["hardware_coverage"], 0.0)
+        self.assertEqual(outcome["evidence_status"], "no-hardware-evidence")
+        self.assertFalse(outcome["negative_evidence_supported"])
+
+    def test_reuse_is_rejected_after_repeated_strategy_failures(self) -> None:
+        source = "def make_kernel():\n    return 1\n"
+        task = _task("material-strategy-failure", proposals=1)
+
+        with tempfile.TemporaryDirectory(prefix="material-strategy-failure-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=_ParameterOnlyGenerator(source),
+                backend=_SimpleBackend(),
+                store=ArtifactStore(Path(directory)),
+                profile_policy="none",
+                strategy_plan_interval_rounds=3,
+            )
+            origin = {
+                "planning_evidence": {
+                    "search_state": {
+                        "profile_calls": 0,
+                        "model_screening_mode": "evidence-warmup",
+                    },
+                    "strategy_outcomes": {},
+                    "current_best": {
+                        "candidate_id": "seed",
+                        "measured_latency_ms": 1.0,
+                    },
+                }
+            }
+            current = {
+                "search_state": {
+                    "profile_calls": 0,
+                    "model_screening_mode": "evidence-warmup",
+                },
+                "strategy_outcomes": {
+                    "memory-layout": {
+                        "failure_categories": {"compile-or-lowering": 2},
+                        "negative_evidence_supported": False,
+                    }
+                },
+                "current_best": {
+                    "candidate_id": "seed",
+                    "measured_latency_ms": 1.0,
+                },
+            }
+
+            changed = controller._strategy_evidence_changed_materially(
+                origin, current
+            )
+
+        self.assertTrue(changed)
+
     def test_planner_failure_uses_fallback_without_stopping_search(self) -> None:
         source = (
             "def make_kernel(block_m: int = 64):\n"
@@ -607,6 +747,12 @@ class _OpenMemoryBackend(_SimpleBackend):
         else:
             latency = 2.0
         return Measurement(correct=True, latency_ms=latency, samples_ms=[latency])
+
+
+class _StablePlanningBackend(_SimpleBackend):
+    def measure(self, task, candidate):
+        del task, candidate
+        return Measurement(correct=True, latency_ms=1.0, samples_ms=[1.0])
 
 
 class _UnnamedOpenGenerator(_OpenMemoryGenerator):

@@ -385,6 +385,13 @@ def resolve_baseline_style(
                 }
 
         budget = replace(task.budget, **dict(preset.budget_overrides))
+        evaluator = dict(task.evaluator)
+        runtime = dict(evaluator.get("runtime") or {})
+        if effective["evaluation_policy"] == "ncu":
+            # Preserve the profiler-rich related-system protocol. The native
+            # TileSight milestone path uses the smaller targeted metric set.
+            runtime["ncu_set"] = "full"
+            evaluator["runtime"] = runtime
         metadata = dict(task.metadata)
         metadata["baseline_style_protocol"] = {
             "name": preset.name,
@@ -407,7 +414,12 @@ def resolve_baseline_style(
                 ],
             },
         }
-        effective_task = replace(task, budget=budget, metadata=metadata)
+        effective_task = replace(
+            task,
+            budget=budget,
+            evaluator=evaluator,
+            metadata=metadata,
+        )
 
     return BaselineStyleResolution(
         preset=preset,

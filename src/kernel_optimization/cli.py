@@ -246,6 +246,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--strategy-plan-interval-rounds",
+        type=int,
+        help=(
+            "Reuse an evidence-stable hosted strategy plan for this many rounds. "
+            "Defaults to 3 for the native system and 1 for related-system styles."
+        ),
+    )
+    parser.add_argument(
         "--api-input-price-per-million",
         type=float,
         help="Optional hosted-model input-token price used only for cost reporting.",
@@ -266,6 +274,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit("--agent-workers must be positive")
     if args.promotions_per_round is not None and args.promotions_per_round <= 0:
         raise SystemExit("--promotions-per-round must be positive")
+    if (
+        args.strategy_plan_interval_rounds is not None
+        and args.strategy_plan_interval_rounds <= 0
+    ):
+        raise SystemExit("--strategy-plan-interval-rounds must be positive")
     if (
         not math.isfinite(args.incumbent_snapshot_interval_seconds)
         or args.incumbent_snapshot_interval_seconds < 0
@@ -318,6 +331,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args.no_compiled_dedup = not style.compiled_deduplication
     args.structural_search_policy = style.structural_search_policy
     args.strategy_allocation_policy = style.strategy_allocation_policy
+    if args.strategy_plan_interval_rounds is None:
+        args.strategy_plan_interval_rounds = (
+            3 if style.preset.name == "native" else 1
+        )
     try:
         policies = resolve_evaluation_policies(
             evaluation_policy=args.evaluation_policy,
@@ -452,6 +469,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "compiled_deduplication": policies["compiled_deduplication"],
             "structural_search_policy": args.structural_search_policy,
             "strategy_allocation_policy": args.strategy_allocation_policy,
+            "strategy_plan_interval_rounds": (
+                args.strategy_plan_interval_rounds
+            ),
             "metadata_compression_policy": args.metadata_compression_policy,
             "metadata_history_limit": args.metadata_history_limit,
             "metadata_lesson_limit": args.metadata_lesson_limit,
@@ -552,6 +572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         compiled_deduplication=not args.no_compiled_dedup,
         structural_search_policy=args.structural_search_policy,
         strategy_allocation_policy=args.strategy_allocation_policy,
+        strategy_plan_interval_rounds=args.strategy_plan_interval_rounds,
         api_input_price_per_million=args.api_input_price_per_million,
         api_output_price_per_million=args.api_output_price_per_million,
         incumbent_snapshot_interval_seconds=(

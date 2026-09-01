@@ -84,6 +84,18 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
     ) -> List[CandidateRecord]:
         del task
         valid = self._valid(modeled)
+        if (
+            valid
+            and not trust.screening_reliable
+            and self.fixed_promotions_per_round is None
+        ):
+            reasons = ",".join(trust.screening_failure_reasons)
+            for record in valid:
+                record.selection_reasons.append(
+                    "trust-fallback-measure-all:" + reasons
+                )
+            return valid
+
         target = self.promotion_count(len(valid), trust)
         if target >= len(valid):
             for record in valid:
@@ -111,6 +123,40 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
         exploit_count = max(1, target // 2)
         for record in ranked[:exploit_count]:
             add(record, "model-top")
+
+        # A global model ranking can be systematically wrong for an entire
+        # implementation family. Spend audit slots across distinct strategy
+        # lanes before using confidence or random tie-breakers.
+        represented = {
+            self._strategy_id(record)
+            for record in selected
+        }
+        groups = {}
+        for record in ranked:
+            groups.setdefault(self._strategy_id(record), []).append(record)
+        ordered_groups = sorted(
+            groups.items(),
+            key=lambda item: (
+                float(item[1][0].model.ranking_latency_ms),
+                item[0],
+            ),
+        )
+        for strategy_id, records in ordered_groups:
+            if len(selected) >= target:
+                break
+            if strategy_id in represented:
+                continue
+            candidate = next(
+                (
+                    item
+                    for item in records
+                    if item.candidate.candidate_id not in selected_ids
+                ),
+                None,
+            )
+            if candidate is not None:
+                add(candidate, "strategy-stratified-audit")
+                represented.add(strategy_id)
 
         remaining = [item for item in valid if item.candidate.candidate_id not in selected_ids]
         if remaining:
@@ -160,6 +206,13 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
         return selected
 
     @staticmethod
+    def _strategy_id(record: CandidateRecord) -> str:
+        return str(
+            record.candidate.proposal_metadata.get("strategy_id")
+            or "unassigned"
+        )
+
+    @staticmethod
     def _model_insensitive_candidates(
         valid: Sequence[CandidateRecord],
         remaining: Sequence[CandidateRecord],
@@ -168,10 +221,7 @@ class AdaptiveSelectionPolicy(SelectionPolicy):
 
         groups = {}
         for record in valid:
-            strategy = str(
-                record.candidate.proposal_metadata.get("strategy_id")
-                or "unassigned"
-            )
+            strategy = AdaptiveSelectionPolicy._strategy_id(record)
             groups.setdefault(strategy, []).append(record)
         insensitive_ids = set()
         for records in groups.values():

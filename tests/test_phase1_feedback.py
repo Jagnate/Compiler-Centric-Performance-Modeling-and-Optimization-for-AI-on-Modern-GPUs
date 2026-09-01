@@ -315,6 +315,48 @@ class CalibrationAndMemoryTests(unittest.TestCase):
         self.assertEqual(calibrated.ranking_latency_ms, 6.0)
         self.assertEqual(calibrated.calibration["source"], "exact-regime")
 
+    def test_extreme_scale_mismatch_is_calibrated_instead_of_clipped(self) -> None:
+        task = make_task(max_repairs_per_round=0)
+        calibrator = LatencyCalibrator(min_samples=2)
+        for index in range(2):
+            candidate = Candidate._create(
+                task=task,
+                parent_id=None,
+                generation=index,
+                source_name="kernel.py",
+                source_code="VALUE = %d\n\ndef kernel(x):\n    return x\n" % index,
+                hypothesis="extreme scale sample",
+                expected_effect={},
+                proposal_metadata={},
+                lineage_kind="proposal",
+                repair_depth=0,
+            )
+            record = CandidateRecord(
+                candidate=candidate,
+                model=ModelEvaluation(
+                    valid=True,
+                    predicted_latency_ms=1000.0,
+                    bottleneck="dram-bandwidth",
+                ),
+                measurement=Measurement(correct=True, latency_ms=1.0),
+            )
+            calibrator.observe(task, record)
+
+        calibrated = calibrator.apply(
+            task,
+            ModelEvaluation(
+                valid=True,
+                predicted_latency_ms=2000.0,
+                bottleneck="dram-bandwidth",
+                confidence="high",
+            ),
+        )
+
+        self.assertAlmostEqual(calibrated.calibrated_latency_ms, 2.0)
+        self.assertAlmostEqual(calibrated.calibration["scale"], 0.001)
+        self.assertTrue(calibrated.calibration["extreme_scale"])
+        self.assertEqual(calibrated.confidence, "low")
+
     def test_profile_lesson_is_visible_to_an_unrelated_parent(self) -> None:
         task = make_task(max_repairs_per_round=0)
         seed = Candidate.seed(task, "def kernel(x):\n    return x\n", "kernel.py")

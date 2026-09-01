@@ -99,7 +99,7 @@
         }
       ],
       "profile_directory": "results/ncu_profiles/fused_add_rms_norm",
-      "ncu_set": "full",
+      "ncu_set": "tilesight-targeted",
       "ncu_cache_control": "all"
     }
   },

@@ -213,10 +213,10 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         workload_suite = suite._builtin_workload_suite(args.shape_config)
         self.assertEqual(
             suite._default_output_root(workload_suite).parts[-2:],
-            ("final_eval", "related_system_baselines_30m_basic_2048"),
+            ("final_eval", "related_system_baselines_15m_basic_2048"),
         )
         self.assertIsNone(args.output_root)
-        self.assertEqual(args.max_search_seconds, 1800.0)
+        self.assertEqual(args.max_search_seconds, 900.0)
         self.assertEqual(args.budget_mode, "fixed-time")
         self.assertEqual(args.measurement_repeats, 3)
         self.assertEqual(args.time_budget_round_ceiling, 128)
@@ -236,11 +236,22 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         self.assertEqual(
             outputs,
             {
-                "related_system_baselines_30m_basic_2048",
-                "related_system_baselines_30m_large",
-                "related_system_baselines_30m_special",
+                "related_system_baselines_15m_basic_2048",
+                "related_system_baselines_15m_large",
+                "related_system_baselines_15m_special",
             },
         )
+
+    def test_default_output_tracks_an_explicit_time_budget(self) -> None:
+        workload_suite = suite._builtin_workload_suite("basic")
+
+        ten_minutes = suite._default_output_root(workload_suite, 600.0)
+        non_integral_minutes = suite._default_output_root(workload_suite, 650.0)
+        rounds = suite._default_output_root(workload_suite, 0.0)
+
+        self.assertEqual(ten_minutes.name, "related_system_baselines_10m_basic_2048")
+        self.assertEqual(non_integral_minutes.name, "related_system_baselines_650s_basic_2048")
+        self.assertEqual(rounds.name, "related_system_baselines_rounds_basic_2048")
 
     def test_each_named_config_uses_one_shape_for_search_and_final(self) -> None:
         for config_name in suite.SHAPE_CONFIGS:
@@ -327,6 +338,77 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
                 expected_final_validations=1,
             )
         )
+
+    def test_fixed_time_resume_requires_the_same_search_budget(self) -> None:
+        summary = {
+            "search_elapsed_seconds": 901.0,
+            "final_validation_seconds": 12.0,
+            "total_elapsed_seconds": 913.0,
+            "final_validation_calls": 2,
+            "max_search_seconds": 900.0,
+        }
+
+        self.assertTrue(
+            suite._summary_uses_current_timing_protocol(
+                summary,
+                budget_mode="fixed-time",
+                expected_final_validations=1,
+                expected_max_search_seconds=900.0,
+            )
+        )
+        self.assertFalse(
+            suite._summary_uses_current_timing_protocol(
+                summary,
+                budget_mode="fixed-time",
+                expected_final_validations=1,
+                expected_max_search_seconds=600.0,
+            )
+        )
+
+    def test_all_styles_use_one_shared_median_seed_per_kernel(self) -> None:
+        rows = [
+            {
+                "kernel": "matmul",
+                "style": "native",
+                "status": "completed",
+                "seed_latency_ms": 1.0,
+                "final_seed_latency_ms": 1.0,
+                "best_latency_ms": 0.5,
+                "speedup_over_seed": 2.0,
+            },
+            {
+                "kernel": "matmul",
+                "style": "kernelagent",
+                "status": "completed",
+                "seed_latency_ms": 1.2,
+                "final_seed_latency_ms": 1.2,
+                "best_latency_ms": 0.8,
+                "speedup_over_seed": 1.5,
+            },
+            {
+                "kernel": "matmul",
+                "style": "tilefoundry",
+                "status": "completed",
+                "seed_latency_ms": 1.1,
+                "final_seed_latency_ms": 1.1,
+                "best_latency_ms": 1.0,
+                "speedup_over_seed": 1.1,
+            },
+        ]
+
+        normalized, references = suite._apply_shared_seed_references(rows)
+
+        self.assertAlmostEqual(references["matmul"]["latency_ms"], 1.1)
+        self.assertEqual(references["matmul"]["sample_count"], 3)
+        self.assertEqual(
+            [row["seed_latency_ms"] for row in normalized],
+            [1.1, 1.1, 1.1],
+        )
+        self.assertAlmostEqual(normalized[0]["speedup_over_seed"], 2.2)
+        self.assertAlmostEqual(normalized[1]["speedup_over_seed"], 1.375)
+        self.assertAlmostEqual(normalized[2]["speedup_over_seed"], 1.1)
+        self.assertEqual(normalized[0]["treatment_seed_latency_ms"], 1.0)
+        self.assertEqual(normalized[1]["treatment_speedup_over_seed"], 1.5)
 
     def test_new_basic_shape_rejects_legacy_1024_task(self) -> None:
         treatment = suite.selected_treatments(

@@ -58,12 +58,26 @@ class NcuMilestonePolicy:
             and after_latency is not None
             and after_latency < before_latency
         )
+        rounds_since_profile = round_number - self.last_profile_round
+        spacing_ready = rounds_since_profile >= self.budget.ncu_min_interval_rounds
         if improved:
             self.plateau_rounds = 0
             improvement = (before_latency - after_latency) / before_latency
+            unprofiled_incumbent = (
+                best_after.candidate.candidate_id not in self.profiled_ids
+            )
             if (
-                improvement >= self.budget.ncu_improvement_threshold
-                and best_after.candidate.candidate_id not in self.profiled_ids
+                unprofiled_incumbent
+                and improvement >= self.budget.ncu_breakthrough_threshold
+            ):
+                return ProfileDecision(
+                    best_after.candidate.candidate_id,
+                    "breakthrough-measured-improvement",
+                )
+            if (
+                spacing_ready
+                and unprofiled_incumbent
+                and improvement >= self.budget.ncu_improvement_threshold
             ):
                 return ProfileDecision(
                     best_after.candidate.candidate_id,
@@ -71,6 +85,9 @@ class NcuMilestonePolicy:
                 )
         else:
             self.plateau_rounds += 1
+
+        if not spacing_ready:
+            return None
 
         disagreement = self._largest_disagreement(measured_this_round, all_records)
         if disagreement is not None:
@@ -93,7 +110,10 @@ class NcuMilestonePolicy:
 
         stale = (
             round_number - self.last_profile_round
-            >= self.budget.ncu_max_staleness_rounds
+            >= max(
+                self.budget.ncu_max_staleness_rounds,
+                self.budget.ncu_min_interval_rounds,
+            )
         )
         plateau = self.plateau_rounds >= self.budget.ncu_plateau_rounds
         if stale or plateau:

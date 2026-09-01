@@ -152,6 +152,7 @@ class OptimizationController:
         evaluation_policy: str = "tilesight",
         tir_evidence_policy: str = "auto",
         metadata_compression_policy: str = COMPRESSION_VERSION,
+        strategy_plan_interval_rounds: int = 1,
         time_budget_clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.task = task
@@ -222,6 +223,13 @@ class OptimizationController:
                 "strategy_allocation_policy must be ai-planned, fixed, or unconstrained"
             )
         self.strategy_allocation_policy = strategy_allocation_policy
+        if (
+            isinstance(strategy_plan_interval_rounds, bool)
+            or not isinstance(strategy_plan_interval_rounds, int)
+            or strategy_plan_interval_rounds <= 0
+        ):
+            raise ValueError("strategy_plan_interval_rounds must be positive")
+        self.strategy_plan_interval_rounds = strategy_plan_interval_rounds
         interval = float(incumbent_snapshot_interval_seconds)
         if not math.isfinite(interval) or interval < 0:
             raise ValueError(
@@ -1109,6 +1117,18 @@ class OptimizationController:
             )
             return self._archive_strategy_plan(plan, evidence)
 
+        reused = self._reusable_strategy_plan(round_number, evidence)
+        if reused is not None:
+            self.progress.emit(
+                "strategy_plan_reused",
+                "Reusing the recent strategy allocation because no material "
+                "hardware evidence changed.",
+                round=round_number,
+                planned_round=reused.raw_plan.get("planned_round"),
+                allocation=reused.to_dict()["allocation"],
+            )
+            return self._archive_strategy_plan(reused, evidence)
+
         planner = getattr(self.generator, "plan_strategies", None)
         if not callable(planner):
             self.planner_fallbacks += 1
@@ -1197,6 +1217,10 @@ class OptimizationController:
             raw_plan,
             evidence=evidence,
         )
+        if plan.source == "hosted-ai-planner":
+            raw_plan = dict(plan.raw_plan)
+            raw_plan["planned_round"] = round_number
+            plan = replace(plan, raw_plan=raw_plan)
         if plan.source == "deterministic-fallback":
             self.planner_fallbacks += 1
         self.progress.emit(
@@ -1209,6 +1233,147 @@ class OptimizationController:
             elapsed_seconds=round(elapsed, 3),
         )
         return self._archive_strategy_plan(plan, evidence)
+
+    def _reusable_strategy_plan(
+        self,
+        round_number: int,
+        evidence: Mapping[str, Any],
+    ) -> Optional[StrategyPlan]:
+        """Reuse a hosted allocation within a short evidence-stable window."""
+
+        if self.strategy_plan_interval_rounds <= 1:
+            return None
+        earlier = [
+            item
+            for item in self.strategy_plans
+            if int(item.get("round", -1)) < round_number
+            and item.get("source") in {"hosted-ai-planner", "reused-ai-plan"}
+        ]
+        if not earlier:
+            return None
+        previous = max(earlier, key=lambda item: int(item.get("round", 0)))
+        previous_raw = dict(previous.get("raw_plan") or {})
+        planned_round = int(
+            previous_raw.get("planned_round", previous.get("round", 0))
+        )
+        if round_number - planned_round >= self.strategy_plan_interval_rounds:
+            return None
+        origin = next(
+            (
+                item
+                for item in self.strategy_plans
+                if int(item.get("round", -1)) == planned_round
+                and item.get("source") == "hosted-ai-planner"
+            ),
+            None,
+        )
+        if origin is None or self._strategy_evidence_changed_materially(
+            origin, evidence
+        ):
+            return None
+
+        origin_plan = StrategyPlan.from_dict(origin)
+        assignments = [
+            replace(
+                assignment,
+                slot="r%03d-s%02d-%s"
+                % (round_number, ordinal, assignment.strategy_id),
+                ordinal=ordinal,
+                selection_reason=(
+                    "reused-evidence-stable-plan:%s"
+                    % assignment.selection_reason
+                ),
+            )
+            for ordinal, assignment in enumerate(origin_plan.assignments)
+        ]
+        if len(assignments) != self.task.budget.proposals_per_round:
+            return None
+        raw_plan = dict(origin_plan.raw_plan)
+        raw_plan.update(
+            {
+                "planned_round": planned_round,
+                "reused_from_round": int(previous.get("round", planned_round)),
+                "reuse_interval_rounds": self.strategy_plan_interval_rounds,
+            }
+        )
+        return StrategyPlan(
+            round_number=round_number,
+            policy="ai-planned",
+            source="reused-ai-plan",
+            requested_count=origin_plan.requested_count,
+            assignments=assignments,
+            raw_plan=raw_plan,
+            overrides=list(origin_plan.overrides),
+            round_rationale=(
+                "Reused the round %d hosted plan because the incumbent, NCU "
+                "evidence, and model-screening state did not change materially."
+                % planned_round
+            ),
+            confidence=origin_plan.confidence,
+        )
+
+    def _strategy_evidence_changed_materially(
+        self,
+        origin: Mapping[str, Any],
+        current: Mapping[str, Any],
+    ) -> bool:
+        previous = dict(origin.get("planning_evidence") or {})
+        previous_state = dict(previous.get("search_state") or {})
+        current_state = dict(current.get("search_state") or {})
+        if int(previous_state.get("profile_calls", 0)) != int(
+            current_state.get("profile_calls", 0)
+        ):
+            return True
+        if previous_state.get("model_screening_mode") != current_state.get(
+            "model_screening_mode"
+        ):
+            return True
+
+        previous_outcomes = dict(previous.get("strategy_outcomes") or {})
+        current_outcomes = dict(current.get("strategy_outcomes") or {})
+        for strategy_id, raw_outcome in current_outcomes.items():
+            outcome = dict(raw_outcome or {})
+            old_outcome = dict(previous_outcomes.get(strategy_id) or {})
+            failures = sum(
+                int(value)
+                for value in dict(outcome.get("failure_categories") or {}).values()
+            )
+            old_failures = sum(
+                int(value)
+                for value in dict(
+                    old_outcome.get("failure_categories") or {}
+                ).values()
+            )
+            if failures - old_failures >= 2:
+                return True
+            if not outcome.get("negative_evidence_supported"):
+                continue
+            best_relative = outcome.get("best_relative_improvement_vs_parent")
+            if isinstance(best_relative, (int, float)) and abs(
+                float(best_relative)
+            ) >= self.task.budget.ncu_improvement_threshold:
+                old_best_relative = old_outcome.get(
+                    "best_relative_improvement_vs_parent"
+                )
+                if old_best_relative != best_relative:
+                    return True
+
+        previous_best = dict(previous.get("current_best") or {})
+        current_best = dict(current.get("current_best") or {})
+        old_latency = previous_best.get("measured_latency_ms")
+        new_latency = current_best.get("measured_latency_ms")
+        if isinstance(old_latency, (int, float)) and isinstance(
+            new_latency, (int, float)
+        ):
+            old_latency = float(old_latency)
+            new_latency = float(new_latency)
+            if old_latency > 0:
+                improvement = (old_latency - new_latency) / old_latency
+                if improvement >= self.task.budget.ncu_improvement_threshold:
+                    return True
+        elif previous_best.get("candidate_id") != current_best.get("candidate_id"):
+            return True
+        return False
 
     def _archive_strategy_plan(
         self,
@@ -2742,6 +2907,11 @@ class OptimizationController:
                 "structural_search_policy": self.structural_search_policy,
                 "evaluation_policy": self.evaluation_policy,
                 "tir_evidence_policy": self.tir_evidence_policy,
+                "profile_calls": self.profile_calls,
+                "model_screening_mode": self.trust.screening_mode,
+                "strategy_plan_interval_rounds": (
+                    self.strategy_plan_interval_rounds
+                ),
                 "measured_candidates": sum(
                     item.is_measured_correct for item in self.records.values()
                 ),
@@ -2842,6 +3012,28 @@ class OptimizationController:
             )
             outcome["mean_relative_improvement_vs_parent"] = (
                 sum(values) / len(values) if values else None
+            )
+            hardware_eligible = max(
+                int(outcome["compiled_unique"]),
+                int(outcome["measured_correct"]),
+            )
+            measured = int(outcome["measured_correct"])
+            unmeasured = max(0, hardware_eligible - measured)
+            coverage = (
+                measured / hardware_eligible if hardware_eligible else 0.0
+            )
+            if measured == 0:
+                evidence_status = "no-hardware-evidence"
+            elif measured < 2 or coverage < 0.5:
+                evidence_status = "sparse-hardware-evidence"
+            else:
+                evidence_status = "hardware-observed"
+            outcome["hardware_eligible"] = hardware_eligible
+            outcome["unmeasured_compiled"] = unmeasured
+            outcome["hardware_coverage"] = coverage
+            outcome["evidence_status"] = evidence_status
+            outcome["negative_evidence_supported"] = (
+                measured >= 2 and coverage >= 0.5
             )
         return grouped
 

@@ -57,7 +57,10 @@ portfolio is universally best.
 Use known strategy IDs when they fit. You may propose a new short strategy ID;
 the controller will route it through open structural exploration. Balance
 exploitation of measured improvements with exploration when evidence is weak or
-the search has plateaued. Return only the requested JSON plan. Do not return
+the search has plateaued. Treat unmeasured candidates as unknown, not as failed
+strategy evidence. A strategy may be deprioritized for poor performance only
+when its outcome reports negative_evidence_supported=true; otherwise reserve a
+hardware audit before rejecting the direction. Return only the requested JSON plan. Do not return
 source code, Markdown, or additional top-level keys.
 """
 
@@ -122,6 +125,8 @@ def build_strategy_planning_prompt(
             "Allocate zero slots to any strategy, including parameter-tuning, when the evidence does not justify it.",
             "Do not force broad coverage when focused exploitation is better, but retain at least two directions when candidate_count permits.",
             "Do not invent measurements or treat analytical predictions as hardware observations.",
+            "Never interpret generated, compiler-valid, model-valid, or unmeasured candidates as negative strategy outcomes.",
+            "Only use a strategy's poor latency as negative evidence when negative_evidence_supported is true; otherwise allocate an audit slot if the direction matters.",
         ],
         "response_schema": {
             "allocation": [

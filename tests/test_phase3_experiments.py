@@ -111,6 +111,64 @@ class PhaseThreeExperimentTests(unittest.TestCase):
         self.assertEqual(decision.candidate_id, candidate.candidate.candidate_id)
         self.assertEqual(decision.reason, "every-round")
 
+    def test_milestone_profile_obeys_spacing_for_ordinary_improvements(self) -> None:
+        task = _task()
+        seed = CandidateRecord(
+            candidate=Candidate.seed(task, SOURCE % 0, "kernel.py"),
+            model=ModelEvaluation(valid=True, predicted_latency_ms=10.0),
+            measurement=Measurement(correct=True, latency_ms=10.0),
+        )
+        candidate = CandidateRecord(
+            candidate=Candidate.from_proposal(
+                task,
+                seed.candidate,
+                CandidateProposal("Ten percent faster.", SOURCE % 1),
+                generation=1,
+            ),
+            model=ModelEvaluation(valid=True, predicted_latency_ms=9.0),
+            measurement=Measurement(correct=True, latency_ms=9.0),
+        )
+        policy = create_profile_policy("milestone", task.budget)
+        policy.mark_profiled(seed, 0)
+
+        self.assertIsNone(
+            policy.decide(1, seed, candidate, [candidate], [seed, candidate])
+        )
+        decision = policy.decide(
+            task.budget.ncu_min_interval_rounds,
+            seed,
+            candidate,
+            [candidate],
+            [seed, candidate],
+        )
+        self.assertEqual(decision.candidate_id, candidate.candidate.candidate_id)
+        self.assertEqual(decision.reason, "meaningful-measured-improvement")
+
+    def test_milestone_profiles_breakthrough_without_waiting_for_spacing(self) -> None:
+        task = _task()
+        seed = CandidateRecord(
+            candidate=Candidate.seed(task, SOURCE % 0, "kernel.py"),
+            model=ModelEvaluation(valid=True, predicted_latency_ms=10.0),
+            measurement=Measurement(correct=True, latency_ms=10.0),
+        )
+        candidate = CandidateRecord(
+            candidate=Candidate.from_proposal(
+                task,
+                seed.candidate,
+                CandidateProposal("Twenty percent faster.", SOURCE % 1),
+                generation=1,
+            ),
+            model=ModelEvaluation(valid=True, predicted_latency_ms=8.0),
+            measurement=Measurement(correct=True, latency_ms=8.0),
+        )
+        policy = create_profile_policy("milestone", task.budget)
+        policy.mark_profiled(seed, 0)
+
+        decision = policy.decide(1, seed, candidate, [candidate], [seed, candidate])
+
+        self.assertEqual(decision.candidate_id, candidate.candidate.candidate_id)
+        self.assertEqual(decision.reason, "breakthrough-measured-improvement")
+
     def test_compiled_equivalent_candidate_is_not_measured(self) -> None:
         task = _task()
         backend = _DedupBackend()

@@ -419,12 +419,12 @@ single-agent mode and materializes the built-in `basic` workload family. The fix
 primary/final shapes are GEMM `2048 x 2048 x 2048`, RMSNorm and fused norm
 `8192 x 4096`, Conv2D `N32 H56 W56 C64 F128 K3`, and Flash Attention
 `B1 H32 S1024 D64`. Base task files are not modified. Results go to
-`results/final_eval/related_system_baselines_30m_basic_2048/<kernel>/<style>/`; aggregate
+`results/final_eval/related_system_baselines_15m_basic_2048/<kernel>/<style>/`; aggregate
 `suite_summary.json` and `suite_summary.md` files are updated after every run.
 
 Each treatment uses exactly the same fixed-time protocol: one agent,
-`measurement_repeats=3`, a 1,800-second controller budget, and a 128-round safety
-ceiling that is intentionally unreachable during a normal 30-minute hosted-model
+`measurement_repeats=3`, a 900-second controller budget, and a 128-round safety
+ceiling that is intentionally unreachable during a normal 15-minute hosted-model
 run. `--search-until-time-budget` keeps searching after an empty candidate round.
 The native system uses TIR-estimated registers during broad TileSight screening,
 so it does not invoke PTXAS for every generated candidate. Exact register and
@@ -440,13 +440,20 @@ after 32 requests to bound retained compiler/GPU state; set
 Final validation always bypasses the warmed worker and runs in a one-shot process.
 At the first safe checkpoint after the deadline, the controller freezes the
 search result and records `termination_reason=time-budget`. It then runs separate
-final validation outside the 1,800-second search budget and exports the best
+final validation outside the 900-second search budget and exports the best
 final-validated candidate. Reports keep `Search (s)`, `Final (s)`, and `Total (s)`
 separate, so equal-time comparisons use only the search column. The full 30-cell
-matrix therefore has a configured search budget of 15 GPU-hours plus bounded
+matrix therefore has a configured search budget of 7.5 GPU-hours plus bounded
 in-flight-call overshoot and final-validation overhead. A result that ends at the
 round ceiling or any other early condition is marked `ended-early`, not silently
 accepted as fair.
+
+The suite comparison uses one shared seed latency per kernel. It takes the median
+of all available fresh final-validation measurements of the identical seed source
+and shape, then recomputes every style's speedup against that common denominator.
+The original per-treatment seed latency and speedup remain in `suite_summary.json`
+for diagnosing clock or thermal variation; the Markdown table reports only the
+shared-reference speedup.
 
 Re-running the command reuses valid completed directories and resumes the first
 partial one. Useful controls are:
@@ -459,6 +466,10 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
 # Debug one matrix cell before starting the full suite.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
   --shape-config basic --only-kernel matmul --only-style kernelagent
+
+# Use a 10-minute search budget. The default is 900 seconds (15 minutes).
+PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
+  --shape-config basic --max-search-seconds 600
 
 # Run only the five related-system proxy styles for the old 5 x 5 matrix.
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
@@ -487,9 +498,9 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
 
 | Config | Primary GEMM | Primary norm | Primary Conv2D | Primary attention | Default result directory |
 | --- | --- | --- | --- | --- | --- |
-| `basic` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_30m_basic_2048` |
-| `large` | `4096 x 4096 x 4096` | `16384 x 4096` | `N64 H56 W56 C64 F128 K3` | `B1 H32 S2048 D64` | `related_system_baselines_30m_large` |
-| `special` | `4096 x 1024 x 4096` | `4096 x 8192` | `N32 H28 W28 C128 F256 K3` | `B1 H16 S3072 D64 causal` | `related_system_baselines_30m_special` |
+| `basic` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_15m_basic_2048` |
+| `large` | `4096 x 4096 x 4096` | `16384 x 4096` | `N64 H56 W56 C64 F128 K3` | `B1 H32 S2048 D64` | `related_system_baselines_15m_large` |
+| `special` | `4096 x 1024 x 4096` | `4096 x 8192` | `N32 H28 W28 C128 F256 K3` | `B1 H16 S3072 D64 causal` | `related_system_baselines_15m_special` |
 
 Norm shapes apply to both RMSNorm and fused Add + RMSNorm. Every configuration
 contains exactly one search case and one same-shape final case. The final case
@@ -498,6 +509,12 @@ second input shape. Base task files remain unchanged.
 `examples/run_final_related_system_shape_1.py` remains as a compatibility wrapper
 for `--shape-config special`, and `--workload-suite PATH` remains available for
 custom JSON suites.
+
+For built-in shape configs, the default output directory follows the requested
+budget (`10m`, `15m`, or an exact seconds label), preventing a completed run with
+a different time limit from being silently reused. Resume validation also checks
+the archived `max_search_seconds` value. Use `--output-root PATH` to choose an
+explicit experiment directory.
 
 ### Cost and graph bounds
 
@@ -667,6 +684,14 @@ source generation keeps the larger candidate budget:
 ```bash
 --api-planner-max-output-tokens 2000 --api-max-output-tokens 12000
 ```
+
+The native CLI defaults to `--strategy-plan-interval-rounds 3`. A hosted
+allocation is reused inside that three-round window only while evidence remains
+stable. A five-percent incumbent improvement, a new NCU profile, a model-screening
+mode change, repeated strategy failures, or a significant measured strategy
+outcome forces a fresh plan immediately. Related-system styles keep interval `1`
+and therefore preserve their per-round planning behavior. Reused rounds archive
+new slot assignments together with the original `planned_round`.
 
 The CLI first sends a very small API preflight request. Authentication, model
 access, quota, and endpoint failures are therefore detected before TileLang
@@ -1130,14 +1155,27 @@ the raw analytical latency and optionally adds a calibrated latency for search
 ranking. Scale factors use a robust median of measured/raw ratios grouped by
 architecture, kernel family, analytical bottleneck, register regime, and
 shared-memory regime. Calibration is disabled until the configured minimum
-sample count is available, is clamped conservatively, records dispersion, and
-downgrades confidence when the regime is unstable. This avoids embedding a
-single Matmul or Flash Attention observation into a global TileSight formula.
+sample count is available. It applies the observed scale even when the
+analytical model is off by more than four times, records that extreme scale,
+and downgrades confidence rather than silently clipping the correction. This
+avoids embedding a single Matmul or Flash Attention observation into a global
+TileSight formula while still repairing workload-local scale mismatch.
+
+Adaptive promotion also has a hardware-safety fallback. After at least three
+measurements, extreme unresolved scale error, high calibrated error, or poor
+parent-relative direction agreement disables model pruning and promotes every
+model-valid candidate to CUDA Event timing. Once direction agreement supports
+screening again, the normal bounded policy resumes. Under a finite promotion
+budget, audit slots cover distinct strategy lanes before random tie-breakers,
+so one globally wrong model ranking cannot erase an implementation family
+without hardware evidence.
 
 ## NCU Milestones
 
-Under the default `milestone` policy, the input source is profiled once. The
-controller then profiles at most one new candidate per round when it observes:
+Under the default `milestone` policy, the input source is profiled once. Normal
+milestones are separated by at least three rounds; a measured improvement of at
+least 15 percent is a breakthrough and may profile immediately. The controller
+otherwise profiles at most one new candidate when it observes:
 
 - a meaningful measured improvement;
 - disagreement between predicted and measured direction;
@@ -1146,7 +1184,11 @@ controller then profiles at most one new candidate per round when it observes:
 - a search plateau.
 
 CUDA Event timing ranks candidates. NCU explains bottlenecks and informs later
-API proposals.
+API proposals. Native task files use the `tilesight-targeted` NCU metric bundle:
+21 counters covering latency, DRAM/L2, resource footprint, occupancy, compute
+pipes, and shared-memory conflicts instead of the thousands of counters in
+`--set full`. Related-system styles whose protocol profiles every candidate
+retain the original full NCU set.
 
 ## Artifacts
 

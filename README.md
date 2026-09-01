@@ -64,6 +64,7 @@ Measured source beam ------------------------------------------+
    v                                                           |
 Hosted API plans the round's strategy allocation               |
    |  controller normalizes count, diversity, and share        |
+   |                                                           |
    v                                                           |
 Hosted API proposes complete replacement source files          |
    |                                                           |
@@ -353,8 +354,7 @@ per-worker strategy slots, usage, failures, and exchanges.
 The default experiment uses `--selection-policy adaptive`,
 `--profile-policy milestone`, `--strategy-allocation-policy ai-planned`,
 `--structural-search-policy enforce`, and compiled-code deduplication. To give
-promotion ablations the same CUDA
-measurement cap per round, add for example:
+promotion ablations the same CUDA measurement cap per round, add for example:
 
 ```bash
 --promotions-per-round 4
@@ -369,7 +369,7 @@ task JSON because they change the experimental treatment, not kernel semantics:
 ```bash
 --evaluation-policy tilesight|cuda-event|ncu
 --tir-evidence-policy auto|visible|hidden
---strategy-allocation-policy ai-planned|fixed|unconstrained
+--strategy-allocation-policy ai-planned|hardware-adaptive|fixed|unconstrained
 ```
 
 ### Related-system style presets
@@ -413,29 +413,31 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
 ```
 
 The runner executes 30 treatments sequentially on one GPU: GEMM, RMSNorm,
-Conv2D, Flash Attention, and fused Add + RMSNorm times this project's native
-full system and the five non-native styles. It uses each preset's canonical
-single-agent mode and materializes the built-in `basic` workload family. The fixed
+Conv2D, Flash Attention, and fused Add + RMSNorm times the measured-archive
+treatment and the five non-native styles. It uses canonical single-agent presets
+for the five related styles and explicit measured-archive controls for the
+`native` output cell. The fixed
 primary/final shapes are GEMM `2048 x 2048 x 2048`, RMSNorm and fused norm
 `8192 x 4096`, Conv2D `N32 H56 W56 C64 F128 K3`, and Flash Attention
 `B1 H32 S1024 D64`. Base task files are not modified. Results go to
-`results/final_eval/related_system_baselines_15m_basic_2048/<kernel>/<style>/`; aggregate
+`results/final_eval/related_system_baselines_15m_basic_2048_measured_archive/<kernel>/<style>/`;
+aggregate
 `suite_summary.json` and `suite_summary.md` files are updated after every run.
 
 Each treatment uses exactly the same fixed-time protocol: one agent,
 `measurement_repeats=3`, a 900-second controller budget, and a 128-round safety
 ceiling that is intentionally unreachable during a normal 15-minute hosted-model
 run. `--search-until-time-budget` keeps searching after an empty candidate round.
-The native system uses TIR-estimated registers during broad TileSight screening,
-so it does not invoke PTXAS for every generated candidate. Exact register and
-hardware evidence is refreshed by seed and milestone NCU profiles. Each promoted
-candidate is compiled once and all CUDA Event timing repeats reuse that compiled
-kernel; `measurement_repeats=3` therefore means three measurements, not three
-compilations. The bundled TileLang tasks also use a bounded persistent evaluator
-worker. Torch, TileLang, TVM, and TileSight are imported once and reused across
-model, measurement, and profile requests, while every request still receives its
-own source, request, response, stdout, and attempt artifacts. The worker restarts
-after 32 requests to bound retained compiler/GPU state; set
+The measured-archive cell extracts compact source-level TIR only for candidates
+selected as next-round parents, then measures every generated candidate with CUDA Event.
+It neither runs TileSight nor NCU during search. Each candidate is compiled once
+and all CUDA Event timing repeats reuse that compiled kernel;
+`measurement_repeats=3` therefore means three measurements, not three
+compilations. The bundled TileLang tasks use a bounded persistent evaluator
+worker. Torch, TileLang, TVM, and TileSight's TIR frontend are imported once and
+reused across analysis and measurement requests, while every request still
+receives its own source, request, response, stdout, and attempt artifacts. The
+worker restarts after 32 requests to bound retained compiler/GPU state; set
 `evaluator.persistent_process` to `false` for strict process-per-stage isolation.
 Final validation always bypasses the warmed worker and runs in a one-shot process.
 At the first safe checkpoint after the deadline, the controller freezes the
@@ -498,9 +500,9 @@ PYTHONPATH=src python3 examples/run_final_related_system_baselines.py \
 
 | Config | Primary GEMM | Primary norm | Primary Conv2D | Primary attention | Default result directory |
 | --- | --- | --- | --- | --- | --- |
-| `basic` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_15m_basic_2048` |
-| `large` | `4096 x 4096 x 4096` | `16384 x 4096` | `N64 H56 W56 C64 F128 K3` | `B1 H32 S2048 D64` | `related_system_baselines_15m_large` |
-| `special` | `4096 x 1024 x 4096` | `4096 x 8192` | `N32 H28 W28 C128 F256 K3` | `B1 H16 S3072 D64 causal` | `related_system_baselines_15m_special` |
+| `basic` | `2048 x 2048 x 2048` | `8192 x 4096` | `N32 H56 W56 C64 F128 K3` | `B1 H32 S1024 D64` | `related_system_baselines_15m_basic_2048_measured_archive` |
+| `large` | `4096 x 4096 x 4096` | `16384 x 4096` | `N64 H56 W56 C64 F128 K3` | `B1 H32 S2048 D64` | `related_system_baselines_15m_large_measured_archive` |
+| `special` | `4096 x 1024 x 4096` | `4096 x 8192` | `N32 H28 W28 C128 F256 K3` | `B1 H16 S3072 D64 causal` | `related_system_baselines_15m_special_measured_archive` |
 
 Norm shapes apply to both RMSNorm and fused Add + RMSNorm. Every configuration
 contains exactly one search case and one same-shape final case. The final case
@@ -512,9 +514,11 @@ custom JSON suites.
 
 For built-in shape configs, the default output directory follows the requested
 budget (`10m`, `15m`, or an exact seconds label), preventing a completed run with
-a different time limit from being silently reused. Resume validation also checks
-the archived `max_search_seconds` value. Use `--output-root PATH` to choose an
-explicit experiment directory.
+a different time limit from being silently reused. The measured-archive protocol
+also has a versioned directory suffix. Resume validation checks both the archived
+time budget and every effective style policy, so a legacy native run cannot be
+mistaken for this algorithm. Use `--output-root PATH` to choose an explicit
+experiment directory.
 
 ### Cost and graph bounds
 
@@ -555,7 +559,9 @@ used according to `--profile-policy`.
 static-valid candidate is compiled, checked, and timed with CUDA Event. The
 effective selection policy becomes `measure-all`, NCU becomes `none`, and
 compiled-identity deduplication is disabled because that identity is emitted by
-the TileSight model stage.
+the TileSight model stage. With explicit `--tir-evidence-policy visible`, a
+separate source-level TIR visitor supplies static generation facts without
+running the analytical performance model.
 
 `--evaluation-policy ncu` also skips TileSight and sends every static-valid
 candidate through correctness and CUDA Event timing. Every correctness-passing
@@ -570,7 +576,8 @@ diagnoses, calibration/trust values, and TIR-derived shared lessons are removed
 from AI planning, generation, repair history, and subsequent-round prompts.
 Measured CUDA Event outcomes, NCU evidence, and actionable compiler/runtime
 failures remain visible. `auto` resolves to `visible` with TileSight and
-`hidden` otherwise. Explicit `visible` is rejected when TileSight is disabled.
+`hidden` otherwise. Explicit `visible` is valid with CUDA Event or NCU and
+activates the independent static TIR stage.
 
 The following treatments isolate one variable at a time:
 
@@ -627,13 +634,24 @@ CUDA Event and NCU baselines intentionally override model-based selection,
 milestone profiling, and compiled-code deduplication.
 
 Strategy allocation and AST novelty are independent policies. Allocation has
-three reproducible modes:
+four reproducible modes:
 
 ```bash
 --strategy-allocation-policy ai-planned    # default evidence-guided allocation
+--strategy-allocation-policy hardware-adaptive # measured-reward archive mode
 --strategy-allocation-policy fixed         # legacy 1 parameter + 1 open + known lanes
 --strategy-allocation-policy unconstrained # one-stage free candidate generation
 ```
+
+The explicit `hardware-adaptive` mode makes no extra planning API request. With
+CUDA Event evaluation and visible static TIR, it always retains one unrestricted
+slot, then allocates the remaining slots from real measured improvement,
+correctness yield, and an uncertainty bonus. The best candidate is always
+retained; remaining parent positions favor competitive candidates from distinct
+strategies and AST/TIR structures. All archive parents are presented in one
+bounded generation request, so beam width does not multiply hosted API calls per
+round. The related-system suite selects this bundle explicitly for its `native`
+cell; ordinary CLI runs continue to default to TileSight and `ai-planned`.
 
 The AI planner receives the current complete kernel, target/workload, bounded
 TileSight and NCU evidence, model trust, prior allocations, discovered

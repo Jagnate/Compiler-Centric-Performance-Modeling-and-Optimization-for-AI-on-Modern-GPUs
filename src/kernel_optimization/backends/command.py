@@ -20,6 +20,7 @@ from ..schema import (
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
+    TIRAnalysis,
     TaskSpec,
 )
 
@@ -72,6 +73,9 @@ class CommandBackend:
 
     def model(self, task: TaskSpec, candidate: Candidate) -> ModelEvaluation:
         return ModelEvaluation.from_dict(self._run("model", task, candidate))
+
+    def analyze_tir(self, task: TaskSpec, candidate: Candidate) -> TIRAnalysis:
+        return TIRAnalysis.from_dict(self._run("tir", task, candidate))
 
     def measure(self, task: TaskSpec, candidate: Candidate) -> Measurement:
         return Measurement.from_dict(self._run("measure", task, candidate))

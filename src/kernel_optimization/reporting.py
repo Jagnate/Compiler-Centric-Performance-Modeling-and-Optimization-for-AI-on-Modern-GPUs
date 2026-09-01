@@ -305,6 +305,8 @@ def _experiment_markdown(
         % _format(api.get("estimated_cost_usd")),
         "| Evaluator wall time | %s s |"
         % _format(evaluator.get("total_wall_seconds")),
+        "| Static TIR analysis calls | %s |"
+        % _format(evaluator.get("tir_analysis_calls")),
         "| CUDA Event candidate calls | %s |"
         % _format(hardware.get("cuda_event_candidate_calls")),
         "| NCU calls | %s |" % _format(hardware.get("ncu_profile_calls")),

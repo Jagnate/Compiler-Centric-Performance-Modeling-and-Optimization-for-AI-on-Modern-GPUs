@@ -20,6 +20,7 @@ from .schema import (
     ModelEvaluation,
     ProfileEvaluation,
     SearchSummary,
+    TIRAnalysis,
     TaskSpec,
 )
 from .source_validation import SourceValidationError, SourceValidator
@@ -54,6 +55,7 @@ __all__ = [
     "StrategyAssignment",
     "StrategyPlan",
     "StructuralStrategyPortfolio",
+    "TIRAnalysis",
     "TaskSpec",
     "get_baseline_style",
     "resolve_baseline_style",

@@ -106,6 +106,33 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
             ],
         )
 
+    def test_native_cell_explicitly_selects_measured_archive_protocol(self) -> None:
+        treatment = suite.selected_treatments(
+            only_kernels=["matmul"], only_styles=["native"]
+        )[0]
+        command = suite.build_command(
+            treatment=treatment,
+            output=Path("results/matmul/native"),
+            max_search_seconds=900.0,
+            snapshot_interval_seconds=300.0,
+            api_url="https://api.example/v1/chat/completions",
+            api_model="test-model",
+            api_key_env="KERNEL_OPT_API_KEY",
+            repository_root=REPOSITORY_ROOT,
+        )
+
+        expected = {
+            "--evaluation-policy": "cuda-event",
+            "--tir-evidence-policy": "visible",
+            "--selection-policy": "measure-all",
+            "--profile-policy": "none",
+            "--structural-search-policy": "observe",
+            "--strategy-allocation-policy": "hardware-adaptive",
+        }
+        for flag, value in expected.items():
+            self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertIn("--no-compiled-dedup", command)
+
     def test_basic_suite_materializes_fixed_shapes_and_equal_measurement_budget(
         self,
     ) -> None:
@@ -213,7 +240,10 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         workload_suite = suite._builtin_workload_suite(args.shape_config)
         self.assertEqual(
             suite._default_output_root(workload_suite).parts[-2:],
-            ("final_eval", "related_system_baselines_15m_basic_2048"),
+            (
+                "final_eval",
+                "related_system_baselines_15m_basic_2048_measured_archive",
+            ),
         )
         self.assertIsNone(args.output_root)
         self.assertEqual(args.max_search_seconds, 900.0)
@@ -236,9 +266,9 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         self.assertEqual(
             outputs,
             {
-                "related_system_baselines_15m_basic_2048",
-                "related_system_baselines_15m_large",
-                "related_system_baselines_15m_special",
+                "related_system_baselines_15m_basic_2048_measured_archive",
+                "related_system_baselines_15m_large_measured_archive",
+                "related_system_baselines_15m_special_measured_archive",
             },
         )
 
@@ -249,9 +279,18 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
         non_integral_minutes = suite._default_output_root(workload_suite, 650.0)
         rounds = suite._default_output_root(workload_suite, 0.0)
 
-        self.assertEqual(ten_minutes.name, "related_system_baselines_10m_basic_2048")
-        self.assertEqual(non_integral_minutes.name, "related_system_baselines_650s_basic_2048")
-        self.assertEqual(rounds.name, "related_system_baselines_rounds_basic_2048")
+        self.assertEqual(
+            ten_minutes.name,
+            "related_system_baselines_10m_basic_2048_measured_archive",
+        )
+        self.assertEqual(
+            non_integral_minutes.name,
+            "related_system_baselines_650s_basic_2048_measured_archive",
+        )
+        self.assertEqual(
+            rounds.name,
+            "related_system_baselines_rounds_basic_2048_measured_archive",
+        )
 
     def test_each_named_config_uses_one_shape_for_search_and_final(self) -> None:
         for config_name in suite.SHAPE_CONFIGS:
@@ -363,6 +402,31 @@ class FinalRelatedSystemBaselineTests(unittest.TestCase):
                 expected_final_validations=1,
                 expected_max_search_seconds=600.0,
             )
+        )
+
+    def test_resume_requires_the_current_effective_style_protocol(self) -> None:
+        treatment = suite.selected_treatments(
+            only_kernels=["matmul"], only_styles=["native"]
+        )[0]
+        current = {
+            "baseline_style": "native",
+            "baseline_style_canonical": False,
+            "evaluation_policy": "cuda-event",
+            "tir_evidence_policy": "visible",
+            "selection_policy": "measure-all",
+            "profile_policy": "none",
+            "compiled_deduplication": False,
+            "structural_search_policy": "observe",
+            "strategy_allocation_policy": "hardware-adaptive",
+        }
+
+        self.assertTrue(
+            suite._summary_uses_current_style_protocol(current, treatment)
+        )
+        legacy = dict(current)
+        legacy["evaluation_policy"] = "tilesight"
+        self.assertFalse(
+            suite._summary_uses_current_style_protocol(legacy, treatment)
         )
 
     def test_all_styles_use_one_shared_median_seed_per_kernel(self) -> None:

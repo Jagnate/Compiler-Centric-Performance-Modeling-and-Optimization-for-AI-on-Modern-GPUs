@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--persistent-worker", action="store_true")
     parser.add_argument(
-        "--stage", choices=("model", "measure", "profile", "final")
+        "--stage", choices=("tir", "model", "measure", "profile", "final")
     )
     parser.add_argument("--request", type=Path)
     parser.add_argument("--response", type=Path)
@@ -244,6 +244,158 @@ def model_candidate(
         write_policy=target_config.get("write_policy", "write-through"),
     )
     return program, result, lowered, snapshots, target, environment, primary
+
+
+def tir_response(
+    request: Mapping[str, Any],
+    *,
+    extractor: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Extract compact source-level TIR facts without running TileSight.
+
+    The source PrimFunc is sufficient for generation guidance and avoids a
+    second lowering/compilation pass for every measured candidate.  CUDA Event
+    remains authoritative for correctness and latency.
+    """
+
+    try:
+        if extractor is None:
+            from tilesight.tir_interface import extract_tir
+
+            extractor = extract_tir
+        plugin = load_workload_plugin(request)
+        candidate_module = load_candidate_module(request)
+        _cases, primary = resolve_cases(request, "measure")
+        program = build_program(
+            request, candidate_module, plugin, primary
+        )
+        extracted = extractor(program)
+        features, diagnostics = _compact_tir_features(extracted)
+        features.update(
+            {
+                "analysis_source": "source-level-tir",
+                "primary_case_id": primary["case_id"],
+                "target": dict(request["task"].get("target") or {}),
+            }
+        )
+        return {
+            "valid": True,
+            "features": _json_safe(features),
+            "diagnostics": diagnostics,
+            "error": None,
+        }
+    except Exception as error:
+        return {
+            "valid": False,
+            "features": {},
+            "diagnostics": [
+                "%s: %s" % (type(error).__name__, error)
+            ],
+            "error": "%s: %s" % (type(error).__name__, error),
+        }
+
+
+def _compact_tir_features(program) -> Tuple[Dict[str, Any], List[str]]:
+    operations = list(program.walk_operations())
+    loops = list(program.root.walk_loops())
+    resource_names = (
+        "global_read_bytes",
+        "global_write_bytes",
+        "l2_read_bytes",
+        "l2_write_bytes",
+        "smem_read_bytes",
+        "smem_write_bytes",
+        "tensor_flops",
+        "cuda_flops",
+        "sfu_ops",
+        "integer_ops",
+        "reduction_ops",
+        "sync_ops",
+    )
+    totals = {
+        name: float(
+            sum(float(getattr(item.resources, name, 0.0)) for item in operations)
+        )
+        for name in resource_names
+    }
+    kind_counts: Dict[str, int] = {}
+    for operation in operations:
+        kind = str(operation.kind)
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    buffers = [
+        {
+            "name": str(buffer.name),
+            "scope": str(buffer.scope),
+            "shape": [str(item) for item in buffer.shape],
+            "dtype": str(buffer.dtype),
+            "size_bytes": buffer.size_bytes,
+            "is_parameter": bool(buffer.is_parameter),
+        }
+        for buffer in list(program.buffers.values())[:24]
+    ]
+    loop_features = [
+        {
+            "name": str(loop.name),
+            "extent": int(loop.extent),
+            "pipeline_depth": int(loop.pipeline_depth),
+            "schedule_policy": str(loop.schedule_policy),
+            "loop_carried_dependency_count": len(
+                loop.loop_carried_dependencies
+            ),
+        }
+        for loop in loops[:24]
+    ]
+    operation_features = [
+        {
+            "name": str(operation.name),
+            "kind": str(operation.kind),
+            "pipeline_stage": int(operation.pipeline_stage),
+            "pipeline_order": operation.pipeline_order,
+            "is_async": bool(operation.is_async),
+            "read_scopes": sorted(
+                {str(access.scope) for access in operation.reads}
+            ),
+            "write_scopes": sorted(
+                {str(access.scope) for access in operation.writes}
+            ),
+            "dependency_count": len(operation.dependencies),
+            "loop_carried_dependency_count": len(
+                operation.loop_carried_dependencies
+            ),
+        }
+        for operation in operations[:32]
+    ]
+    structural_payload = {
+        "grid_shape": list(program.grid_shape),
+        "threads_per_block": int(program.threads_per_block),
+        "buffers": buffers,
+        "loops": loop_features,
+        "operations": operation_features,
+        "operation_kind_counts": kind_counts,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(structural_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    diagnostics = [
+        "%s %s: %s" % (item.level, item.code, item.message)
+        for item in list(program.diagnostics)[:16]
+    ]
+    features = {
+        "symbol": str(program.symbol),
+        "grid_shape": list(program.grid_shape),
+        "threads_per_block": int(program.threads_per_block),
+        "warps_per_block": int(program.warps_per_block),
+        "estimated_shared_memory_bytes": float(program.smem_footprint),
+        "estimated_registers_per_thread": float(program.reg_footprint),
+        "buffers": buffers,
+        "loops": loop_features,
+        "operations": operation_features,
+        "operation_kind_counts": kind_counts,
+        "resource_totals_per_source_iteration": totals,
+        "structural_fingerprint": fingerprint,
+        "diagnostic_count": len(program.diagnostics),
+    }
+    return features, diagnostics
 
 
 def model_response(
@@ -690,6 +842,8 @@ def write_response(path: Path, value: Mapping[str, Any]) -> None:
 def evaluate_stage(stage: str, request: Mapping[str, Any]) -> Dict[str, Any]:
     """Evaluate one request using the same dispatch in one-shot and worker modes."""
 
+    if stage == "tir":
+        return tir_response(request)
     if stage == "model":
         return model_response(request)
     if stage == "measure":

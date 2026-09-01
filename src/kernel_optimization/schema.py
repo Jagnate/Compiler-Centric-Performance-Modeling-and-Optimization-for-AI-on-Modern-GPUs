@@ -361,6 +361,33 @@ class ModelEvaluation:
 
 
 @dataclass(frozen=True)
+class TIRAnalysis:
+    """Compact static TIR facts exposed to source generation.
+
+    This contract intentionally contains no latency prediction.  It separates
+    compiler-visible structure from TileSight's analytical performance model so
+    CUDA Event can remain the search oracle.
+    """
+
+    valid: bool
+    features: JsonDict = field(default_factory=dict)
+    diagnostics: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TIRAnalysis":
+        data = dict(value)
+        data["features"] = dict(data.get("features") or {})
+        data["diagnostics"] = [
+            str(item) for item in data.get("diagnostics") or []
+        ]
+        return cls(**data)
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Measurement:
     """Correctness result and optional measured CUDA-event latency."""
 
@@ -460,6 +487,7 @@ class CandidateRecord:
     candidate: Candidate
     state: str = "generated"
     model: Optional[ModelEvaluation] = None
+    tir: Optional[TIRAnalysis] = None
     measurement: Optional[Measurement] = None
     profile: Optional[ProfileEvaluation] = None
     final_measurement: Optional[Measurement] = None
@@ -482,6 +510,7 @@ class CandidateRecord:
             "candidate": self.candidate.to_dict(include_source=include_source),
             "state": self.state,
             "model": self.model.to_dict() if self.model else None,
+            "tir": self.tir.to_dict() if self.tir else None,
             "measurement": self.measurement.to_dict() if self.measurement else None,
             "profile": self.profile.to_dict() if self.profile else None,
             "final_measurement": (
@@ -499,6 +528,7 @@ class CandidateRecord:
         data = dict(value)
         candidate = Candidate.from_dict(data["candidate"])
         model = data.get("model")
+        tir = data.get("tir")
         measurement = data.get("measurement")
         profile = data.get("profile")
         final_measurement = data.get("final_measurement")
@@ -508,6 +538,7 @@ class CandidateRecord:
             candidate=candidate,
             state=str(data.get("state", "generated")),
             model=ModelEvaluation.from_dict(model) if model else None,
+            tir=TIRAnalysis.from_dict(tir) if tir else None,
             measurement=Measurement.from_dict(measurement) if measurement else None,
             profile=ProfileEvaluation.from_dict(profile) if profile else None,
             final_measurement=(

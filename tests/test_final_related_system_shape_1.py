@@ -45,7 +45,10 @@ class FinalRelatedSystemShapeOneTests(unittest.TestCase):
             baseline_driver._default_output_root(
                 baseline_driver._builtin_workload_suite(args.shape_config)
             ).parts[-2:],
-            ("final_eval", "related_system_baselines_15m_special"),
+            (
+                "final_eval",
+                "related_system_baselines_15m_special_measured_archive",
+            ),
         )
         self.assertIsNone(args.output_root)
         self.assertEqual(args.shape_config, "special")

@@ -37,6 +37,7 @@ from .schema import (
     ModelEvaluation,
     ProfileEvaluation,
     SearchSummary,
+    TIRAnalysis,
     TaskSpec,
 )
 from .selection import create_selection_policy
@@ -95,11 +96,6 @@ def resolve_evaluation_policies(
         if tir_evidence_policy == "auto"
         else tir_evidence_policy
     )
-    if evaluation_policy != "tilesight" and effective_tir_evidence == "visible":
-        raise ValueError(
-            "tir_evidence_policy=visible requires evaluation_policy=tilesight"
-        )
-
     model_enabled = evaluation_policy == "tilesight"
     return {
         "evaluation_policy": evaluation_policy,
@@ -217,10 +213,12 @@ class OptimizationController:
         if strategy_allocation_policy not in {
             "ai-planned",
             "fixed",
+            "hardware-adaptive",
             "unconstrained",
         }:
             raise ValueError(
-                "strategy_allocation_policy must be ai-planned, fixed, or unconstrained"
+                "strategy_allocation_policy must be ai-planned, fixed, "
+                "hardware-adaptive, or unconstrained"
             )
         self.strategy_allocation_policy = strategy_allocation_policy
         if (
@@ -932,6 +930,11 @@ class OptimizationController:
                 )
             raise RuntimeError("the input kernel failed correctness")
         self._clear_infrastructure_failures()
+        if (
+            self.tir_evidence_policy == "visible"
+            and self.evaluation_policy != "tilesight"
+        ):
+            self._analyze_tir_candidates([record], round_number=0)
         self.calibrator.observe(self.task, record)
         if self.evaluation_policy == "ncu":
             record.profile = self._profile_candidate(candidate)
@@ -1110,6 +1113,14 @@ class OptimizationController:
             return self._archive_strategy_plan(plan, evidence)
         if self.strategy_allocation_policy == "fixed":
             plan = self.strategy_portfolio.fixed_plan(
+                self.task,
+                round_number,
+                count,
+                evidence=evidence,
+            )
+            return self._archive_strategy_plan(plan, evidence)
+        if self.strategy_allocation_policy == "hardware-adaptive":
+            plan = self.strategy_portfolio.hardware_adaptive_plan(
                 self.task,
                 round_number,
                 count,
@@ -1413,6 +1424,12 @@ class OptimizationController:
             if item.candidate.generation == round_number
             and item.candidate.lineage_kind == "proposal"
         ]
+        parents = list(self.beam)
+        if (
+            self.tir_evidence_policy == "visible"
+            and self.evaluation_policy != "tilesight"
+        ):
+            self._analyze_tir_candidates(parents, round_number)
         plan = self._plan_round_strategies(round_number)
         assignments = plan.assignments
         used_slots = {
@@ -1441,18 +1458,26 @@ class OptimizationController:
                     "remaining_slots": [item.slot for item in remaining_assignments],
                 },
             )
-        parents = list(self.beam)
         static_failures = [
             item
             for item in self.records.values()
             if item.candidate.generation == round_number
             and item.state == "static-invalid"
         ]
-        for index, parent_record in enumerate(parents):
+        batched_archive = self.strategy_allocation_policy == "hardware-adaptive"
+        generation_parents = parents[:1] if batched_archive else parents
+        parent_by_id = {
+            item.candidate.candidate_id: item for item in parents
+        }
+        for index, parent_record in enumerate(generation_parents):
             if self._time_budget_exhausted(round_number, "candidate-generation"):
                 break
-            parents_left = len(parents) - index
-            request_count = int(math.ceil(proposals_left / parents_left))
+            parents_left = len(generation_parents) - index
+            request_count = (
+                proposals_left
+                if batched_archive
+                else int(math.ceil(proposals_left / parents_left))
+            )
             if request_count <= 0:
                 break
             requested_assignments = remaining_assignments[:request_count]
@@ -1461,6 +1486,7 @@ class OptimizationController:
                 parent_record,
                 request_count,
                 requested_assignments,
+                parent_archive=parents if batched_archive else (),
             )
             if assignments:
                 returned_slots = {
@@ -1477,10 +1503,26 @@ class OptimizationController:
             else:
                 proposals_left -= len(proposals)
             for proposal in proposals:
+                requested_parent_id = str(
+                    proposal.metadata.get("parent_id") or ""
+                )
+                proposal_parent = parent_by_id.get(
+                    requested_parent_id, parent_record
+                )
+                proposal_metadata = dict(proposal.metadata)
+                proposal_metadata["parent_id"] = (
+                    proposal_parent.candidate.candidate_id
+                )
+                proposal = CandidateProposal(
+                    hypothesis=proposal.hypothesis,
+                    source_code=proposal.source_code,
+                    expected_effect=proposal.expected_effect,
+                    metadata=proposal_metadata,
+                )
                 try:
                     candidate = Candidate.from_proposal(
                         self.task,
-                        parent_record.candidate,
+                        proposal_parent.candidate,
                         proposal,
                         generation=round_number,
                     )
@@ -1489,7 +1531,7 @@ class OptimizationController:
                         "proposal_rejected",
                         {
                             "round": round_number,
-                            "parent_id": parent_record.candidate.candidate_id,
+                            "parent_id": proposal_parent.candidate.candidate_id,
                             "hypothesis": proposal.hypothesis,
                             "error": str(error),
                         },
@@ -1517,7 +1559,7 @@ class OptimizationController:
                     record.failure = FailureClassifier.static(error)
                     record.decision_reason = str(error)
                     self._diagnose_and_remember(
-                        record, parent_record, round_number
+                        record, proposal_parent, round_number
                     )
                     static_failures.append(record)
                     self.store.append_event(
@@ -1525,7 +1567,7 @@ class OptimizationController:
                         {
                             "round": round_number,
                             "candidate_id": candidate.candidate_id,
-                            "parent_id": parent_record.candidate.candidate_id,
+                            "parent_id": proposal_parent.candidate.candidate_id,
                             "hypothesis": proposal.hypothesis,
                             "failure": record.failure.to_dict(),
                         },
@@ -1533,7 +1575,7 @@ class OptimizationController:
                 else:
                     self._validate_candidate_novelty(
                         record,
-                        parent_record,
+                        proposal_parent,
                         round_number,
                     )
                 self.store.save_candidate(record)
@@ -1593,6 +1635,7 @@ class OptimizationController:
         parent_record: CandidateRecord,
         request_count: int,
         strategy_assignments: Sequence[StrategyAssignment] = (),
+        parent_archive: Sequence[CandidateRecord] = (),
     ):
         self.generator_calls += 1
         started_at = time.perf_counter()
@@ -1604,7 +1647,7 @@ class OptimizationController:
             requested=request_count,
         )
         evidence = self._evidence(parent_record)
-        if strategy_assignments:
+        if strategy_assignments or parent_archive:
             evidence = dict(evidence)
             evidence["generation_request"] = {
                 "round": round_number,
@@ -1614,6 +1657,12 @@ class OptimizationController:
                 "discovered_strategy_memory": self._discovered_strategy_memory(
                     round_number
                 ),
+                "parent_archive": [
+                    self._parent_for_generation_prompt(item)
+                    for item in parent_archive
+                    if item.candidate.candidate_id
+                    != parent_record.candidate.candidate_id
+                ],
             }
         try:
             proposals = self.generator.generate(
@@ -1723,6 +1772,31 @@ class OptimizationController:
         )
         self._persist_runtime_counters()
         return proposals
+
+    def _parent_for_generation_prompt(
+        self, record: CandidateRecord
+    ) -> Dict[str, Any]:
+        """Return one complete alternate parent for a batched generation call."""
+
+        return {
+            "candidate_id": record.candidate.candidate_id,
+            "generation": record.candidate.generation,
+            "source_name": record.candidate.source_name,
+            "source_sha256": record.candidate.source_sha256,
+            "hypothesis": record.candidate.hypothesis,
+            "measured_latency_ms": (
+                record.measurement.latency_ms
+                if record.measurement and record.measurement.correct
+                else None
+            ),
+            "strategy_id": record.candidate.proposal_metadata.get("strategy_id"),
+            "tir": (
+                record.tir.to_dict()
+                if self.tir_evidence_policy == "visible" and record.tir
+                else None
+            ),
+            "source_code": record.candidate.source_code,
+        }
 
     def _validate_candidate_novelty(
         self,
@@ -2026,6 +2100,56 @@ class OptimizationController:
             < self.task.budget.max_repairs_per_round
         )
 
+    def _analyze_tir_candidates(
+        self, records: Sequence[CandidateRecord], round_number: int
+    ) -> None:
+        """Attach best-effort static TIR facts without gating measurement."""
+
+        analyzer = getattr(self.backend, "analyze_tir", None)
+        for index, record in enumerate(records, start=1):
+            if record.tir is not None:
+                continue
+            if not callable(analyzer):
+                record.tir = TIRAnalysis(
+                    valid=False,
+                    diagnostics=["The configured backend has no TIR analysis stage."],
+                    error="TIR analysis is unsupported by the configured backend.",
+                )
+                self.store.save_candidate(record)
+                continue
+            if self._time_budget_exhausted(round_number, "tir-analysis"):
+                break
+            self.progress.emit(
+                "tir_analysis_progress",
+                "Extracting compact static TIR evidence for a search parent.",
+                round=round_number,
+                candidate=index,
+                total=len(records),
+                candidate_id=record.candidate.candidate_id,
+            )
+            try:
+                record.tir = self._evaluate(
+                    "tir",
+                    record.candidate,
+                    lambda record=record: analyzer(self.task, record.candidate),
+                )
+            except Exception as error:
+                record.tir = TIRAnalysis(
+                    valid=False,
+                    diagnostics=["%s: %s" % (type(error).__name__, error)],
+                    error="%s: %s" % (type(error).__name__, error),
+                )
+            self.store.save_candidate(record)
+            self.store.append_event(
+                "tir_analysis_completed",
+                {
+                    "round": round_number,
+                    "candidate_id": record.candidate.candidate_id,
+                    "valid": record.tir.valid,
+                    "diagnostics": len(record.tir.diagnostics),
+                },
+            )
+
     def _model_candidates(
         self, records: Sequence[CandidateRecord], round_number: int
     ) -> List[CandidateRecord]:
@@ -2296,7 +2420,14 @@ class OptimizationController:
                 item.candidate.candidate_id,
             ),
         )
-        self.beam = ranked[: self.task.budget.beam_width]
+        if (
+            self.strategy_allocation_policy == "hardware-adaptive"
+            and ranked
+            and self.task.budget.beam_width > 1
+        ):
+            self.beam = self._quality_diverse_archive(ranked)
+        else:
+            self.beam = ranked[: self.task.budget.beam_width]
         beam_ids = {item.candidate.candidate_id for item in self.beam}
         for record in self.records.values():
             if not record.is_measured_correct:
@@ -2306,6 +2437,93 @@ class OptimizationController:
             elif record.state in {"measured-beam", "measured"}:
                 record.state = "measured-not-in-beam"
             self.store.save_candidate(record)
+
+    def _quality_diverse_archive(
+        self, ranked: Sequence[CandidateRecord]
+    ) -> List[CandidateRecord]:
+        """Keep the global incumbent plus competitive, diverse parents."""
+
+        width = self.task.budget.beam_width
+        best = ranked[0]
+        best_latency = float(best.measurement.latency_ms)
+        competitive = [
+            item
+            for item in ranked
+            if float(item.measurement.latency_ms) <= best_latency * 1.25
+        ]
+        selected = [best]
+        selected_ids = {best.candidate.candidate_id}
+        strategy_ids = {self._candidate_strategy_id(best)}
+        structural_ids = {self._candidate_structural_identity(best)}
+        while len(selected) < width:
+            remaining = [
+                item
+                for item in competitive
+                if item.candidate.candidate_id not in selected_ids
+            ]
+            if not remaining:
+                remaining = [
+                    item
+                    for item in ranked
+                    if item.candidate.candidate_id not in selected_ids
+                ]
+            if not remaining:
+                break
+            newest_generation = max(
+                item.candidate.generation for item in remaining
+            )
+
+            def archive_score(item: CandidateRecord) -> tuple[float, float, str]:
+                latency = float(item.measurement.latency_ms)
+                strategy_bonus = (
+                    0.12
+                    if self._candidate_strategy_id(item) not in strategy_ids
+                    else 0.0
+                )
+                structural_bonus = (
+                    0.08
+                    if self._candidate_structural_identity(item)
+                    not in structural_ids
+                    else 0.0
+                )
+                recency_bonus = (
+                    0.02 if item.candidate.generation == newest_generation else 0.0
+                )
+                return (
+                    best_latency / latency
+                    + strategy_bonus
+                    + structural_bonus
+                    + recency_bonus,
+                    -latency,
+                    item.candidate.candidate_id,
+                )
+
+            chosen = max(remaining, key=archive_score)
+            selected.append(chosen)
+            selected_ids.add(chosen.candidate.candidate_id)
+            strategy_ids.add(self._candidate_strategy_id(chosen))
+            structural_ids.add(self._candidate_structural_identity(chosen))
+        return selected
+
+    @staticmethod
+    def _candidate_strategy_id(record: CandidateRecord) -> str:
+        return str(
+            record.candidate.proposal_metadata.get("strategy_id")
+            or "unassigned"
+        )
+
+    @staticmethod
+    def _candidate_structural_identity(record: CandidateRecord) -> str:
+        novelty = record.candidate.proposal_metadata.get("ast_novelty")
+        if isinstance(novelty, Mapping):
+            value = novelty.get("candidate_structural_ast_sha256")
+            if value:
+                return str(value)
+        if record.tir and record.tir.valid:
+            value = record.tir.features.get("structural_fingerprint")
+            if value:
+                return str(value)
+        return record.candidate.source_sha256
 
     def _maybe_profile_round(
         self,
@@ -2698,14 +2916,21 @@ class OptimizationController:
                 if self.tir_evidence_policy == "visible" and record.model
                 else None
             ),
+            "tir": (
+                record.tir.to_dict()
+                if self.tir_evidence_policy == "visible" and record.tir
+                else None
+            ),
             "model_trust": (
                 self.trust.to_dict()
                 if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy == "tilesight"
                 else None
             ),
             "calibration": (
                 self.calibrator.to_dict()
                 if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy == "tilesight"
                 else None
             ),
             "shared_memory": self._shared_evidence_for_prompt(record),
@@ -2824,6 +3049,11 @@ class OptimizationController:
                 if self.tir_evidence_policy == "visible" and record.model
                 else None
             ),
+            "tir": (
+                record.tir.to_dict()
+                if self.tir_evidence_policy == "visible" and record.tir
+                else None
+            ),
             "profile": (
                 {
                     "bottleneck": record.profile.bottleneck,
@@ -2864,11 +3094,13 @@ class OptimizationController:
             "model_trust": (
                 self.trust.to_dict()
                 if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy == "tilesight"
                 else None
             ),
             "calibration": (
                 self.calibrator.to_dict()
                 if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy == "tilesight"
                 else None
             ),
             "analytical_model_coverage": (
@@ -2891,6 +3123,29 @@ class OptimizationController:
                     ),
                 }
                 if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy == "tilesight"
+                else None
+            ),
+            "static_tir_coverage": (
+                {
+                    "directly_represented": [
+                        "grid and thread structure",
+                        "buffer shapes, dtypes, scopes, and estimated footprints",
+                        "loop extents and software-pipeline annotations",
+                        "operation kinds, dependencies, and raw resource volumes",
+                    ],
+                    "not_directly_represented": [
+                        "measured latency or utilization",
+                        "compiler instruction scheduling",
+                        "runtime cache behavior and shared-memory bank conflicts",
+                    ],
+                    "routing_rule": (
+                        "Use TIR to form hypotheses, but use CUDA Event outcomes "
+                        "as the only performance reward."
+                    ),
+                }
+                if self.tir_evidence_policy == "visible"
+                and self.evaluation_policy != "tilesight"
                 else None
             ),
             "strategy_outcomes": self._strategy_outcomes_for_prompt(
@@ -3203,6 +3458,13 @@ class OptimizationController:
                 ),
                 "profile_bottleneck": (
                     item.profile.bottleneck if item.profile else None
+                ),
+                "tir_structural_fingerprint": (
+                    item.tir.features.get("structural_fingerprint")
+                    if self.tir_evidence_policy == "visible"
+                    and item.tir
+                    and item.tir.valid
+                    else None
                 ),
             }
             for item in prompt_records

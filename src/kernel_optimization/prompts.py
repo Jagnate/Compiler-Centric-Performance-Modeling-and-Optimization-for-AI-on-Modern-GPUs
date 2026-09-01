@@ -23,7 +23,8 @@ correctness-gated optimization system. You do not execute code, fabricate
 measured results, or modify the reference implementation, evaluator, workload,
 or external interface. Treat fields under observed_evidence as hardware facts.
 Treat fields under predicted_evidence as analytical model predictions that may
-be wrong.
+be wrong. Treat tir_evidence as static compiler structure, not a latency
+measurement or performance prediction.
 
 When shared_evidence_memory is present, cite the lesson IDs that motivated each
 candidate and state which recommendation or failed hypothesis is being acted
@@ -175,6 +176,7 @@ def build_optimization_prompt(
     discovered_strategy_memory = list(
         generation_request.get("discovered_strategy_memory") or []
     )
+    parent_archive = list(generation_request.get("parent_archive") or [])
     strategy_rules = []
     if strategy_assignments:
         strategy_rules = [
@@ -204,6 +206,20 @@ def build_optimization_prompt(
                 "metadata.related_existing_strategies."
             ),
         ]
+    if parent_archive:
+        strategy_rules.extend(
+            [
+                (
+                    "Each candidate may derive from the primary parent or one "
+                    "parent_archive entry; copy the chosen candidate_id exactly "
+                    "into metadata.parent_id."
+                ),
+                (
+                    "Use measured latency to exploit the incumbent while retaining "
+                    "meaningful implementation diversity across the batch."
+                ),
+            ]
+        )
     task_payload = {
         "task_id": task.task_id,
         "description": task.description,
@@ -232,6 +248,7 @@ def build_optimization_prompt(
         },
         "observed_evidence": context.evidence.get("observed"),
         "predicted_evidence": context.evidence.get("predicted"),
+        "tir_evidence": context.evidence.get("tir"),
         "model_trust": context.evidence.get("model_trust"),
         "calibration_state": context.evidence.get("calibration"),
         "shared_evidence_memory": context.evidence.get("shared_memory", []),
@@ -239,6 +256,7 @@ def build_optimization_prompt(
         "context_provenance": context.provenance,
         "strategy_assignments": strategy_assignments,
         "discovered_strategy_memory": discovered_strategy_memory,
+        "parent_archive": parent_archive,
         "rules": [
             "Return the complete replacement content of the kernel source file.",
             "Every candidate must contain a non-empty source_code with the complete Python file.",
@@ -265,6 +283,7 @@ def build_optimization_prompt(
                     },
                     "metadata": {
                         "strategy": "string",
+                        "parent_id": "chosen parent candidate_id",
                         "strategy_slot": "exact assigned slot",
                         "strategy_id": "exact assigned strategy ID",
                         "discovered_strategy": (

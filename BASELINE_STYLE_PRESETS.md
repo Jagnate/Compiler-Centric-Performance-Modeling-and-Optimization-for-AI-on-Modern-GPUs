@@ -34,6 +34,18 @@ The `native` style is the only canonical preset that uses TileSight/TIR.
 
 ## Why Each Mapping Exists
 
+### Measured-Archive Native Cell
+
+The final related-system runner intentionally overrides the canonical `native`
+preset for its `native` output cell. That treatment uses CUDA Event latency as
+the only search reward, extracts bounded source-level TIR only for next-round
+parents, allocates strategies from measured reward plus uncertainty, and submits
+all archive parents in one generation request. The fastest candidate is always
+retained; remaining positions prefer competitive strategy and AST/TIR diversity.
+One unrestricted slot keeps the strategy vocabulary open-ended. This override is
+scoped to `run_final_related_system_baselines.py`; ordinary CLI runs and other
+experiment scripts keep the TileSight-guided canonical native preset.
+
 ### KernelAgent
 
 The proxy retains the recognizable hardware-guided orchestration loop: measured
@@ -120,25 +132,26 @@ policy similarly overrides the preset and is recorded.
 
 ## Running the Full Matrix
 
-The repository provides a final-evaluation runner for the five non-native styles
-across all five existing kernel tasks:
+The repository provides a final-evaluation runner for the measured-archive
+treatment and five related-system styles across all five existing kernel tasks:
 
 ```bash
 PYTHONPATH=src python3 examples/run_final_related_system_baselines.py
 ```
 
-This is a 25-treatment, single-agent, sequential-GPU suite. It reads the original
-task JSON files directly, so primary, public-search, and held-out shapes are not
-changed. The default output layout is
-`results/final_eval/related_system_baselines/<kernel>/<style>/`, plus aggregate
-JSON and Markdown reports. A 1,800-second soft search cap applies independently
-to each treatment. The same command is resumable: completed summaries are reused
-and a nonempty partial treatment receives `--resume`.
+This is a 30-treatment, single-agent, sequential-GPU suite. It materializes one
+derived task per cell without modifying the original task files. The default
+basic-shape output layout is
+`results/final_eval/related_system_baselines_15m_basic_2048_measured_archive/<kernel>/<style>/`,
+plus aggregate JSON and Markdown reports. A 900-second search cap applies
+independently to each treatment. The same command is resumable: compatible
+completed summaries are reused and a nonempty partial treatment receives
+`--resume`.
 
 Use `--dry-run` to audit commands, or repeat `--only-kernel` and `--only-style`
-to select cells. The runner does not pass style-controlled overrides, including
-`--agent-workers`; therefore each result remains the canonical single-agent
-preset rather than being marked as an explicit override.
+to select cells. The five related styles remain canonical single-agent presets.
+Only the `native` cell receives the explicit measured-archive controls described
+above, and its manifest records those overrides as noncanonical.
 
 ## What Is Recorded
 
@@ -166,9 +179,11 @@ model, temperature, source, shape, correctness cases, GPU, and measurement repea
 fixed. Report both best latency and total search cost.
 
 For a time-budget comparison, use `incumbent_history.csv` at common wall-clock
-cutoffs. NCU-heavy styles intentionally spend far more GPU time per candidate,
-whereas `native` uses TileSight to avoid measuring every candidate. Comparing only
-the same number of rounds would hide that systems-level difference.
+cutoffs. NCU-heavy styles intentionally spend far more GPU time per candidate.
+The runner's measured-archive cell measures every candidate with CUDA Event but
+avoids per-candidate NCU, TileSight modeling, and a separate hosted planning
+request. Comparing only the same number of rounds would hide that systems-level
+difference.
 
 To stop each treatment automatically at the same controller budget, add for
 example `--max-search-seconds 3600`. The limit is checked before expensive stages
@@ -179,7 +194,7 @@ explicit `--agent-workers` override is supplied.
 The checked-in `run_final_related_system_baselines.py` protocol additionally uses
 `--search-until-time-budget` and a deliberately high safety round ceiling. This
 prevents an empty generation round or a short task round budget from ending one
-style before the common 1,800-second cutoff. Resumed runs count previously
+style before the common 900-second cutoff. Resumed runs count previously
 checkpointed search time, and only `termination_reason=time-budget` is accepted as
 a valid equal-time result. The suite fixes `measurement_repeats=3` and uses one
 basic shape per kernel for every style.

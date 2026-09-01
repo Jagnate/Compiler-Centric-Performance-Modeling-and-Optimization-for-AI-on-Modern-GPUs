@@ -238,11 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--strategy-allocation-policy",
-        choices=("ai-planned", "fixed", "unconstrained"),
+        choices=("ai-planned", "fixed", "hardware-adaptive", "unconstrained"),
         default="ai-planned",
         help=(
-            "Use an evidence-guided AI plan, the legacy fixed portfolio, or no "
-            "explicit strategy slots."
+            "Use an AI plan, the legacy fixed portfolio, measured-reward adaptive "
+            "allocation, or no explicit strategy slots."
         ),
     )
     parser.add_argument(

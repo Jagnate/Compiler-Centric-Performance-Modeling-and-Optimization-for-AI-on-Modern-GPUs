@@ -130,6 +130,7 @@ def compress_prompt_context(
         compressed_evidence = {
             "observed": _compact_observed(raw_evidence.get("observed")),
             "predicted": _compact_model(raw_evidence.get("predicted")),
+            "tir": _compact_tir(raw_evidence.get("tir")),
             "model_trust": _compact_trust(raw_evidence.get("model_trust")),
             "calibration": _compact_calibration(raw_evidence.get("calibration")),
             "shared_memory": _compact_lessons(
@@ -461,6 +462,55 @@ def _compact_model(value: Any) -> Optional[Dict[str, Any]]:
     return _drop_none(result)
 
 
+def _compact_tir(value: Any) -> Optional[Dict[str, Any]]:
+    """Bound static compiler evidence while preserving optimization signals."""
+
+    if not isinstance(value, Mapping):
+        return None
+    data = dict(value)
+    features = data.get("features")
+    compact_features: Dict[str, Any] = {}
+    if isinstance(features, Mapping):
+        features = dict(features)
+        for key in (
+            "analysis_source",
+            "symbol",
+            "grid_shape",
+            "threads_per_block",
+            "warps_per_block",
+            "estimated_shared_memory_bytes",
+            "estimated_registers_per_thread",
+            "operation_kind_counts",
+            "resource_totals_per_source_iteration",
+            "structural_fingerprint",
+            "diagnostic_count",
+            "primary_case_id",
+            "target",
+        ):
+            if key in features:
+                compact_features[key] = _bounded_value(features[key], depth=3)
+        for key, limit in (("buffers", 16), ("loops", 16), ("operations", 24)):
+            values = features.get(key)
+            if isinstance(values, Sequence) and not isinstance(
+                values, (str, bytes)
+            ):
+                compact_features[key] = [
+                    _bounded_value(item, depth=3) for item in list(values)[:limit]
+                ]
+    result: Dict[str, Any] = {
+        "valid": data.get("valid"),
+        "features": compact_features,
+    }
+    diagnostics = data.get("diagnostics") or []
+    if diagnostics:
+        result["diagnostics"] = [
+            _bounded_text(item, 800) for item in list(diagnostics)[:6]
+        ]
+    if data.get("error"):
+        result["error"] = _bounded_text(data["error"], 1200)
+    return _drop_none(result)
+
+
 def _compact_diagnosis(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, Mapping):
         return None
@@ -565,6 +615,7 @@ def _compact_history_record(value: Mapping[str, Any]) -> Dict[str, Any]:
         "related_existing_strategies",
         "novelty_classification",
         "structural_change",
+        "tir_structural_fingerprint",
     ):
         if key in data:
             result[key] = _bounded_value(data[key], depth=1)

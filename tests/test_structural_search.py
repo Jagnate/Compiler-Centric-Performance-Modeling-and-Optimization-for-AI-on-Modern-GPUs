@@ -19,6 +19,7 @@ from kernel_optimization.schema import (
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
+    TIRAnalysis,
     TaskSpec,
 )
 from kernel_optimization.structural_search import (
@@ -59,10 +60,82 @@ RENAME_ONLY = (
 
 
 class StructuralSearchTests(unittest.TestCase):
-    def test_cli_enforces_structural_search_by_default(self) -> None:
+    def test_cli_keeps_tilesight_structural_search_defaults(self) -> None:
         args = build_parser().parse_args(["--source", "kernel.py", "--task", "task.json"])
         self.assertEqual(args.structural_search_policy, "enforce")
         self.assertEqual(args.strategy_allocation_policy, "ai-planned")
+
+    def test_hardware_adaptive_plan_exploits_real_cuda_event_reward(self) -> None:
+        task = _task("hardware-adaptive", proposals=6)
+        plan = StructuralStrategyPortfolio().hardware_adaptive_plan(
+            task,
+            round_number=3,
+            count=6,
+            evidence={
+                "strategy_outcomes": {
+                    "data-movement": {
+                        "generated": 4,
+                        "measured_correct": 4,
+                        "measured_improvements": 3,
+                        "best_relative_improvement_vs_parent": 0.2,
+                        "mean_relative_improvement_vs_parent": 0.1,
+                    },
+                    "memory-layout": {
+                        "generated": 3,
+                        "measured_correct": 3,
+                        "measured_improvements": 0,
+                        "best_relative_improvement_vs_parent": -0.02,
+                        "mean_relative_improvement_vs_parent": -0.05,
+                    },
+                }
+            },
+        )
+
+        identifiers = [item.strategy_id for item in plan.assignments]
+        self.assertEqual(len(identifiers), 6)
+        self.assertEqual(identifiers[0], "unrestricted-measured-search")
+        self.assertGreater(
+            identifiers.count("data-movement"),
+            identifiers.count("memory-layout"),
+        )
+        self.assertEqual(plan.source, "measured-reward-ucb")
+
+    def test_hardware_adaptive_search_batches_a_multi_parent_archive(self) -> None:
+        source = "VALUE = 0\n\ndef kernel(x):\n    return x\n"
+        task = _task(
+            "batched-archive",
+            proposals=2,
+            entrypoint="kernel",
+            rounds=2,
+            beam_width=2,
+        )
+        generator = _BatchedMeasuredGenerator()
+        backend = _MeasuredTIRBackend()
+        with tempfile.TemporaryDirectory(prefix="batched-archive-") as directory:
+            controller = OptimizationController(
+                task=task,
+                source_code=source,
+                source_name="kernel.py",
+                generator=generator,
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+                evaluation_policy="cuda-event",
+                tir_evidence_policy="visible",
+                selection_policy="measure-all",
+                profile_policy="none",
+                structural_search_policy="observe",
+                strategy_allocation_policy="hardware-adaptive",
+            )
+            summary = controller.run()
+
+        self.assertEqual(len(generator.calls), 2)
+        self.assertEqual(len(generator.calls[0]["parent_archive"]), 0)
+        self.assertEqual(len(generator.calls[1]["parent_archive"]), 1)
+        self.assertEqual(summary.generator_calls, 2)
+        self.assertEqual(summary.planner_calls, 0)
+        self.assertEqual(summary.measured_candidates, 5)
+        self.assertEqual(backend.model_calls, 0)
+        self.assertEqual(backend.tir_calls, 3)
 
     def test_ai_plan_can_allocate_zero_parameter_slots(self) -> None:
         task = _task("zero-parameter", proposals=6)
@@ -701,6 +774,67 @@ class _SimpleBackend:
         return ProfileEvaluation(bottleneck="unused")
 
 
+class _BatchedMeasuredGenerator:
+    last_call_metadata = {}
+    last_exchange = {}
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.next_value = 1
+
+    def generate(self, task, parent, evidence, history, count):
+        del task, history
+        request = dict(evidence["generation_request"])
+        self.calls.append(request)
+        parent_ids = [parent.candidate_id] + [
+            item["candidate_id"] for item in request["parent_archive"]
+        ]
+        proposals = []
+        for index in range(count):
+            value = self.next_value
+            self.next_value += 1
+            proposals.append(
+                CandidateProposal(
+                    "Measured archive proposal %d." % value,
+                    "VALUE = %d\n\ndef kernel(x):\n    return x\n" % value,
+                    metadata={"parent_id": parent_ids[index % len(parent_ids)]},
+                )
+            )
+        return proposals
+
+
+class _MeasuredTIRBackend:
+    def __init__(self) -> None:
+        self.model_calls = 0
+        self.tir_calls = 0
+
+    def analyze_tir(self, task, candidate):
+        del task
+        self.tir_calls += 1
+        return TIRAnalysis(
+            valid=True,
+            features={
+                "threads_per_block": 128,
+                "structural_fingerprint": candidate.source_sha256,
+            },
+        )
+
+    def model(self, task, candidate):
+        del task, candidate
+        self.model_calls += 1
+        raise AssertionError("TileSight model must not run")
+
+    def measure(self, task, candidate):
+        del task
+        value = int(candidate.source_code.splitlines()[0].split("=")[1])
+        latency = 10.0 - value
+        return Measurement(correct=True, latency_ms=latency, samples_ms=[latency])
+
+    def profile(self, task, candidate):
+        del task, candidate
+        raise AssertionError("NCU must not run during native search")
+
+
 class _OpenMemoryGenerator:
     last_call_metadata = {}
     last_exchange = {}
@@ -901,6 +1035,7 @@ def _task(
     proposals: int,
     entrypoint: str = "make_kernel",
     rounds: int = 1,
+    beam_width: int = 1,
 ) -> TaskSpec:
     return TaskSpec(
         task_id=task_id,
@@ -911,7 +1046,7 @@ def _task(
         budget=BudgetConfig(
             rounds=rounds,
             proposals_per_round=proposals,
-            beam_width=1,
+            beam_width=beam_width,
             min_promotions_per_round=1,
             max_promotions_per_round=max(1, proposals),
             max_repairs_per_round=0,

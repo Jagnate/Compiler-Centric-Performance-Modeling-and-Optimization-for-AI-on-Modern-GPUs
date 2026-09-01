@@ -10,6 +10,7 @@ from .schema import (
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
+    TIRAnalysis,
     TaskSpec,
 )
 
@@ -51,6 +52,9 @@ class CandidateGenerator(Protocol):
 
 class PerformanceBackend(Protocol):
     """Evaluate candidates at progressively more expensive fidelity levels."""
+
+    def analyze_tir(self, task: TaskSpec, candidate: Candidate) -> TIRAnalysis:
+        ...
 
     def model(self, task: TaskSpec, candidate: Candidate) -> ModelEvaluation:
         ...

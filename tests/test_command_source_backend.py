@@ -38,11 +38,14 @@ class CommandSourceBackendTests(unittest.TestCase):
             timeout_seconds=30,
         )
 
+        analyzed = backend.analyze_tir(task, candidate)
         modeled = backend.model(task, candidate)
         measured = backend.measure(task, candidate)
         profiled = backend.profile(task, candidate)
         finalized = backend.finalize(task, candidate)
 
+        self.assertTrue(analyzed.valid)
+        self.assertTrue(analyzed.features["source_path_exists"])
         self.assertTrue(modeled.valid)
         self.assertTrue(modeled.metrics["source_path_exists"])
         self.assertTrue(measured.correct)
@@ -80,6 +83,7 @@ class CommandSourceBackendTests(unittest.TestCase):
                 worker_max_requests=8,
             )
             try:
+                analyzed = backend.analyze_tir(task, candidate)
                 modeled = backend.model(task, candidate)
                 measured = backend.measure(task, candidate)
                 profiled = backend.profile(task, candidate)
@@ -88,24 +92,26 @@ class CommandSourceBackendTests(unittest.TestCase):
                 backend.close()
 
             pids = {
+                analyzed.features["worker_pid"],
                 modeled.metrics["worker_pid"],
                 measured.metrics["worker_pid"],
                 profiled.metrics["worker_pid"],
             }
             self.assertEqual(len(pids), 1)
-            self.assertEqual(modeled.metrics["worker_request_index"], 1)
-            self.assertEqual(measured.metrics["worker_request_index"], 2)
-            self.assertEqual(profiled.metrics["worker_request_index"], 3)
+            self.assertEqual(analyzed.features["worker_request_index"], 1)
+            self.assertEqual(modeled.metrics["worker_request_index"], 2)
+            self.assertEqual(measured.metrics["worker_request_index"], 3)
+            self.assertEqual(profiled.metrics["worker_request_index"], 4)
             self.assertEqual(finalized.metrics["stage"], "final")
             self.assertIsNone(backend._worker)
             attempts = sorted(Path(directory).glob("*/*/attempt.json"))
-            self.assertEqual(len(attempts), 4)
+            self.assertEqual(len(attempts), 5)
             metadata = [json.loads(path.read_text()) for path in attempts]
             self.assertEqual(
                 [item["execution_mode"] for item in metadata].count(
                     "persistent-worker"
                 ),
-                3,
+                4,
             )
             self.assertEqual(
                 [item["execution_mode"] for item in metadata].count("one-shot"),

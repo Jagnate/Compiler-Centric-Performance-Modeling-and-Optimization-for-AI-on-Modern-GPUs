@@ -61,7 +61,7 @@ def build_cost_ledger(
     }
     evaluator_seconds = sum(
         float(stage_copy.get(stage, {}).get("seconds", 0.0))
-        for stage in ("model", "measure", "profile", "final")
+        for stage in ("tir", "model", "measure", "profile", "final")
     )
     api_seconds = sum(
         float(stage_copy.get(stage, {}).get("seconds", 0.0))
@@ -86,6 +86,9 @@ def build_cost_ledger(
         "evaluator": {
             "stage_timings": stage_copy,
             "total_wall_seconds": evaluator_seconds,
+            "tir_analysis_calls": int(
+                stage_copy.get("tir", {}).get("calls", 0)
+            ),
             "model_calls": int(stage_copy.get("model", {}).get("calls", 0)),
             "measurement_calls": int(stage_copy.get("measure", {}).get("calls", 0)),
             "final_validation_calls": int(final_validation_calls),

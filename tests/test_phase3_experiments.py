@@ -23,6 +23,7 @@ from kernel_optimization.schema import (
     Measurement,
     ModelEvaluation,
     ProfileEvaluation,
+    TIRAnalysis,
     TaskSpec,
 )
 from kernel_optimization.selection import create_selection_policy
@@ -46,14 +47,16 @@ class PhaseThreeExperimentTests(unittest.TestCase):
         self.assertEqual(resolved["profile_policy"], "every-candidate")
         self.assertFalse(resolved["compiled_deduplication"])
         self.assertEqual(resolved["requested_selection_policy"], "adaptive")
-        with self.assertRaisesRegex(ValueError, "requires"):
-            resolve_evaluation_policies(
-                evaluation_policy="cuda-event",
-                tir_evidence_policy="visible",
-                selection_policy="adaptive",
-                profile_policy="milestone",
-                compiled_deduplication=True,
-            )
+        measured_tir = resolve_evaluation_policies(
+            evaluation_policy="cuda-event",
+            tir_evidence_policy="visible",
+            selection_policy="adaptive",
+            profile_policy="milestone",
+            compiled_deduplication=True,
+        )
+        self.assertEqual(measured_tir["tir_evidence_policy"], "visible")
+        self.assertEqual(measured_tir["selection_policy"], "measure-all")
+        self.assertEqual(measured_tir["profile_policy"], "none")
 
     def test_equal_budget_policies_select_the_requested_count(self) -> None:
         task = _task()
@@ -285,6 +288,34 @@ class PhaseThreeExperimentTests(unittest.TestCase):
                 snapshots[-1]["policies"]["evaluation_policy"], "cuda-event"
             )
 
+    def test_cuda_event_search_exposes_static_tir_without_model_screening(self) -> None:
+        backend = _AblationBackend()
+        generator = _CapturingGenerator()
+        with tempfile.TemporaryDirectory(prefix="phase3-measured-tir-") as directory:
+            controller = OptimizationController(
+                task=_task(),
+                source_code=SOURCE % 0,
+                source_name="kernel.py",
+                generator=generator,
+                backend=backend,
+                store=ArtifactStore(Path(directory)),
+                evaluation_policy="cuda-event",
+                tir_evidence_policy="visible",
+                structural_search_policy="observe",
+                strategy_allocation_policy="unconstrained",
+            )
+            summary = controller.run()
+
+        self.assertEqual(backend.model_calls, 0)
+        self.assertEqual(backend.tir_calls, 1)
+        self.assertEqual(summary.modeled_candidates, 0)
+        evidence = generator.calls[0]["evidence"]
+        self.assertIsNone(evidence["predicted"])
+        self.assertTrue(evidence["tir"]["valid"])
+        self.assertEqual(
+            evidence["tir"]["features"]["threads_per_block"], 128
+        )
+
     def test_ncu_policy_profiles_every_correct_candidate_without_tilesight(self) -> None:
         backend = _AblationBackend()
         with tempfile.TemporaryDirectory(prefix="phase3-ncu-") as directory:
@@ -376,7 +407,10 @@ class PhaseThreeExperimentTests(unittest.TestCase):
         )
         ledger = build_cost_ledger(
             [record],
-            stage_timings={"model": {"calls": 1, "failures": 0, "seconds": 2}},
+            stage_timings={
+                "tir": {"calls": 1, "failures": 0, "seconds": 0.5},
+                "model": {"calls": 1, "failures": 0, "seconds": 2},
+            },
             generator_usage={},
             preflight_calls=1,
             provider_api_requests=1,
@@ -385,7 +419,8 @@ class PhaseThreeExperimentTests(unittest.TestCase):
             profile_calls=0,
             final_validation_calls=0,
         )
-        self.assertEqual(ledger["evaluator"]["total_wall_seconds"], 2.0)
+        self.assertEqual(ledger["evaluator"]["total_wall_seconds"], 2.5)
+        self.assertEqual(ledger["evaluator"]["tir_analysis_calls"], 1)
         self.assertEqual(ledger["hardware"]["observed_kernel_sample_seconds"], 0.003)
         self.assertIn("exclude compilation", ledger["hardware"]["note"])
 
@@ -479,6 +514,15 @@ class _AblationBackend:
         self.model_calls = 0
         self.measure_calls = 0
         self.profile_calls = 0
+        self.tir_calls = 0
+
+    def analyze_tir(self, task, candidate):
+        del task, candidate
+        self.tir_calls += 1
+        return TIRAnalysis(
+            valid=True,
+            features={"threads_per_block": 128, "structural_fingerprint": "tir"},
+        )
 
     def model(self, task, candidate):
         del task

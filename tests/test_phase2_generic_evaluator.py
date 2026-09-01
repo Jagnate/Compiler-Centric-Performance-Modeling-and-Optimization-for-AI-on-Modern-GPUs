@@ -194,6 +194,48 @@ class GenericEvaluatorTests(unittest.TestCase):
         )
         self.assertIsNotNone(response["metrics"]["compiled_identity_sha256"])
 
+    def test_tir_stage_compacts_structure_without_latency_prediction(self) -> None:
+        resource = _Object(
+            global_read_bytes=4096,
+            global_write_bytes=2048,
+            l2_read_bytes=4096,
+            l2_write_bytes=2048,
+            smem_read_bytes=8192,
+            smem_write_bytes=4096,
+            tensor_flops=262144,
+            cuda_flops=0,
+            sfu_ops=0,
+            integer_ops=32,
+            reduction_ops=0,
+            sync_ops=1,
+        )
+        operation = _Object(
+            name="gemm",
+            kind="tensor",
+            resources=resource,
+            pipeline_stage=1,
+            pipeline_order=2,
+            is_async=False,
+            reads=[_Object(scope="shared")],
+            writes=[_Object(scope="fragment")],
+            dependencies=[],
+            loop_carried_dependencies=[],
+        )
+        loop = _FakeTIRLoop(operation)
+        program = _FakeTIRProgram(loop, operation)
+
+        features, diagnostics = evaluator._compact_tir_features(program)
+
+        self.assertEqual(features["threads_per_block"], 128)
+        self.assertEqual(features["operation_kind_counts"], {"tensor": 1})
+        self.assertEqual(
+            features["resource_totals_per_source_iteration"]["tensor_flops"],
+            262144.0,
+        )
+        self.assertIn("structural_fingerprint", features)
+        self.assertNotIn("predicted_latency_ms", features)
+        self.assertEqual(diagnostics, [])
+
     def test_measurement_uses_one_compile_for_all_benchmark_repeats(self) -> None:
         source = (
             "def make_kernel(m=1, n=1, k=1):\n"
@@ -402,6 +444,45 @@ def _fake_environment(request):
 class _Object:
     def __init__(self, **values):
         self.__dict__.update(values)
+
+
+class _FakeTIRLoop:
+    def __init__(self, operation) -> None:
+        self.name = "ko"
+        self.extent = 4
+        self.pipeline_depth = 2
+        self.schedule_policy = "annotated"
+        self.loop_carried_dependencies = []
+        self.operation = operation
+
+    def walk_loops(self):
+        return iter([self])
+
+
+class _FakeTIRProgram:
+    def __init__(self, loop, operation) -> None:
+        self.symbol = "matmul"
+        self.grid_shape = (16, 16, 1)
+        self.threads_per_block = 128
+        self.warps_per_block = 4
+        self.smem_footprint = 32768
+        self.reg_footprint = 64
+        self.buffers = {
+            "a": _Object(
+                name="a",
+                scope="global",
+                shape=(2048, 2048),
+                dtype="float16",
+                size_bytes=8388608,
+                is_parameter=True,
+            )
+        }
+        self.root = loop
+        self._operation = operation
+        self.diagnostics = []
+
+    def walk_operations(self):
+        return iter([self._operation])
 
 
 def _fake_modeler(program, arch, **kwargs):

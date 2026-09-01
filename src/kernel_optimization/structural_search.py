@@ -162,6 +162,12 @@ class StructuralStrategyPortfolio:
     )
 
     _EVIDENCE_TERMS = {
+        "unrestricted-measured-search": (
+            "measured latency",
+            "incumbent",
+            "correctness",
+            "best",
+        ),
         "parameter-tuning": (
             "tile",
             "block",
@@ -225,6 +231,20 @@ class StructuralStrategyPortfolio:
     }
 
     _STRATEGIES: Tuple[Tuple[str, str, bool, str, str], ...] = (
+        (
+            "unrestricted-measured-search",
+            "Unrestricted measured search",
+            False,
+            (
+                "Choose any semantics-preserving source transformation supported "
+                "by the static TIR facts and measured outcomes. Combine parameter "
+                "and structural changes when that is the strongest hypothesis."
+            ),
+            (
+                "Do not repeat a measured loser or claim performance without "
+                "returning a complete, materially changed implementation."
+            ),
+        ),
         (
             "parameter-tuning",
             "Existing schedule parameter tuning",
@@ -429,6 +449,156 @@ class StructuralStrategyPortfolio:
             requested_count=count,
             assignments=assignments,
             round_rationale="Legacy deterministic strategy coverage portfolio.",
+        )
+
+    def hardware_adaptive_plan(
+        self,
+        task: TaskSpec,
+        round_number: int,
+        count: int,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> StrategyPlan:
+        """Allocate slots with a measured-reward UCB portfolio.
+
+        One unrestricted lane prevents the controller's taxonomy from becoming
+        a ceiling on model creativity.  Remaining slots balance CUDA Event
+        reward, correctness yield, and uncertainty; no kernel family receives a
+        hard-coded parameter-tuning quota.
+        """
+
+        if round_number <= 0:
+            raise ValueError("round_number must be positive")
+        if count < 0:
+            raise ValueError("count cannot be negative")
+        if count == 0:
+            return StrategyPlan(
+                round_number=round_number,
+                policy="hardware-adaptive",
+                source="measured-reward-ucb",
+                requested_count=0,
+                assignments=[],
+                round_rationale="No candidate slots were requested.",
+            )
+
+        context = dict(evidence or {})
+        outcomes_value = context.get("strategy_outcomes")
+        outcomes = outcomes_value if isinstance(outcomes_value, Mapping) else {}
+        strategies = {
+            item["strategy_id"]: StructuralStrategy(**item)
+            for item in self.strategy_catalog(task)
+        }
+        ranked = self._strategy_neutral_order(
+            strategies, context, round_number, task.budget.random_seed
+        )
+        tie_rank = {
+            strategy.strategy_id: index for index, strategy in enumerate(ranked)
+        }
+        total_measured = sum(
+            int(dict(value).get("measured_correct", 0) or 0)
+            for value in outcomes.values()
+            if isinstance(value, Mapping)
+        )
+        scores: Dict[str, Dict[str, float]] = {}
+        for strategy_id in strategies:
+            raw = outcomes.get(strategy_id)
+            outcome = dict(raw) if isinstance(raw, Mapping) else {}
+            generated = int(outcome.get("generated", 0) or 0)
+            measured = int(outcome.get("measured_correct", 0) or 0)
+            improved = int(outcome.get("measured_improvements", 0) or 0)
+            best = _finite_float(
+                outcome.get("best_relative_improvement_vs_parent"), 0.0
+            )
+            mean = _finite_float(
+                outcome.get("mean_relative_improvement_vs_parent"), 0.0
+            )
+            correctness_yield = measured / generated if generated else 0.5
+            improvement_yield = improved / measured if measured else 0.0
+            reward = (
+                1.8 * max(best, 0.0)
+                + 0.8 * mean
+                + 0.12 * improvement_yield
+                + 0.04 * correctness_yield
+            )
+            exploration = math.sqrt(
+                math.log(total_measured + len(strategies) + 1.0)
+                / (measured + 1.0)
+            )
+            scores[strategy_id] = {
+                "reward": reward,
+                "exploration": exploration,
+                "score": reward + 0.16 * exploration,
+                "measured": float(measured),
+            }
+
+        selected_ids = ["unrestricted-measured-search"]
+        allocation_counts: Counter[str] = Counter(selected_ids)
+        cap = max(1, int(math.ceil(2.0 * count / 3.0)))
+        while len(selected_ids) < count:
+            eligible = [
+                strategy_id
+                for strategy_id in strategies
+                if allocation_counts[strategy_id] < cap
+            ]
+            if not eligible:
+                eligible = list(strategies)
+            selected = max(
+                eligible,
+                key=lambda strategy_id: (
+                    scores[strategy_id]["score"]
+                    / (1.0 + 0.35 * allocation_counts[strategy_id]),
+                    -tie_rank[strategy_id],
+                    strategy_id,
+                ),
+            )
+            selected_ids.append(selected)
+            allocation_counts[selected] += 1
+
+        family = _kernel_family(task)
+        assignments = []
+        for ordinal, strategy_id in enumerate(selected_ids):
+            strategy = strategies[strategy_id]
+            score = scores[strategy_id]
+            measured = int(score["measured"])
+            mode = "exploit" if measured > 0 and score["reward"] > 0 else "explore"
+            assignments.append(
+                StrategyAssignment(
+                    slot="r%03d-s%02d-%s"
+                    % (round_number, ordinal, strategy_id),
+                    ordinal=ordinal,
+                    strategy_id=strategy_id,
+                    title=strategy.title,
+                    structural_required=strategy.structural_required,
+                    objective=strategy.objective,
+                    prohibited_shortcut=strategy.prohibited_shortcut,
+                    family_hint=_family_hint(family, strategy_id),
+                    selection_reason=(
+                        "unrestricted-safety-lane"
+                        if ordinal == 0
+                        else "cuda-event-reward-ucb"
+                    ),
+                    evidence_terms=[
+                        "reward=%.6f" % score["reward"],
+                        "exploration=%.6f" % score["exploration"],
+                        "measured=%d" % measured,
+                    ],
+                    planning_mode=mode,
+                )
+            )
+        return StrategyPlan(
+            round_number=round_number,
+            policy="hardware-adaptive",
+            source="measured-reward-ucb",
+            requested_count=count,
+            assignments=assignments,
+            raw_plan={
+                "scores": scores,
+                "total_measured_strategy_outcomes": total_measured,
+            },
+            round_rationale=(
+                "CUDA Event outcomes allocate exploitation and uncertainty-aware "
+                "exploration; one unrestricted lane keeps the search open-ended."
+            ),
+            confidence=0.8 if total_measured >= count else 0.5,
         )
 
     def fallback_plan(
@@ -967,6 +1137,10 @@ def _kernel_family(task: TaskSpec) -> str:
 def _family_hint(family: str, strategy_id: str) -> str:
     hints = {
         "matmul": {
+            "unrestricted-measured-search": (
+                "Use measured GEMM outcomes and TIR structure to choose the most "
+                "promising parameter, dataflow, layout, mapping, or algorithmic change."
+            ),
             "parameter-tuning": (
                 "Explore compatible CTA tiles, K tiles, thread counts, and stage depths."
             ),
@@ -996,6 +1170,10 @@ def _family_hint(family: str, strategy_id: str) -> str:
             ),
         },
         "flash-attention": {
+            "unrestricted-measured-search": (
+                "Use measured attention outcomes and TIR structure to choose the "
+                "most promising schedule, online-softmax, dataflow, or mapping change."
+            ),
             "parameter-tuning": (
                 "Explore compatible query/key tiles, thread counts, and stage depths."
             ),
@@ -1024,6 +1202,10 @@ def _family_hint(family: str, strategy_id: str) -> str:
             ),
         },
         "rmsnorm": {
+            "unrestricted-measured-search": (
+                "Use measured RMSNorm outcomes and TIR structure to choose the most "
+                "promising reduction, vectorization, mapping, or dataflow change."
+            ),
             "parameter-tuning": (
                 "Explore compatible row tiles, hidden-dimension chunks, thread counts, "
                 "and vector widths."
@@ -1055,6 +1237,10 @@ def _family_hint(family: str, strategy_id: str) -> str:
             ),
         },
         "add-rmsnorm": {
+            "unrestricted-measured-search": (
+                "Use measured fused-norm outcomes and TIR structure to choose the "
+                "most promising retention, reduction, vectorization, or mapping change."
+            ),
             "parameter-tuning": (
                 "Explore compatible row tiles, hidden-dimension chunks, thread counts, "
                 "and vector widths for the fused residual-add and RMSNorm kernel."
@@ -1087,6 +1273,10 @@ def _family_hint(family: str, strategy_id: str) -> str:
             ),
         },
         "conv2d": {
+            "unrestricted-measured-search": (
+                "Use measured convolution outcomes and TIR structure to choose the "
+                "most promising tiling, staging, layout, mapping, or algorithmic change."
+            ),
             "parameter-tuning": (
                 "Explore compatible CTA M/N/K tiles, thread counts, and stage depths for "
                 "the convolution shape."
@@ -1441,6 +1631,13 @@ def _optional_confidence(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return max(0.0, min(1.0, float(value)))
+
+
+def _finite_float(value: Any, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    result = float(value)
+    return result if math.isfinite(result) else default
 
 
 def _unique_strings(values: Sequence[str]) -> List[str]:

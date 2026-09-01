@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the native system and five related-system styles across five kernels."""
+"""Run measured-archive search and five related styles across five kernels."""
 
 from __future__ import annotations
 
@@ -17,12 +17,15 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from kernel_optimization.baseline_styles import get_baseline_style
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SHAPE_CONFIG = "basic"
 DEFAULT_MAX_SEARCH_SECONDS = 900.0
 DEFAULT_MEASUREMENT_REPEATS = 3
 DEFAULT_TIME_BUDGET_ROUND_CEILING = 128
+SUITE_PROTOCOL_REVISION = "measured-archive-v1"
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,9 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "One stable RTX 3090 shape per kernel, anchored by 2048 square "
             "GEMM. Search and final validation use the same shape."
         ),
-        "output_directory": "related_system_baselines_{budget}_basic_2048",
+        "output_directory": (
+            "related_system_baselines_{budget}_basic_2048_measured_archive"
+        ),
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_m2048_n2048_k2048_rtx3090_basic",
@@ -181,7 +186,9 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "Larger single-shape workloads for stable RTX 3090 timing. Search "
             "and final validation use the same shape."
         ),
-        "output_directory": "related_system_baselines_{budget}_large",
+        "output_directory": (
+            "related_system_baselines_{budget}_large_measured_archive"
+        ),
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_4096_rtx3090_large",
@@ -278,7 +285,9 @@ SHAPE_CONFIGS: Dict[str, Dict[str, Any]] = {
             "longer causal attention. Search and final validation use the same "
             "shape."
         ),
-        "output_directory": "related_system_baselines_{budget}_special",
+        "output_directory": (
+            "related_system_baselines_{budget}_special_measured_archive"
+        ),
         "workloads": {
             "matmul": {
                 "task_id": "tilelang_matmul_m4096_n1024_k4096_rtx3090_special",
@@ -376,7 +385,7 @@ RELATED_STYLES: Tuple[RelatedStyle, ...] = (
     RelatedStyle("avo", "AVO style"),
     RelatedStyle("tilefoundry", "TileFoundry style"),
 )
-NATIVE_STYLE = RelatedStyle("native", "Full system")
+NATIVE_STYLE = RelatedStyle("native", "TIR-guided measured archive")
 ALL_STYLES: Tuple[RelatedStyle, ...] = (NATIVE_STYLE,) + RELATED_STYLES
 
 
@@ -384,8 +393,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run related-system style comparisons on the five kernel tasks. "
-            "The default is 30 treatments: the native full system plus five "
-            "proxy styles across five kernels."
+            "The default is 30 treatments: the measured-archive native cell "
+            "plus five proxy styles across five kernels."
         )
     )
     parser.add_argument(
@@ -414,7 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="include_native",
         action="store_true",
         help=(
-            "Include this project's native full system before the five proxies "
+            "Include the measured-archive native cell before the five proxies "
             "(the default; retained for command compatibility)."
         ),
     )
@@ -610,6 +619,24 @@ def build_command(
         command.append("--skip-api-preflight")
     if no_json_response_format:
         command.append("--no-json-response-format")
+    if treatment.style.key == "native":
+        command.extend(
+            [
+                "--evaluation-policy",
+                "cuda-event",
+                "--tir-evidence-policy",
+                "visible",
+                "--selection-policy",
+                "measure-all",
+                "--profile-policy",
+                "none",
+                "--no-compiled-dedup",
+                "--structural-search-policy",
+                "observe",
+                "--strategy-allocation-policy",
+                "hardware-adaptive",
+            ]
+        )
     if search_until_time_budget:
         command.append("--search-until-time-budget")
     if resume:
@@ -725,12 +752,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 .get("final_validation_candidates", 0)
                 or 0
             )
-            if _summary_uses_current_timing_protocol(
+            current_timing = _summary_uses_current_timing_protocol(
                 summary,
                 budget_mode=args.budget_mode,
                 expected_final_validations=expected_final_validations,
                 expected_max_search_seconds=args.max_search_seconds,
-            ):
+            )
+            current_style = _summary_uses_current_style_protocol(
+                summary, treatment
+            )
+            if current_timing and current_style:
                 status = _completed_treatment_status(
                     summary, budget_mode=args.budget_mode, reused=True
                 )
@@ -750,6 +781,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if status == "ended-early":
                     failure_code = failure_code or 1
                 continue
+            if not current_style:
+                raise SystemExit(
+                    "Existing treatment was produced by a different search "
+                    "protocol; choose a fresh --output-root instead of mixing "
+                    "results: %s" % summary_path
+                )
             print(
                 "\n[%d/%d] %s / %s has a legacy summary without "
                 "post-budget final validation; resuming it once to finalize."
@@ -1141,6 +1178,7 @@ def _derive_task(
         "round_ceiling": round_ceiling,
         "measurement_repeats": measurement_repeats,
     }
+    metadata["comparison_protocol_revision"] = SUITE_PROTOCOL_REVISION
     task["metadata"] = metadata
     return task
 
@@ -1325,6 +1363,44 @@ def _summary_uses_current_timing_protocol(
     return True
 
 
+def _summary_uses_current_style_protocol(
+    summary: Mapping[str, Any], treatment: Treatment
+) -> bool:
+    """Reject completed cells produced by an older effective search policy."""
+
+    preset = get_baseline_style(treatment.style.key)
+    if treatment.style.key == "native":
+        expected = {
+            "baseline_style": "native",
+            "evaluation_policy": "cuda-event",
+            "tir_evidence_policy": "visible",
+            "selection_policy": "measure-all",
+            "profile_policy": "none",
+            "compiled_deduplication": False,
+            "structural_search_policy": "observe",
+            "strategy_allocation_policy": "hardware-adaptive",
+        }
+        expected_canonical = False
+    else:
+        expected = {
+            "baseline_style": preset.name,
+            "evaluation_policy": preset.evaluation_policy,
+            "tir_evidence_policy": preset.tir_evidence_policy,
+            "selection_policy": preset.selection_policy,
+            "profile_policy": preset.profile_policy,
+            "compiled_deduplication": preset.compiled_deduplication,
+            "structural_search_policy": preset.structural_search_policy,
+            "strategy_allocation_policy": preset.strategy_allocation_policy,
+        }
+        expected_canonical = True
+    return (
+        bool(summary.get("baseline_style_canonical")) == expected_canonical
+        and all(
+            summary.get(name) == value for name, value in expected.items()
+        )
+    )
+
+
 def _apply_shared_seed_references(
     rows: Sequence[Mapping[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
@@ -1419,7 +1495,7 @@ def _write_reports(
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "claim": (
             (
-                "This project's native full system plus five common-harness "
+                "The measured-archive treatment plus five common-harness "
                 "control-flow style emulations."
                 if includes_native
                 else "Common-harness control-flow style emulations."
@@ -1428,6 +1504,7 @@ def _write_reports(
             "published results."
         ),
         "output_root": str(output_root),
+        "comparison_protocol_revision": SUITE_PROTOCOL_REVISION,
         "planned_treatments": len(treatments),
         "agent_workers": 1,
         "budget_mode": budget_mode,

@@ -23,6 +23,8 @@ class BaselineStyleTests(unittest.TestCase):
         )
         self.assertEqual(args.baseline_style, "native")
         self.assertEqual(args.evaluation_policy, "tilesight")
+        self.assertEqual(args.tir_evidence_policy, "auto")
+        self.assertEqual(args.structural_search_policy, "enforce")
         self.assertEqual(args.strategy_allocation_policy, "ai-planned")
 
     def test_all_documented_styles_are_registered(self) -> None:
@@ -54,6 +56,18 @@ class BaselineStyleTests(unittest.TestCase):
         self.assertEqual(resolved.task.budget.beam_width, 3)
         self.assertNotIn("baseline_style_protocol", resolved.task.metadata)
         self.assertFalse(resolved.emulated)
+
+    def test_native_style_remains_tilesight_guided_by_default(self) -> None:
+        resolved = _resolve("native", _task())
+
+        self.assertEqual(resolved.evaluation_policy, "tilesight")
+        self.assertEqual(resolved.tir_evidence_policy, "auto")
+        self.assertEqual(resolved.selection_policy, "adaptive")
+        self.assertEqual(resolved.profile_policy, "milestone")
+        self.assertTrue(resolved.compiled_deduplication)
+        self.assertEqual(resolved.structural_search_policy, "enforce")
+        self.assertEqual(resolved.strategy_allocation_policy, "ai-planned")
+        self.assertTrue(resolved.canonical)
 
     def test_kernelagent_uses_single_agent_ncu_guided_beam(self) -> None:
         task = replace(

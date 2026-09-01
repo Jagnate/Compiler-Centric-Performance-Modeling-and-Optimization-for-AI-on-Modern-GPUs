@@ -27,7 +27,19 @@ def evaluate(stage: str, request_path: Path, response_path: Path, request_index:
         raise RuntimeError("candidate metadata must not duplicate source_code")
 
     worker = {"worker_pid": os.getpid(), "worker_request_index": request_index}
-    if stage == "model":
+    if stage == "tir":
+        response = {
+            "valid": True,
+            "features": {
+                "threads_per_block": 128,
+                "structural_fingerprint": digest,
+                "source_path_exists": source_path.is_file(),
+                **worker,
+            },
+            "diagnostics": [],
+            "error": None,
+        }
+    elif stage == "model":
         response = {
             "valid": True,
             "predicted_latency_ms": 1.25,
@@ -98,7 +110,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--persistent-worker", action="store_true")
     parser.add_argument(
-        "--stage", choices=("model", "measure", "profile", "final")
+        "--stage", choices=("tir", "model", "measure", "profile", "final")
     )
     parser.add_argument("--request", type=Path)
     parser.add_argument("--response", type=Path)
